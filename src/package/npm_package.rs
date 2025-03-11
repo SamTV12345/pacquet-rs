@@ -32,7 +32,8 @@ pub struct NpmPackage {
     pub licenses: Option<Vec<License>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub license: Option<LicenseType>,
-
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub funding: Option<FundingType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -57,7 +58,8 @@ pub struct NpmPackage {
     pub optional_dependencies: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overrides: Option<HashMap<String, String>>,
-
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engines: Option<EnginesType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +71,21 @@ pub struct NpmPackage {
     pub dist: Distribution,
     #[serde(skip_serializing)]
     pub depth_traces: Option<Vec<Vec<RegistryKey>>>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum EnginesType {
+    EngineMap(HashMap<String, String>),
+    Engine(Vec<String>),
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum FundingType {
+    Funding(Funding),
+    FundingVec(Vec<Funding>),
+    String(String),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -91,7 +108,7 @@ impl From<NpmPackage> for PackageMetaRecorder {
             peer_dependencies_meta: val.peer_dependencies_meta,
             dependencies: val.dependencies,
             cpu: val.cpu,
-
+            engines: val.engines,
             os: val.os,
             bin: val.bin.clone(),
             depth_traces: val.depth_traces,
