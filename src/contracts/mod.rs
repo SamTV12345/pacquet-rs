@@ -1,6 +1,6 @@
 mod actor;
 mod cache;
-mod constants;
+pub mod constants;
 mod lockfile;
 mod logger;
 mod pipe;

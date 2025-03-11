@@ -1,11 +1,4 @@
-use crate::lockfile::constants::{
-    AUTO_INSTALL_PEERS, CPU, DEPENDENCIES, DEV_DEPENDENCIES, EXCLUDE_LINKS_FROM_LOCKFILE, HAS_BIN,
-    LOCKFILE_VERSION, OPTIONAL, OPT_DEPENDENCIES, OS, PACKAGES, PEER_DEPENDENCIES,
-    AUTO_INSTALL_PEERS, CPU, DEPENDENCIES, DEV_DEPENDENCIES, ENGINES, EXCLUDE_LINKS_FROM_LOCKFILE,
-    HAS_BIN, LOCKFILE_VERSION, OPTIONAL, OPT_DEPENDENCIES, OS, PACKAGES, PEER_DEPENDENCIES,
-    PEER_DEPENDENCIES_META, PEER_SUFFIX_MAX_LENGTH, RESOLUTION, SETTINGS, SNAPSHOTS, SPECIFIER,
-    VERSION,
-};
+use crate::lockfile::constants::{AUTO_INSTALL_PEERS, CPU, DEPENDENCIES, DEV_DEPENDENCIES, ENGINES, EXCLUDE_LINKS_FROM_LOCKFILE, HAS_BIN, LOCKFILE_VERSION, OPTIONAL, OPT_DEPENDENCIES, OS, PACKAGES, PEER_DEPENDENCIES, PEER_DEPENDENCIES_META, PEER_SUFFIX_MAX_LENGTH, RESOLUTION, SETTINGS, SNAPSHOTS, SPECIFIER, VERSION};
 use crate::package::{EnginesType, PackageMetaHandler};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -486,13 +479,13 @@ fn ordered_map<S>(
 where
     S: serde::Serializer,
 {
-    return match value {
-        None => return serializer.serialize_none(),
+    match value {
+        None => serializer.serialize_none(),
         Some(v) => {
             let ordered: BTreeMap<_, _> = v.iter().collect();
             ordered.serialize(serializer)
         }
-    };
+    }
 }
 
 impl Default for LockfileStructure {

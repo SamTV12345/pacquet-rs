@@ -1,5 +1,7 @@
 use clap::Parser;
 use std::{env, fs};
+use crate::contracts::constants::{LOCK_FILE_NAME, PACKAGE_JSON};
+
 /// Command line arguments
 ///
 /// # Example
@@ -39,8 +41,8 @@ impl From<Install> for ProgramDesire {
         };
 
         // This needs to be done before all the other checks
-        program_desire.package_json_available = fs::exists("package.json").unwrap_or(false);
-        program_desire.craft_lock_available = fs::exists("craft-lock.yaml").unwrap_or(false);
+        program_desire.package_json_available = fs::exists(PACKAGE_JSON).unwrap_or(false);
+        program_desire.craft_lock_available = fs::exists(LOCK_FILE_NAME).unwrap_or(false);
 
         // In that case we only install dev dependencies
         if val.dev {

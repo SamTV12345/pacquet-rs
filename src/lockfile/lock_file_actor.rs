@@ -10,6 +10,7 @@ use crate::pipeline::ResolvedItem;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use crate::contracts::constants::LOCK_FILE_NAME;
 
 pub struct LockFileActor {
     resolved_items: Vec<ResolvedItem>,
@@ -28,7 +29,7 @@ impl LockFileActor {
     }
 
     fn persist_lockfile_structure(content: &str) -> Result<(), LockfileError> {
-        fs::write("craft-lock.yaml", content)
+        fs::write(LOCK_FILE_NAME, content)
             .map_err(|e| LockfileError::FileWriteError(e.to_string()))?;
         Ok(())
     }
@@ -200,9 +201,9 @@ impl Lockfile<LockfileStructure> for LockFileActor {
     }
 
     fn run(&self) -> Result<(), LockfileError> {
-        if fs::exists("craft-lock.yaml").expect("Can't check existence of file does_not_exist.txt")
+        if fs::exists(LOCK_FILE_NAME).expect("Can't check existence of file does_not_exist.txt")
         {
-            let mut lockfile_structure = Self::read_lock_file(Path::new("craft-lock.yaml"))?;
+            let mut lockfile_structure = Self::read_lock_file(Path::new(LOCK_FILE_NAME))?;
             self.handle_importers(&mut lockfile_structure)?;
             self.handle_packages(&mut lockfile_structure);
             Self::persist_lockfile_structure(&lockfile_structure.write_to_string())?;
