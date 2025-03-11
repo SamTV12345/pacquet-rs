@@ -1,6 +1,6 @@
+use crate::contracts::constants::{LOCK_FILE_NAME, PACKAGE_JSON};
 use clap::Parser;
 use std::{env, fs};
-use crate::contracts::constants::{LOCK_FILE_NAME, PACKAGE_JSON};
 
 /// Command line arguments
 ///
