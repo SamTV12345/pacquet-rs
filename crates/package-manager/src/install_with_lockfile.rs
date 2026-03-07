@@ -120,10 +120,16 @@ where
             merge_project_snapshot(existing_lockfile, lockfile_importer_id, project_snapshot);
 
         let lockfile = Lockfile {
-            lockfile_version: ComVer::new(6, 0).try_into().expect("lockfile version compatible"),
+            lockfile_version: ComVer::new(9, 0),
             settings: None,
             never_built_dependencies: None,
+            ignored_optional_dependencies: None,
             overrides: None,
+            package_extensions_checksum: None,
+            patched_dependencies: None,
+            pnpmfile_checksum: None,
+            catalogs: None,
+            time: None,
             project_snapshot,
             packages: (!packages.is_empty()).then_some(packages),
         };
@@ -370,14 +376,19 @@ fn to_relative_path(from: &Path, to: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pacquet_lockfile::LockfileVersion;
 
     fn empty_lockfile(project_snapshot: RootProjectSnapshot) -> Lockfile {
         Lockfile {
-            lockfile_version: LockfileVersion::try_from(ComVer::new(6, 0)).unwrap(),
+            lockfile_version: ComVer::new(9, 0),
             settings: None,
             never_built_dependencies: None,
+            ignored_optional_dependencies: None,
             overrides: None,
+            package_extensions_checksum: None,
+            patched_dependencies: None,
+            pnpmfile_checksum: None,
+            catalogs: None,
+            time: None,
             project_snapshot,
             packages: None,
         }

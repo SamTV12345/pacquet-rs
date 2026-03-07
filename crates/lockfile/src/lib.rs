@@ -1,6 +1,7 @@
 mod comver;
 mod dependency_path;
 mod load_lockfile;
+mod lockfile_file;
 mod lockfile_version;
 mod multi_project_snapshot;
 mod package_snapshot;
@@ -37,28 +38,37 @@ pub use save_lockfile::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LockfileSettings {
-    auto_install_peers: bool,
-    exclude_links_from_lockfile: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_install_peers: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude_links_from_lockfile: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peers_suffix_max_length: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inject_workspace_packages: Option<bool>,
 }
 
-/// * Specification: <https://github.com/pnpm/spec/blob/master/lockfile/6.0.md>
-/// * Reference: <https://github.com/pnpm/pnpm/blob/main/lockfile/lockfile-types/src/index.ts>
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// Internal lockfile representation used by Pacquet.
+///
+/// This struct is intentionally format-agnostic: read/write code converts between
+/// this internal model and concrete on-disk lockfile formats.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Lockfile {
-    pub lockfile_version: LockfileVersion<6>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lockfile_version: ComVer,
     pub settings: Option<LockfileSettings>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Legacy v6 field.
     pub never_built_dependencies: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignored_optional_dependencies: Option<Vec<String>>,
     pub overrides: Option<HashMap<String, String>>,
-    #[serde(flatten)]
+    pub package_extensions_checksum: Option<String>,
+    pub patched_dependencies: Option<HashMap<String, serde_yaml::Value>>,
+    pub pnpmfile_checksum: Option<String>,
+    pub catalogs: Option<serde_yaml::Value>,
+    pub time: Option<HashMap<String, String>>,
     pub project_snapshot: RootProjectSnapshot,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub packages: Option<HashMap<DependencyPath, PackageSnapshot>>,
 }
 

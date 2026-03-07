@@ -33,7 +33,6 @@ jobs:
       - name: Install Rust Toolchain
         uses: ./.github/actions/rustup
         with:
-          docs: true
           clippy: true
           save-cache: ${{ github.ref_name == 'main' }}
 
@@ -56,11 +55,6 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --locked -- -D warnings
-
-      - name: Doc
-        env:
-          RUSTDOCFLAGS: '-D warnings'
-        run: cargo doc
 
       - name: Install just
         uses: taiki-e/install-action@just

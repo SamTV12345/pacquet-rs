@@ -74,6 +74,7 @@ fn should_install_exec_files() {
     #[cfg(unix)]
     {
         use pacquet_testing_utils::fs::is_path_executable;
+        use pipe_trait::Pipe;
         use pretty_assertions::assert_eq;
         use std::{fs::File, iter::repeat, os::unix::fs::MetadataExt};
 

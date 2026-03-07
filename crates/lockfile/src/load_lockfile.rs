@@ -1,4 +1,4 @@
-use crate::Lockfile;
+use crate::{Lockfile, lockfile_file::LockfileFileError, lockfile_file::parse_lockfile_content};
 use derive_more::{Display, Error};
 use pacquet_diagnostics::miette::{self, Diagnostic};
 use pipe_trait::Pipe;
@@ -23,6 +23,10 @@ pub enum LoadLockfileError {
     #[display("Failed to parse lockfile content as YAML: {_0}")]
     #[diagnostic(code(pacquet_lockfile::parse_yaml))]
     ParseYaml(serde_yaml::Error),
+
+    #[display("Failed to parse lockfile format: {_0}")]
+    #[diagnostic(code(pacquet_lockfile::parse_lockfile))]
+    ParseLockfileFormat(#[error(not(source))] String),
 }
 
 impl Lockfile {
@@ -34,7 +38,12 @@ impl Lockfile {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return error.pipe(LoadLockfileError::ReadFile).pipe(Err),
         };
-        content.pipe_as_ref(serde_yaml::from_str).map_err(LoadLockfileError::ParseYaml)
+        parse_lockfile_content(&content).map(Some).map_err(|error| match error {
+            LockfileFileError::ParseHeader(parse_error)
+            | LockfileFileError::ParseV6(parse_error)
+            | LockfileFileError::ParseV9(parse_error) => LoadLockfileError::ParseYaml(parse_error),
+            other => LoadLockfileError::ParseLockfileFormat(other.to_string()),
+        })
     }
 
     /// Load lockfile from the current directory.

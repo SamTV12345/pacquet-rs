@@ -3,7 +3,7 @@ use derive_more::{From, TryInto};
 use serde::{Deserialize, Serialize};
 
 /// Snapshot of the root project.
-#[derive(Debug, PartialEq, Deserialize, Serialize, From, TryInto)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, From, TryInto)]
 #[allow(clippy::large_enum_variant)]
 #[serde(untagged)]
 pub enum RootProjectSnapshot {

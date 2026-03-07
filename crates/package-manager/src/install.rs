@@ -86,7 +86,11 @@ where
             }
             (true, true, Some(lockfile)) => {
                 let Lockfile { lockfile_version, project_snapshot, packages, .. } = lockfile;
-                assert_eq!(lockfile_version.major, 6); // compatibility check already happens at serde, but this still helps preventing programmer mistakes.
+                assert!(
+                    lockfile_version.major == 6 || lockfile_version.major == 9,
+                    "unsupported lockfile major version: {}",
+                    lockfile_version.major
+                );
 
                 let project_snapshot = match project_snapshot {
                     RootProjectSnapshot::Single(snapshot) => snapshot,

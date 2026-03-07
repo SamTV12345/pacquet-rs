@@ -1,4 +1,4 @@
-use crate::Lockfile;
+use crate::{Lockfile, lockfile_file::render_lockfile_content};
 use derive_more::{Display, Error};
 use pacquet_diagnostics::miette::{self, Diagnostic};
 use std::{
@@ -36,7 +36,7 @@ impl Lockfile {
 
     /// Save lockfile to a specific `path`.
     pub fn save_to_path(&self, path: &Path) -> Result<(), SaveLockfileError> {
-        let yaml = serde_yaml::to_string(self).map_err(SaveLockfileError::SerializeYaml)?;
+        let yaml = render_lockfile_content(self).map_err(SaveLockfileError::SerializeYaml)?;
         fs::write(path, yaml)
             .map_err(|error| SaveLockfileError::WriteFile { path: path.to_path_buf(), error })
     }
@@ -45,17 +45,23 @@ impl Lockfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LockfileVersion, ProjectSnapshot, RootProjectSnapshot};
+    use crate::{ComVer, ProjectSnapshot, RootProjectSnapshot};
     use tempfile::tempdir;
 
     #[test]
     fn save_and_load_roundtrip() {
         let dir = tempdir().unwrap();
         let lockfile = Lockfile {
-            lockfile_version: LockfileVersion::try_from(crate::ComVer::new(6, 0)).unwrap(),
+            lockfile_version: ComVer::new(9, 0),
             settings: None,
             never_built_dependencies: None,
+            ignored_optional_dependencies: None,
             overrides: None,
+            package_extensions_checksum: None,
+            patched_dependencies: None,
+            pnpmfile_checksum: None,
+            catalogs: None,
+            time: None,
             project_snapshot: RootProjectSnapshot::Single(ProjectSnapshot::default()),
             packages: None,
         };
