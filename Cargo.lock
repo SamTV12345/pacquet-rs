@@ -1067,7 +1067,7 @@ dependencies = [
  "backtrace",
  "backtrace-ext",
  "is-terminal",
- "miette-derive",
+ "miette-derive 5.10.0",
  "once_cell",
  "owo-colors",
  "supports-color",
@@ -1080,10 +1080,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "miette"
+version = "7.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f98efec8807c63c752b5bd61f862c165c115b0a35685bdcfd9238c7aeb592b7"
+dependencies = [
+ "cfg-if",
+ "miette-derive 7.6.0",
+ "unicode-width",
+]
+
+[[package]]
 name = "miette-derive"
 version = "5.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49e7bc1560b95a3c4a25d03de42fe76ca718ab92d1a22a55b9b4cf67b3ae635c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "miette-derive"
+version = "7.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db5b29714e950dbb20d5e6f74f9dcec4edbcc1067bb7f8ed198c097b8c1a818b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1161,12 +1183,12 @@ dependencies = [
 
 [[package]]
 name = "node-semver"
-version = "2.1.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84f390c1756333538f2aed01cf280a56bc683e199b9804a504df6e7320d40116"
+checksum = "3b1a233ea5dc37d2cfba31cfc87a5a56cc2a9c04e3672c15d179ca118dae40a7"
 dependencies = [
  "bytecount",
- "miette",
+ "miette 7.6.0",
  "nom",
  "serde",
  "thiserror",
@@ -1327,7 +1349,7 @@ dependencies = [
  "dunce",
  "home",
  "insta",
- "miette",
+ "miette 5.10.0",
  "pacquet-diagnostics",
  "pacquet-executor",
  "pacquet-fs",
@@ -1352,7 +1374,7 @@ dependencies = [
 name = "pacquet-diagnostics"
 version = "0.0.1"
 dependencies = [
- "miette",
+ "miette 5.10.0",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1362,7 +1384,7 @@ name = "pacquet-executor"
 version = "0.0.1"
 dependencies = [
  "derive_more",
- "miette",
+ "miette 5.10.0",
 ]
 
 [[package]]
@@ -1371,7 +1393,7 @@ version = "0.0.1"
 dependencies = [
  "derive_more",
  "junction",
- "miette",
+ "miette 5.10.0",
 ]
 
 [[package]]
@@ -1458,7 +1480,7 @@ dependencies = [
  "derive_more",
  "futures-util",
  "insta",
- "miette",
+ "miette 5.10.0",
  "node-semver",
  "pacquet-fs",
  "pacquet-lockfile",
@@ -1486,7 +1508,7 @@ version = "0.0.1"
 dependencies = [
  "derive_more",
  "insta",
- "miette",
+ "miette 5.10.0",
  "pipe-trait",
  "pretty_assertions",
  "serde",
@@ -1500,7 +1522,7 @@ name = "pacquet-registry"
 version = "0.0.1"
 dependencies = [
  "derive_more",
- "miette",
+ "miette 5.10.0",
  "node-semver",
  "pacquet-diagnostics",
  "pacquet-network",
@@ -1536,7 +1558,7 @@ name = "pacquet-store-dir"
 version = "0.0.1"
 dependencies = [
  "derive_more",
- "miette",
+ "miette 5.10.0",
  "pacquet-fs",
  "pipe-trait",
  "pretty_assertions",
@@ -1553,7 +1575,7 @@ dependencies = [
  "base64",
  "dashmap",
  "derive_more",
- "miette",
+ "miette 5.10.0",
  "pacquet-diagnostics",
  "pacquet-fs",
  "pacquet-network",
@@ -1720,9 +1742,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.66"
+version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18fb31db3f9bddb2ea821cde30a9f70117e3f119938b5ee630b7403aa6e2ead9"
+checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
 ]
@@ -1735,9 +1757,9 @@ checksum = "8bccbff07d5ed689c4087d20d7307a52ab6141edeedf487c3876a55b86cf63df"
 
 [[package]]
 name = "quote"
-version = "1.0.32"
+version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50f3b39ccfb720540debaa0164757101c08ecb8d326b15358ce76a62c7e85965"
+checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]
@@ -2161,7 +2183,7 @@ dependencies = [
  "base64",
  "digest",
  "hex",
- "miette",
+ "miette 5.10.0",
  "serde",
  "sha-1",
  "sha2",
@@ -2227,9 +2249,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "2.0.28"
+version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04361975b3f5e348b2189d8dc55bc942f278b2d482a6a0365de5bdd62d351567"
+checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2532,9 +2554,9 @@ checksum = "1dd624098567895118886609431a7c3b8f516e41d30e0643f03d94592a147e36"
 
 [[package]]
 name = "unicode-width"
-version = "0.1.10"
+version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0edd1e5b14653f783770bce4a4dabb4a5108a5370a5f5d8cfe8710c361f6c8b"
+checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
 name = "unicode-xid"
