@@ -240,7 +240,7 @@ fn frozen_lockfile_should_fail_without_pnpm_lock_yaml() {
 fn workspace_install_from_subproject_should_write_shared_lockfile() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
-    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+    let AddMockedRegistry { store_dir, cache_dir, mock_instance, .. } = npmrc_info;
 
     let project_dir = workspace.join("packages/app");
     fs::create_dir_all(&project_dir).expect("create workspace project");
@@ -256,6 +256,16 @@ fn workspace_install_from_subproject_should_write_shared_lockfile() {
         },
     });
     fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+    fs::write(
+        project_dir.join(".npmrc"),
+        format!(
+            "registry={}\nstore-dir={}\ncache-dir={}\n",
+            mock_instance.url(),
+            store_dir.display(),
+            cache_dir.display()
+        ),
+    )
+    .expect("write .npmrc for subproject");
 
     pacquet.with_args(["-C", project_dir.to_str().unwrap(), "install"]).assert().success();
 

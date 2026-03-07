@@ -3,6 +3,8 @@ mod custom_deserializer;
 use pacquet_store_dir::StoreDir;
 use pipe_trait::Pipe;
 use serde::Deserialize;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use std::{fs, path::PathBuf};
 
 use crate::custom_deserializer::{
@@ -165,6 +167,14 @@ pub struct Npmrc {
     pub resolve_peers_from_workspace_root: bool,
 }
 
+#[cfg(test)]
+static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn env_lock() -> &'static Mutex<()> {
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 impl Npmrc {
     pub fn new() -> Self {
         let config: Npmrc = serde_ini::from_str("").unwrap(); // TODO: derive `SmartDefault` for `Npmrc and call `Npmrc::default()`
@@ -229,6 +239,11 @@ mod tests {
 
     #[test]
     pub fn have_default_values() {
+        let _env_guard = crate::env_lock().lock().expect("lock env mutex");
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::remove_var("PNPM_HOME") };
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::remove_var("XDG_DATA_HOME") };
         let value = Npmrc::new();
         assert_eq!(value.node_linker, NodeLinker::default());
         assert_eq!(value.package_import_method, PackageImportMethod::default());
@@ -280,6 +295,9 @@ mod tests {
 
     #[test]
     pub fn should_use_pnpm_home_env_var() {
+        let _env_guard = crate::env_lock().lock().expect("lock env mutex");
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::remove_var("XDG_DATA_HOME") };
         // Safe in this test context: mutate process env in a controlled scope.
         unsafe { env::set_var("PNPM_HOME", "/hello") }; // TODO: change this to dependency injection
         let value: Npmrc = serde_ini::from_str("").unwrap();
@@ -290,6 +308,9 @@ mod tests {
 
     #[test]
     pub fn should_use_xdg_data_home_env_var() {
+        let _env_guard = crate::env_lock().lock().expect("lock env mutex");
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::remove_var("PNPM_HOME") };
         // Safe in this test context: mutate process env in a controlled scope.
         unsafe { env::set_var("XDG_DATA_HOME", "/hello") }; // TODO: change this to dependency injection
         let value: Npmrc = serde_ini::from_str("").unwrap();

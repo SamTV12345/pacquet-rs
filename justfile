@@ -12,7 +12,7 @@ alias t := test
 # You can download the pre-compiled binary from <https://github.com/cargo-bins/cargo-binstall#installation>
 # or install via `cargo install cargo-binstall`
 init:
-  cargo binstall cargo-nextest cargo-watch cargo-insta typos-cli taplo-cli wasm-pack cargo-llvm-cov -y
+  cargo binstall cargo-nextest cargo-watch cargo-insta typos-cli wasm-pack -y
 
 # When ready, run the same CI commands
 ready:
@@ -41,7 +41,6 @@ watch command:
 # Format all files
 fmt:
   cargo fmt
-  taplo format
 
 # Run cargo check
 check:

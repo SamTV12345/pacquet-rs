@@ -153,8 +153,8 @@ mod tests {
     use pacquet_testing_utils::fs::{get_all_folders, is_symlink_or_junction};
     use tempfile::tempdir;
 
-    #[tokio::test]
-    async fn should_install_dependencies() {
+    #[test]
+    fn should_install_dependencies() {
         let mock_instance = AutoMockInstance::load_or_init();
 
         let dir = tempdir().unwrap();
@@ -180,26 +180,32 @@ mod tests {
         config.registry = mock_instance.url();
         let config = config.leak();
 
-        Install {
-            tarball_mem_cache: &Default::default(),
-            http_client: &Default::default(),
-            config,
-            manifest: &manifest,
-            lockfile: None,
-            lockfile_dir: dir.path(),
-            lockfile_importer_id: ".",
-            workspace_packages: &Default::default(),
-            dependency_groups: [
-                DependencyGroup::Prod,
-                DependencyGroup::Dev,
-                DependencyGroup::Optional,
-            ],
-            frozen_lockfile: false,
-            resolved_packages: &Default::default(),
-        }
-        .run()
-        .await
-        .unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime")
+            .block_on(async {
+                Install {
+                    tarball_mem_cache: &Default::default(),
+                    http_client: &Default::default(),
+                    config,
+                    manifest: &manifest,
+                    lockfile: None,
+                    lockfile_dir: dir.path(),
+                    lockfile_importer_id: ".",
+                    workspace_packages: &Default::default(),
+                    dependency_groups: [
+                        DependencyGroup::Prod,
+                        DependencyGroup::Dev,
+                        DependencyGroup::Optional,
+                    ],
+                    frozen_lockfile: false,
+                    resolved_packages: &Default::default(),
+                }
+                .run()
+                .await
+                .unwrap();
+            });
 
         // Make sure the package is installed
         let path = project_root.join("node_modules/@pnpm.e2e/hello-world-js-bin");

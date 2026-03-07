@@ -171,6 +171,9 @@ mod tests {
 
     #[test]
     fn test_default_store_dir_with_pnpm_home_env() {
+        let _env_guard = crate::env_lock().lock().expect("lock env mutex");
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::remove_var("XDG_DATA_HOME") };
         // Safe in this test context: mutate process env in a controlled scope.
         unsafe { env::set_var("PNPM_HOME", "/tmp/pnpm-home") }; // TODO: change this to dependency injection
         let store_dir = default_store_dir();
@@ -181,6 +184,10 @@ mod tests {
 
     #[test]
     fn test_default_store_dir_with_xdg_env() {
+        let _env_guard = crate::env_lock().lock().expect("lock env mutex");
+        // Ensure higher-priority env var does not override this test.
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::remove_var("PNPM_HOME") };
         // Safe in this test context: mutate process env in a controlled scope.
         unsafe { env::set_var("XDG_DATA_HOME", "/tmp/xdg_data_home") }; // TODO: change this to dependency injection
         let store_dir = default_store_dir();
