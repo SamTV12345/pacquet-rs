@@ -54,6 +54,10 @@ test:
 lint:
   cargo clippy --locked -- --deny warnings
 
+# Install git hooks for this repository
+hooks-install:
+  git config core.hooksPath .githooks
+
 # Get code coverage
 codecov:
   cargo codecov --html
