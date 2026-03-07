@@ -5,6 +5,7 @@ use pipe_trait::Pipe;
 use std::{
     env, fs,
     io::{self, ErrorKind},
+    path::Path,
 };
 
 /// Error when reading lockfile the filesystem.
@@ -25,15 +26,20 @@ pub enum LoadLockfileError {
 }
 
 impl Lockfile {
-    /// Load lockfile from the current directory.
-    pub fn load_from_current_dir() -> Result<Option<Self>, LoadLockfileError> {
-        let file_path =
-            env::current_dir().map_err(LoadLockfileError::CurrentDir)?.join(Lockfile::FILE_NAME);
+    /// Load lockfile from a specific directory.
+    pub fn load_from_dir(dir: &Path) -> Result<Option<Self>, LoadLockfileError> {
+        let file_path = dir.join(Lockfile::FILE_NAME);
         let content = match fs::read_to_string(file_path) {
             Ok(content) => content,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return error.pipe(LoadLockfileError::ReadFile).pipe(Err),
         };
         content.pipe_as_ref(serde_yaml::from_str).map_err(LoadLockfileError::ParseYaml)
+    }
+
+    /// Load lockfile from the current directory.
+    pub fn load_from_current_dir() -> Result<Option<Self>, LoadLockfileError> {
+        let current_dir = env::current_dir().map_err(LoadLockfileError::CurrentDir)?;
+        Self::load_from_dir(&current_dir)
     }
 }

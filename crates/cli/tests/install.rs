@@ -5,14 +5,13 @@ use assert_cmd::prelude::*;
 use command_extra::CommandExtra;
 use pacquet_testing_utils::{
     bin::{AddMockedRegistry, CommandTempCwd},
-    fixtures::{BIG_LOCKFILE, BIG_MANIFEST},
     fs::{get_all_files, get_all_folders, is_symlink_or_junction},
 };
-use pipe_trait::Pipe;
-use std::{
-    fs::{self, OpenOptions},
-    io::Write,
-};
+use std::fs;
+
+#[cfg(not(target_os = "windows"))] // It causes ConnectionAborted on CI
+#[cfg(not(target_os = "macos"))] // It causes ConnectionReset on CI
+use pacquet_testing_utils::fixtures::{BIG_LOCKFILE, BIG_MANIFEST};
 
 #[test]
 fn should_install_dependencies() {
@@ -140,6 +139,8 @@ fn should_install_index_files() {
 #[cfg(not(target_os = "macos"))] // It causes ConnectionReset on CI
 #[test]
 fn frozen_lockfile_should_be_able_to_handle_big_lockfile() {
+    use std::{fs::OpenOptions, io::Write};
+
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
     let AddMockedRegistry { mock_instance, .. } = npmrc_info;
@@ -189,6 +190,47 @@ fn should_install_circular_dependencies() {
     assert!(workspace.join("./node_modules/@pnpm.e2e/circular-deps-1-of-2").exists());
     assert!(workspace.join("./node_modules/.pnpm/@pnpm.e2e+circular-deps-1-of-2@1.0.2").exists());
     assert!(workspace.join("./node_modules/.pnpm/@pnpm.e2e+circular-deps-2-of-2@1.0.2").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn should_create_lockfile_by_default() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_arg("install").assert().success();
+
+    assert!(workspace.join("pnpm-lock.yaml").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn frozen_lockfile_should_fail_without_pnpm_lock_yaml() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_args(["install", "--frozen-lockfile"]).assert().failure();
+    assert!(!workspace.join("pnpm-lock.yaml").exists());
 
     drop((root, mock_instance)); // cleanup
 }

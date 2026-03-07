@@ -32,6 +32,8 @@ where
 pub enum AddError {
     #[display("Failed to add package to manifest: {_0}")]
     AddDependencyToManifest(#[error(source)] PackageManifestError),
+    #[display("Failed to install dependencies: {_0}")]
+    InstallDependencies(#[error(not(source))] String),
     #[display("Failed save the manifest file: {_0}")]
     SaveManifest(#[error(source)] PackageManifestError),
 }
@@ -82,7 +84,8 @@ where
             resolved_packages,
         }
         .run()
-        .await;
+        .await
+        .map_err(|error| AddError::InstallDependencies(error.to_string()))?;
 
         manifest.save().map_err(AddError::SaveManifest)?;
 

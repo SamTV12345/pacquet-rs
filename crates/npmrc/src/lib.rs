@@ -116,7 +116,7 @@ pub struct Npmrc {
     pub modules_cache_max_age: u64,
 
     /// When set to false, pnpm won't read or generate a pnpm-lock.yaml file.
-    #[serde(default, deserialize_with = "deserialize_bool")]
+    #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
     pub lockfile: bool,
 
     /// When set to true and the available pnpm-lock.yaml satisfies the package.json dependencies
@@ -220,6 +220,7 @@ mod tests {
         let value = Npmrc::new();
         assert_eq!(value.node_linker, NodeLinker::default());
         assert_eq!(value.package_import_method, PackageImportMethod::default());
+        assert!(value.lockfile);
         assert!(value.prefer_frozen_lockfile);
         assert!(value.symlink);
         assert!(value.hoist);

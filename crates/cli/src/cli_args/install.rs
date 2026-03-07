@@ -64,7 +64,7 @@ impl InstallArgs {
             resolved_packages,
         }
         .run()
-        .await;
+        .await?;
 
         Ok(())
     }

@@ -1,4 +1,4 @@
-use crate::{InstallFrozenLockfile, InstallWithoutLockfile, ResolvedPackages};
+use crate::{InstallFrozenLockfile, InstallWithLockfile, InstallWithoutLockfile, ResolvedPackages};
 use pacquet_lockfile::Lockfile;
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
@@ -26,7 +26,7 @@ where
     DependencyGroupList: IntoIterator<Item = DependencyGroup>,
 {
     /// Execute the subroutine.
-    pub async fn run(self) {
+    pub async fn run(self) -> miette::Result<()> {
         let Install {
             tarball_mem_cache,
             resolved_packages,
@@ -53,8 +53,22 @@ where
                 .run()
                 .await;
             }
-            (true, false, Some(_)) | (true, false, None) | (true, true, None) => {
-                unimplemented!();
+            (true, false, Some(_)) | (true, false, None) => {
+                InstallWithLockfile {
+                    tarball_mem_cache,
+                    resolved_packages,
+                    http_client,
+                    config,
+                    manifest,
+                    dependency_groups,
+                }
+                .run()
+                .await;
+            }
+            (true, true, None) => {
+                miette::bail!(
+                    "Cannot install with --frozen-lockfile because pnpm-lock.yaml was not found"
+                );
             }
             (true, true, Some(lockfile)) => {
                 let Lockfile { lockfile_version, project_snapshot, packages, .. } = lockfile;
@@ -73,6 +87,8 @@ where
         }
 
         tracing::info!(target: "pacquet::install", "Complete all");
+
+        Ok(())
     }
 }
 
@@ -128,7 +144,8 @@ mod tests {
             resolved_packages: &Default::default(),
         }
         .run()
-        .await;
+        .await
+        .unwrap();
 
         // Make sure the package is installed
         let path = project_root.join("node_modules/@pnpm.e2e/hello-world-js-bin");

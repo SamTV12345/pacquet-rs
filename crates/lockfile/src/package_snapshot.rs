@@ -49,7 +49,10 @@ pub struct PackageSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub optional_dependencies: Option<HashMap<String, String>>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub transitive_peer_dependencies: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub dev: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub optional: Option<bool>,
 }
