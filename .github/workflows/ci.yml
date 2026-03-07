@@ -40,7 +40,7 @@ jobs:
       - name: Install pnpm (for compatibility check)
         uses: pnpm/action-setup@v2
         with:
-          version: 8.9.2
+          version: 10.30.3
           run_install: false
           standalone: true
 
