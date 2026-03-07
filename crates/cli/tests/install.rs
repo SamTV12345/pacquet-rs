@@ -234,3 +234,82 @@ fn frozen_lockfile_should_fail_without_pnpm_lock_yaml() {
 
     drop((root, mock_instance)); // cleanup
 }
+
+#[test]
+fn workspace_install_from_subproject_should_write_shared_lockfile() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let project_dir = workspace.join("packages/app");
+    fs::create_dir_all(&project_dir).expect("create workspace project");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+
+    let manifest_path = project_dir.join("package.json");
+    let package_json_content = serde_json::json!({
+        "name": "app",
+        "version": "1.0.0",
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_args(["-C", project_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let root_lockfile = workspace.join("pnpm-lock.yaml");
+    assert!(root_lockfile.exists());
+    assert!(!project_dir.join("pnpm-lock.yaml").exists());
+
+    let lockfile_content = fs::read_to_string(root_lockfile).expect("read lockfile");
+    assert!(lockfile_content.contains("importers:"));
+    assert!(lockfile_content.contains("packages/app:"));
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn workspace_protocol_dependency_should_link_local_package() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app package dir");
+    fs::create_dir_all(&lib_dir).expect("create lib package dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.2.3"
+        })
+        .to_string(),
+    )
+    .expect("write lib package manifest");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "workspace:*"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let linked_dep = app_dir.join("node_modules/@repo/lib");
+    assert!(linked_dep.exists());
+    assert!(is_symlink_or_junction(&linked_dep).unwrap());
+
+    let lockfile_content =
+        fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
+    assert!(lockfile_content.contains("version: link:../lib"));
+
+    drop(root); // cleanup
+}

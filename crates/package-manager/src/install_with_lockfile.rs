@@ -1,12 +1,15 @@
-use crate::{InstallPackageFromRegistry, ResolvedPackages};
+use crate::{
+    resolve_workspace_dependency, symlink_package, InstallPackageFromRegistry, ResolvedPackages,
+    WorkspacePackages,
+};
 use async_recursion::async_recursion;
 use dashmap::DashMap;
 use node_semver::Version;
 use pacquet_lockfile::{
-    ComVer, DependencyPath, Lockfile, LockfileResolution, PackageSnapshot,
+    ComVer, DependencyPath, Lockfile, LockfileResolution, MultiProjectSnapshot, PackageSnapshot,
     PackageSnapshotDependency, PkgName, PkgNameVerPeer, PkgVerPeer, ProjectSnapshot,
-    RegistryResolution, ResolvedDependencyMap, ResolvedDependencySpec, RootProjectSnapshot,
-    TarballResolution,
+    RegistryResolution, ResolvedDependencyMap, ResolvedDependencySpec, ResolvedDependencyVersion,
+    RootProjectSnapshot, TarballResolution,
 };
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
@@ -26,12 +29,16 @@ where
     pub http_client: &'a ThrottledClient,
     pub config: &'static Npmrc,
     pub manifest: &'a PackageManifest,
+    pub existing_lockfile: Option<&'a Lockfile>,
+    pub lockfile_dir: &'a Path,
+    pub lockfile_importer_id: &'a str,
+    pub workspace_packages: &'a WorkspacePackages,
     pub dependency_groups: DependencyGroupList,
 }
 
 #[derive(Clone)]
 struct ResolvedPackage {
-    ver_peer: PkgVerPeer,
+    version: ResolvedDependencyVersion,
 }
 
 impl<'a, DependencyGroupList> InstallWithLockfile<'a, DependencyGroupList>
@@ -46,6 +53,10 @@ where
             http_client,
             config,
             manifest,
+            existing_lockfile,
+            lockfile_dir,
+            lockfile_importer_id,
+            workspace_packages,
             dependency_groups,
         } = self;
 
@@ -56,6 +67,25 @@ where
         for (name, version_range) in manifest.dependencies(dependency_groups.iter().copied()) {
             let key = (name.to_string(), version_range.to_string());
             if resolved_direct_dependencies.contains_key(&key) {
+                continue;
+            }
+
+            if let Some(workspace_package) =
+                resolve_workspace_dependency(workspace_packages, name, version_range)
+            {
+                let symlink_path = config.modules_dir.join(name);
+                symlink_package(&workspace_package.root_dir, &symlink_path)
+                    .expect("symlink workspace package");
+
+                let project_dir = manifest.path().parent().unwrap_or_else(|| Path::new("."));
+                let relative = to_relative_path(project_dir, &workspace_package.root_dir);
+                let resolved_package = ResolvedPackage {
+                    version: ResolvedDependencyVersion::Link(format!(
+                        "link:{}",
+                        relative.replace('\\', "/")
+                    )),
+                };
+                resolved_direct_dependencies.insert(key, resolved_package);
                 continue;
             }
 
@@ -80,16 +110,24 @@ where
             &resolved_direct_dependencies,
         );
 
+        let mut packages = existing_lockfile
+            .and_then(|lockfile| lockfile.packages.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        packages.extend(package_snapshots.into_iter());
+
+        let project_snapshot =
+            merge_project_snapshot(existing_lockfile, lockfile_importer_id, project_snapshot);
+
         let lockfile = Lockfile {
             lockfile_version: ComVer::new(6, 0).try_into().expect("lockfile version compatible"),
             settings: None,
             never_built_dependencies: None,
             overrides: None,
-            project_snapshot: RootProjectSnapshot::Single(project_snapshot),
-            packages: Some(package_snapshots.into_iter().collect()),
+            project_snapshot,
+            packages: (!packages.is_empty()).then_some(packages),
         };
 
-        let lockfile_dir = manifest.path().parent().unwrap_or(Path::new("."));
         lockfile.save_to_dir(lockfile_dir).expect("save lockfile");
     }
 
@@ -145,7 +183,12 @@ where
 
                 snapshot_dependencies.insert(
                     Self::parse_pkg_name(&dependency_name),
-                    PackageSnapshotDependency::PkgVerPeer(resolved_dependency.ver_peer),
+                    PackageSnapshotDependency::PkgVerPeer(match resolved_dependency.version {
+                        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => ver_peer,
+                        ResolvedDependencyVersion::Link(_) => {
+                            panic!("workspace links are not supported in transitive dependencies")
+                        }
+                    }),
                 );
             }
 
@@ -154,7 +197,7 @@ where
             package_snapshots.insert(dependency_path, package_snapshot);
         }
 
-        ResolvedPackage { ver_peer }
+        ResolvedPackage { version: ResolvedDependencyVersion::PkgVerPeer(ver_peer) }
     }
 
     fn build_project_snapshot(
@@ -178,7 +221,7 @@ where
                         Self::parse_pkg_name(name),
                         ResolvedDependencySpec {
                             specifier: specifier.to_string(),
-                            version: resolved_dependency.ver_peer.clone(),
+                            version: resolved_dependency.version.clone(),
                         },
                     );
                     specifiers.insert(name.to_string(), specifier.to_string());
@@ -262,5 +305,122 @@ where
             dev: None,
             optional: None,
         }
+    }
+}
+
+fn merge_project_snapshot(
+    existing_lockfile: Option<&Lockfile>,
+    lockfile_importer_id: &str,
+    project_snapshot: ProjectSnapshot,
+) -> RootProjectSnapshot {
+    match existing_lockfile.map(|lockfile| &lockfile.project_snapshot) {
+        Some(RootProjectSnapshot::Multi(snapshot)) => {
+            let mut importers = snapshot.importers.clone();
+            importers.insert(lockfile_importer_id.to_string(), project_snapshot);
+            RootProjectSnapshot::Multi(MultiProjectSnapshot { importers })
+        }
+        Some(RootProjectSnapshot::Single(existing_snapshot)) => {
+            if lockfile_importer_id == "." {
+                RootProjectSnapshot::Single(project_snapshot)
+            } else {
+                let mut importers = HashMap::new();
+                importers.insert(".".to_string(), existing_snapshot.clone());
+                importers.insert(lockfile_importer_id.to_string(), project_snapshot);
+                RootProjectSnapshot::Multi(MultiProjectSnapshot { importers })
+            }
+        }
+        None => {
+            if lockfile_importer_id == "." {
+                RootProjectSnapshot::Single(project_snapshot)
+            } else {
+                let mut importers = HashMap::new();
+                importers.insert(lockfile_importer_id.to_string(), project_snapshot);
+                RootProjectSnapshot::Multi(MultiProjectSnapshot { importers })
+            }
+        }
+    }
+}
+
+fn to_relative_path(from: &Path, to: &Path) -> String {
+    let from_components = from.components().collect::<Vec<_>>();
+    let to_components = to.components().collect::<Vec<_>>();
+
+    let common_len = from_components
+        .iter()
+        .zip(to_components.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+
+    if common_len == 0 {
+        return to.to_string_lossy().into_owned();
+    }
+
+    let mut relative_parts = Vec::<String>::new();
+    for _ in common_len..from_components.len() {
+        relative_parts.push("..".to_string());
+    }
+    for component in to_components.iter().skip(common_len) {
+        relative_parts.push(component.as_os_str().to_string_lossy().into_owned());
+    }
+
+    if relative_parts.is_empty() {
+        ".".to_string()
+    } else {
+        relative_parts.join("/")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pacquet_lockfile::LockfileVersion;
+
+    fn empty_lockfile(project_snapshot: RootProjectSnapshot) -> Lockfile {
+        Lockfile {
+            lockfile_version: LockfileVersion::try_from(ComVer::new(6, 0)).unwrap(),
+            settings: None,
+            never_built_dependencies: None,
+            overrides: None,
+            project_snapshot,
+            packages: None,
+        }
+    }
+
+    #[test]
+    fn merge_without_existing_lockfile_non_workspace() {
+        let received = merge_project_snapshot(None, ".", ProjectSnapshot::default());
+        assert!(matches!(received, RootProjectSnapshot::Single(_)));
+    }
+
+    #[test]
+    fn merge_without_existing_lockfile_workspace_importer() {
+        let received = merge_project_snapshot(None, "packages/app", ProjectSnapshot::default());
+        let RootProjectSnapshot::Multi(snapshot) = received else {
+            panic!("expected multi project snapshot");
+        };
+        assert!(snapshot.importers.contains_key("packages/app"));
+    }
+
+    #[test]
+    fn merge_with_existing_multi_lockfile_keeps_other_importers() {
+        let mut importers = HashMap::new();
+        importers.insert("packages/old".to_string(), ProjectSnapshot::default());
+        let existing =
+            empty_lockfile(RootProjectSnapshot::Multi(MultiProjectSnapshot { importers }));
+
+        let received =
+            merge_project_snapshot(Some(&existing), "packages/new", ProjectSnapshot::default());
+        let RootProjectSnapshot::Multi(snapshot) = received else {
+            panic!("expected multi project snapshot");
+        };
+        assert!(snapshot.importers.contains_key("packages/old"));
+        assert!(snapshot.importers.contains_key("packages/new"));
+    }
+
+    #[test]
+    fn relative_path_from_project_to_workspace_package() {
+        let from = Path::new("/repo/packages/app");
+        let to = Path::new("/repo/packages/lib");
+        assert_eq!(to_relative_path(from, to), "../lib".to_string());
     }
 }

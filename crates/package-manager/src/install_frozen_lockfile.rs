@@ -1,5 +1,5 @@
 use crate::{CreateVirtualStore, SymlinkDirectDependencies};
-use pacquet_lockfile::{DependencyPath, PackageSnapshot, RootProjectSnapshot};
+use pacquet_lockfile::{DependencyPath, PackageSnapshot, ProjectSnapshot};
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::DependencyGroup;
@@ -21,7 +21,7 @@ where
 {
     pub http_client: &'a ThrottledClient,
     pub config: &'static Npmrc,
-    pub project_snapshot: &'a RootProjectSnapshot,
+    pub project_snapshot: &'a ProjectSnapshot,
     pub packages: Option<&'a HashMap<DependencyPath, PackageSnapshot>>,
     pub dependency_groups: DependencyGroupList,
 }
@@ -44,7 +44,7 @@ where
 
         assert!(config.prefer_frozen_lockfile, "Non frozen lockfile is not yet supported");
 
-        CreateVirtualStore { http_client, config, packages, project_snapshot }.run().await;
+        CreateVirtualStore { http_client, config, packages }.run().await;
 
         SymlinkDirectDependencies { config, project_snapshot, dependency_groups }.run();
     }

@@ -1,6 +1,6 @@
 use crate::InstallPackageBySnapshot;
 use futures_util::future;
-use pacquet_lockfile::{DependencyPath, PackageSnapshot, RootProjectSnapshot};
+use pacquet_lockfile::{DependencyPath, PackageSnapshot};
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
 use pipe_trait::Pipe;
@@ -12,18 +12,18 @@ pub struct CreateVirtualStore<'a> {
     pub http_client: &'a ThrottledClient,
     pub config: &'static Npmrc,
     pub packages: Option<&'a HashMap<DependencyPath, PackageSnapshot>>,
-    pub project_snapshot: &'a RootProjectSnapshot,
 }
 
 impl<'a> CreateVirtualStore<'a> {
     /// Execute the subroutine.
     pub async fn run(self) {
-        let CreateVirtualStore { http_client, config, packages, project_snapshot } = self;
+        let CreateVirtualStore { http_client, config, packages } = self;
 
-        let packages = packages.unwrap_or_else(|| {
-            dbg!(project_snapshot);
-            todo!("check project_snapshot, error if it's not empty, do nothing if empty");
-        });
+        let packages = if let Some(packages) = packages {
+            packages
+        } else {
+            return;
+        };
 
         packages
             .iter()

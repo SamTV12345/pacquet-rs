@@ -1,5 +1,5 @@
 use crate::symlink_package;
-use pacquet_lockfile::{PkgName, PkgNameVerPeer, RootProjectSnapshot};
+use pacquet_lockfile::{PkgName, PkgNameVerPeer, ProjectSnapshot, ResolvedDependencyVersion};
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::DependencyGroup;
 use rayon::prelude::*;
@@ -16,7 +16,7 @@ where
     DependencyGroupList: IntoIterator<Item = DependencyGroup>,
 {
     pub config: &'static Npmrc,
-    pub project_snapshot: &'a RootProjectSnapshot,
+    pub project_snapshot: &'a ProjectSnapshot,
     pub dependency_groups: DependencyGroupList,
 }
 
@@ -28,30 +28,35 @@ where
     pub fn run(self) {
         let SymlinkDirectDependencies { config, project_snapshot, dependency_groups } = self;
 
-        let RootProjectSnapshot::Single(project_snapshot) = project_snapshot else {
-            panic!("Monorepo is not yet supported"); // TODO: properly propagate this error
-        };
-
         project_snapshot
             .dependencies_by_groups(dependency_groups)
             .collect::<Vec<_>>()
             .par_iter()
             .for_each(|(name, spec)| {
-                // TODO: the code below is not optimal
-                let virtual_store_name =
-                    PkgNameVerPeer::new(PkgName::clone(name), spec.version.clone())
-                        .to_virtual_store_name();
-
                 let name_str = name.to_string();
-                symlink_package(
-                    &config
-                        .virtual_store_dir
-                        .join(virtual_store_name)
-                        .join("node_modules")
-                        .join(&name_str),
-                    &config.modules_dir.join(&name_str),
-                )
-                .expect("symlink pkg"); // TODO: properly propagate this error
+                let symlink_target = match &spec.version {
+                    ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
+                        let virtual_store_name =
+                            PkgNameVerPeer::new(PkgName::clone(name), ver_peer.clone())
+                                .to_virtual_store_name();
+                        config
+                            .virtual_store_dir
+                            .join(virtual_store_name)
+                            .join("node_modules")
+                            .join(&name_str)
+                    }
+                    ResolvedDependencyVersion::Link(link) => {
+                        let relative = link.strip_prefix("link:").unwrap_or(link);
+                        config
+                            .modules_dir
+                            .parent()
+                            .unwrap_or(config.modules_dir.as_path())
+                            .join(relative)
+                    }
+                };
+
+                symlink_package(&symlink_target, &config.modules_dir.join(&name_str))
+                    .expect("symlink pkg"); // TODO: properly propagate this error
             });
     }
 }

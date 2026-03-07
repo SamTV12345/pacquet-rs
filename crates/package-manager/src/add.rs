@@ -1,4 +1,4 @@
-use crate::{Install, ResolvedPackages};
+use crate::{Install, ResolvedPackages, WorkspacePackages};
 use derive_more::{Display, Error};
 use miette::Diagnostic;
 use pacquet_lockfile::Lockfile;
@@ -8,6 +8,7 @@ use pacquet_package_manifest::PackageManifestError;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_registry::{PackageTag, PackageVersion};
 use pacquet_tarball::MemCache;
+use std::path::Path;
 
 /// This subroutine does everything `pacquet add` is supposed to do.
 #[must_use]
@@ -22,6 +23,9 @@ where
     pub config: &'static Npmrc,
     pub manifest: &'a mut PackageManifest,
     pub lockfile: Option<&'a Lockfile>,
+    pub lockfile_dir: &'a Path,
+    pub lockfile_importer_id: &'a str,
+    pub workspace_packages: &'a WorkspacePackages,
     pub list_dependency_groups: ListDependencyGroups, // must be a function because it is called multiple times
     pub package_name: &'a str, // TODO: 1. support version range, 2. multiple arguments, 3. name this `packages`
     pub save_exact: bool,      // TODO: add `save-exact` to `.npmrc`, merge configs, and remove this
@@ -51,6 +55,9 @@ where
             config,
             manifest,
             lockfile,
+            lockfile_dir,
+            lockfile_importer_id,
+            workspace_packages,
             list_dependency_groups,
             package_name,
             save_exact,
@@ -79,6 +86,9 @@ where
             config,
             manifest,
             lockfile,
+            lockfile_dir,
+            lockfile_importer_id,
+            workspace_packages,
             dependency_groups: list_dependency_groups(),
             frozen_lockfile: false,
             resolved_packages,

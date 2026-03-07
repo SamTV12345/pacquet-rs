@@ -12,6 +12,7 @@ mod install_without_lockfile;
 mod link_file;
 mod symlink_direct_dependencies;
 mod symlink_package;
+mod workspace_packages;
 
 pub use add::*;
 pub use create_cas_files::*;
@@ -27,3 +28,4 @@ pub use install_without_lockfile::*;
 pub use link_file::*;
 pub use symlink_direct_dependencies::*;
 pub use symlink_package::*;
+pub use workspace_packages::*;

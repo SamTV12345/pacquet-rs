@@ -1,9 +1,13 @@
-use crate::{InstallFrozenLockfile, InstallWithLockfile, InstallWithoutLockfile, ResolvedPackages};
-use pacquet_lockfile::Lockfile;
+use crate::{
+    InstallFrozenLockfile, InstallWithLockfile, InstallWithoutLockfile, ResolvedPackages,
+    WorkspacePackages,
+};
+use pacquet_lockfile::{Lockfile, RootProjectSnapshot};
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_tarball::MemCache;
+use std::path::Path;
 
 /// This subroutine does everything `pacquet install` is supposed to do.
 #[must_use]
@@ -17,6 +21,9 @@ where
     pub config: &'static Npmrc,
     pub manifest: &'a PackageManifest,
     pub lockfile: Option<&'a Lockfile>,
+    pub lockfile_dir: &'a Path,
+    pub lockfile_importer_id: &'a str,
+    pub workspace_packages: &'a WorkspacePackages,
     pub dependency_groups: DependencyGroupList,
     pub frozen_lockfile: bool,
 }
@@ -34,6 +41,9 @@ where
             config,
             manifest,
             lockfile,
+            lockfile_dir,
+            lockfile_importer_id,
+            workspace_packages,
             dependency_groups,
             frozen_lockfile,
         } = self;
@@ -60,6 +70,10 @@ where
                     http_client,
                     config,
                     manifest,
+                    existing_lockfile: lockfile,
+                    lockfile_dir,
+                    lockfile_importer_id,
+                    workspace_packages,
                     dependency_groups,
                 }
                 .run()
@@ -73,6 +87,18 @@ where
             (true, true, Some(lockfile)) => {
                 let Lockfile { lockfile_version, project_snapshot, packages, .. } = lockfile;
                 assert_eq!(lockfile_version.major, 6); // compatibility check already happens at serde, but this still helps preventing programmer mistakes.
+
+                let project_snapshot = match project_snapshot {
+                    RootProjectSnapshot::Single(snapshot) => snapshot,
+                    RootProjectSnapshot::Multi(snapshot) => {
+                        snapshot.importers.get(lockfile_importer_id).ok_or_else(|| {
+                            miette::miette!(
+                                "Cannot find importer `{}` in pnpm-lock.yaml",
+                                lockfile_importer_id
+                            )
+                        })?
+                    }
+                };
 
                 InstallFrozenLockfile {
                     http_client,
@@ -135,6 +161,9 @@ mod tests {
             config,
             manifest: &manifest,
             lockfile: None,
+            lockfile_dir: dir.path(),
+            lockfile_importer_id: ".",
+            workspace_packages: &Default::default(),
             dependency_groups: [
                 DependencyGroup::Prod,
                 DependencyGroup::Dev,
