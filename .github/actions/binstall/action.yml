@@ -16,4 +16,4 @@ runs:
 
       - name: Running cargo-binstall with provided arguments
         shell: bash
-        run: cargo binstall --no-confirm ${{ inputs.packages }}
+        run: cargo binstall --no-confirm --disable-strategies compile ${{ inputs.packages }}

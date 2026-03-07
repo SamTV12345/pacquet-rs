@@ -275,7 +275,6 @@ impl<'a> DownloadTarballToStore<'a> {
 #[cfg(test)]
 mod tests {
     use pipe_trait::Pipe;
-    use pretty_assertions::assert_eq;
     use tempfile::{TempDir, tempdir};
 
     use super::*;
