@@ -36,6 +36,9 @@ pub(crate) enum LockfileFileError {
         existing: String,
         received: String,
     },
+
+    #[display("Invalid v9 snapshot key: `{_0}`")]
+    InvalidV9SnapshotKey(#[error(not(source))] String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,7 +88,7 @@ struct LockfileV9File {
     #[serde(skip_serializing_if = "Option::is_none")]
     packages: Option<HashMap<String, LockfilePackageInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    snapshots: Option<HashMap<DependencyPath, LockfilePackageSnapshot>>,
+    snapshots: Option<HashMap<String, LockfilePackageSnapshot>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -195,10 +198,11 @@ fn convert_v9_to_lockfile(v9: LockfileV9File) -> Result<Lockfile, LockfileFileEr
     let package_snapshots = v9.snapshots.unwrap_or_default();
 
     let mut packages = HashMap::<DependencyPath, PackageSnapshot>::new();
-    for (dep_path, pkg_snapshot) in package_snapshots {
-        let package_id = package_id_from_dependency_path(&dep_path);
+    for (snapshot_key, pkg_snapshot) in package_snapshots {
+        let dep_path = dependency_path_from_v9_key(&snapshot_key)?;
+        let package_id = v9_key_from_dependency_path(&dep_path);
         let package_info = package_infos.get(&package_id).cloned().ok_or_else(|| {
-            LockfileFileError::MissingPackageInfo { snapshot: dep_path.to_string(), package_id }
+            LockfileFileError::MissingPackageInfo { snapshot: snapshot_key.clone(), package_id }
         })?;
         packages.insert(dep_path, merge_package_info_and_snapshot(package_info, pkg_snapshot));
     }
@@ -221,13 +225,13 @@ fn convert_v9_to_lockfile(v9: LockfileV9File) -> Result<Lockfile, LockfileFileEr
 
 fn convert_lockfile_to_v9(lockfile: &Lockfile) -> LockfileV9File {
     let mut package_infos = HashMap::<String, LockfilePackageInfo>::new();
-    let mut package_snapshots = HashMap::<DependencyPath, LockfilePackageSnapshot>::new();
+    let mut package_snapshots = HashMap::<String, LockfilePackageSnapshot>::new();
 
     for (dep_path, package_snapshot) in lockfile.packages.as_ref().into_iter().flatten() {
         let (package_info, snapshot_part) = split_package_snapshot(package_snapshot);
-        let package_id = package_id_from_dependency_path(dep_path);
+        let package_id = v9_key_from_dependency_path(dep_path);
         package_infos.entry(package_id).or_insert(package_info);
-        package_snapshots.insert(dep_path.clone(), snapshot_part);
+        package_snapshots.insert(v9_key_from_dependency_path(dep_path), snapshot_part);
     }
 
     let version = if lockfile.lockfile_version.major == 9 {
@@ -312,11 +316,21 @@ fn merge_package_info_and_snapshot(
     }
 }
 
-fn package_id_from_dependency_path(dep_path: &DependencyPath) -> String {
-    let prefix = dep_path.custom_registry.as_deref().unwrap_or_default();
-    let name = dep_path.package_specifier.name.to_string();
-    let version = dep_path.package_specifier.suffix.version().to_string();
-    format!("{prefix}/{name}@{version}")
+fn v9_key_from_dependency_path(dep_path: &DependencyPath) -> String {
+    let package_specifier = dep_path.package_specifier.to_string();
+    match dep_path.custom_registry.as_deref() {
+        Some(custom_registry) => format!("{custom_registry}/{package_specifier}"),
+        None => package_specifier,
+    }
+}
+
+fn dependency_path_from_v9_key(value: &str) -> Result<DependencyPath, LockfileFileError> {
+    if let Ok(package_specifier) = value.parse() {
+        return Ok(DependencyPath { custom_registry: None, package_specifier });
+    }
+    value
+        .parse::<DependencyPath>()
+        .map_err(|_| LockfileFileError::InvalidV9SnapshotKey(value.to_string()))
 }
 
 fn root_snapshot_to_file_importers(
@@ -457,29 +471,34 @@ mod tests {
             "importers:"
             "  .:"
             "    dependencies:"
-            "      foo:"
-            "        specifier: ^1.0.0"
+            "      '@pnpm.e2e/hello-world-js-bin-parent':"
+            "        specifier: 1.0.0"
             "        version: 1.0.0"
             "packages:"
-            "  /foo@1.0.0:"
+            "  '@pnpm.e2e/hello-world-js-bin-parent@1.0.0':"
             "    resolution:"
             "      integrity: sha512-gf6ZldcfCDyNXPRiW3lQjEP1Z9rrUM/4Cn7BZbv3SdTA82zxWRP8OmLwvGR974uuENhGCFgFdN11z3n1Ofpprg=="
             "snapshots:"
-            "  /foo@1.0.0: {}"
+            "  '@pnpm.e2e/hello-world-js-bin-parent@1.0.0': {}"
         };
 
         let lockfile = parse_lockfile_content(v9).expect("parse v9 lockfile");
         assert_eq!(lockfile.lockfile_version.major, 9);
 
         let packages = lockfile.packages.expect("combined package map");
-        assert!(packages.keys().any(|key| key.to_string() == "/foo@1.0.0"));
+        assert!(packages.keys().any(|key| {
+            key.to_string() == "/@pnpm.e2e/hello-world-js-bin-parent@1.0.0"
+        }));
 
         let RootProjectSnapshot::Single(project) = lockfile.project_snapshot else {
             panic!("expected single importer after conversion");
         };
         let deps = project.dependencies.expect("dependencies map");
         assert_eq!(
-            deps.get(&"foo".parse().unwrap()).unwrap().version.to_string(),
+            deps.get(&"@pnpm.e2e/hello-world-js-bin-parent".parse().unwrap())
+                .unwrap()
+                .version
+                .to_string(),
             "1.0.0".to_string()
         );
     }
