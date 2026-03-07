@@ -33,8 +33,8 @@ fn parse_workspace_target<'a>(dependency_name: &'a str, raw: &'a str) -> (&'a st
     }
 
     // Support aliases like `workspace:@scope/pkg@*` and `workspace:pkg@^1.0.0`.
-    let maybe_alias = if raw.starts_with('@') {
-        raw[1..].rfind('@').map(|index| index + 1)
+    let maybe_alias = if let Some(scoped_name) = raw.strip_prefix('@') {
+        scoped_name.rfind('@').map(|index| index + 1)
     } else {
         raw.rfind('@')
     };

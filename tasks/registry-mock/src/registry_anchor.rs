@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     sync::OnceLock,
 };
-use sysinfo::{Pid, PidExt, Signal};
+use sysinfo::{Pid, Signal};
 
 /// Count references and automatically manage a single shared mocked registry server instance that is spawn
 /// by the first test to run.
@@ -111,7 +111,7 @@ struct GuardFile;
 
 impl Drop for GuardFile {
     fn drop(&mut self) {
-        GuardFile::path().unlock().expect("release file guard");
+        AdvisoryFileLock::unlock(GuardFile::path()).expect("release file guard");
     }
 }
 
@@ -123,18 +123,20 @@ impl GuardFile {
                 .read(true)
                 .write(true)
                 .create(true)
+                .truncate(false)
                 .open(temp_dir().join("pacquet-registry-mock-anchor.lock"))
                 .expect("open the guard file")
         })
     }
 
     fn lock() -> Self {
-        GuardFile::path().lock(FileLockMode::Exclusive).expect("acquire file guard");
+        AdvisoryFileLock::lock(GuardFile::path(), FileLockMode::Exclusive)
+            .expect("acquire file guard");
         GuardFile
     }
 
     fn try_lock() -> Option<Self> {
-        match GuardFile::path().try_lock(FileLockMode::Exclusive) {
+        match AdvisoryFileLock::try_lock(GuardFile::path(), FileLockMode::Exclusive) {
             Ok(()) => Some(GuardFile),
             Err(FileLockError::AlreadyLocked) => None,
             Err(FileLockError::Io(error)) => panic!("Failed to acquire the file guard: {error}"),

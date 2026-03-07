@@ -204,7 +204,7 @@ impl Default for Npmrc {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, str::FromStr};
+    use std::env;
 
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
@@ -254,18 +254,22 @@ mod tests {
 
     #[test]
     pub fn should_use_pnpm_home_env_var() {
-        env::set_var("PNPM_HOME", "/hello"); // TODO: change this to dependency injection
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::set_var("PNPM_HOME", "/hello") }; // TODO: change this to dependency injection
         let value: Npmrc = serde_ini::from_str("").unwrap();
         assert_eq!(display_store_dir(&value.store_dir), "/hello/store");
-        env::remove_var("PNPM_HOME");
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::remove_var("PNPM_HOME") };
     }
 
     #[test]
     pub fn should_use_xdg_data_home_env_var() {
-        env::set_var("XDG_DATA_HOME", "/hello"); // TODO: change this to dependency injection
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::set_var("XDG_DATA_HOME", "/hello") }; // TODO: change this to dependency injection
         let value: Npmrc = serde_ini::from_str("").unwrap();
         assert_eq!(display_store_dir(&value.store_dir), "/hello/pnpm/store");
-        env::remove_var("XDG_DATA_HOME");
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::remove_var("XDG_DATA_HOME") };
     }
 
     #[test]

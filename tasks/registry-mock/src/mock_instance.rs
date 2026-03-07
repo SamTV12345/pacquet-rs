@@ -11,7 +11,7 @@ use std::{
     path::Path,
     process::{Child, Command, Stdio},
 };
-use sysinfo::{Pid, PidExt, Signal};
+use sysinfo::{Pid, Signal};
 use tokio::time::{sleep, Duration};
 
 /// Handler of a mocked registry server instance.
@@ -139,9 +139,10 @@ impl AutoMockInstance {
             return AutoMockInstance::Prepared(prepared);
         }
 
+        let client = Client::new();
         let anchor = RegistryAnchor::load_or_init({
             MockInstanceOptions {
-                client: &Client::new(),
+                client: &client,
                 port: pick_unused_port().expect("pick an unused port"),
                 stdout: None,
                 stderr: None,

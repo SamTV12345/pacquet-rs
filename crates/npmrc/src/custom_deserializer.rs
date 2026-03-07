@@ -22,12 +22,11 @@ pub fn default_public_hoist_pattern() -> Vec<String> {
 // Get the drive letter from a path on Windows. If it's not a Windows path, return None.
 #[cfg(windows)]
 fn get_drive_letter(current_dir: &Path) -> Option<char> {
-    if let Some(Component::Prefix(prefix_component)) = current_dir.components().next() {
-        if let std::path::Prefix::Disk(disk_byte) | std::path::Prefix::VerbatimDisk(disk_byte) =
+    if let Some(Component::Prefix(prefix_component)) = current_dir.components().next()
+        && let std::path::Prefix::Disk(disk_byte) | std::path::Prefix::VerbatimDisk(disk_byte) =
             prefix_component.kind()
-        {
-            return Some(disk_byte as char);
-        }
+    {
+        return Some(disk_byte as char);
     }
     None
 }
@@ -160,18 +159,22 @@ mod tests {
 
     #[test]
     fn test_default_store_dir_with_pnpm_home_env() {
-        env::set_var("PNPM_HOME", "/tmp/pnpm-home"); // TODO: change this to dependency injection
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::set_var("PNPM_HOME", "/tmp/pnpm-home") }; // TODO: change this to dependency injection
         let store_dir = default_store_dir();
         assert_eq!(display_store_dir(&store_dir), "/tmp/pnpm-home/store");
-        env::remove_var("PNPM_HOME");
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::remove_var("PNPM_HOME") };
     }
 
     #[test]
     fn test_default_store_dir_with_xdg_env() {
-        env::set_var("XDG_DATA_HOME", "/tmp/xdg_data_home"); // TODO: change this to dependency injection
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::set_var("XDG_DATA_HOME", "/tmp/xdg_data_home") }; // TODO: change this to dependency injection
         let store_dir = default_store_dir();
         assert_eq!(display_store_dir(&store_dir), "/tmp/xdg_data_home/pnpm/store");
-        env::remove_var("XDG_DATA_HOME");
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::remove_var("XDG_DATA_HOME") };
     }
 
     #[cfg(windows)]

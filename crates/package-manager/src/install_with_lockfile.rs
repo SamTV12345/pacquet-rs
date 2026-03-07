@@ -132,6 +132,7 @@ where
     }
 
     #[async_recursion]
+    #[allow(clippy::too_many_arguments)]
     async fn install_and_snapshot_package(
         tarball_mem_cache: &MemCache,
         resolved_packages: &ResolvedPackages,
