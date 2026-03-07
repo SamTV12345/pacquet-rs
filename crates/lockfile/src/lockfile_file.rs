@@ -486,9 +486,11 @@ mod tests {
         assert_eq!(lockfile.lockfile_version.major, 9);
 
         let packages = lockfile.packages.expect("combined package map");
-        assert!(packages.keys().any(|key| {
-            key.to_string() == "/@pnpm.e2e/hello-world-js-bin-parent@1.0.0"
-        }));
+        assert!(
+            packages
+                .keys()
+                .any(|key| { key.to_string() == "/@pnpm.e2e/hello-world-js-bin-parent@1.0.0" })
+        );
 
         let RootProjectSnapshot::Single(project) = lockfile.project_snapshot else {
             panic!("expected single importer after conversion");

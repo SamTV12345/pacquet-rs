@@ -37,9 +37,9 @@ fn parse_index_payload_file(path: &Path) -> Option<BTreeMap<String, JsonValue>> 
     let path_str = path.to_string_lossy().replace('\\', "/");
 
     if path_str.ends_with("-index.json") {
-        let parsed = fs::File::open(path)
-            .ok()
-            .and_then(|file| serde_json::from_reader::<_, pacquet_store_dir::PackageFilesIndex>(file).ok())?;
+        let parsed = fs::File::open(path).ok().and_then(|file| {
+            serde_json::from_reader::<_, pacquet_store_dir::PackageFilesIndex>(file).ok()
+        })?;
         let mut files = BTreeMap::<String, JsonValue>::new();
         for (name, mut info) in parsed.files {
             info.checked_at = None;
