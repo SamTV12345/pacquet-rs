@@ -12,6 +12,13 @@ use pretty_assertions::assert_eq;
 use std::{collections::BTreeMap, fs, path::Path};
 use walkdir::WalkDir;
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ComparableFileInfo {
+    integrity: String,
+    mode: u32,
+    size: Option<u64>,
+}
+
 fn normalize_store_files(files: &[String]) -> Vec<String> {
     let mut normalized = files
         .iter()
@@ -31,19 +38,20 @@ fn normalize_store_files(files: &[String]) -> Vec<String> {
     normalized
 }
 
-fn parse_index_payload_file(
-    path: &Path,
-) -> Option<BTreeMap<String, pacquet_store_dir::PackageFileInfo>> {
+fn parse_index_payload_file(path: &Path) -> Option<BTreeMap<String, ComparableFileInfo>> {
     let path_str = path.to_string_lossy().replace('\\', "/");
 
     if path_str.ends_with("-index.json") {
         let parsed = fs::File::open(path).ok().and_then(|file| {
             serde_json::from_reader::<_, pacquet_store_dir::PackageFilesIndex>(file).ok()
         })?;
-        let mut files = BTreeMap::<String, pacquet_store_dir::PackageFileInfo>::new();
+        let mut files = BTreeMap::<String, ComparableFileInfo>::new();
         for (name, mut info) in parsed.files {
             info.checked_at = None;
-            files.insert(name, info);
+            files.insert(
+                name,
+                ComparableFileInfo { integrity: info.integrity, mode: info.mode, size: info.size },
+            );
         }
         return Some(files);
     }
@@ -53,12 +61,15 @@ fn parse_index_payload_file(
             .ok()
             .and_then(|file| serde_json::from_reader::<_, serde_json::Value>(file).ok())?;
         let file_entries = value.get("files")?.as_object()?;
-        let mut files = BTreeMap::<String, pacquet_store_dir::PackageFileInfo>::new();
+        let mut files = BTreeMap::<String, ComparableFileInfo>::new();
         for (name, info) in file_entries {
             let mut info =
                 serde_json::from_value::<pacquet_store_dir::PackageFileInfo>(info.clone()).ok()?;
             info.checked_at = None;
-            files.insert(name.clone(), info);
+            files.insert(
+                name.clone(),
+                ComparableFileInfo { integrity: info.integrity, mode: info.mode, size: info.size },
+            );
         }
         return Some(files);
     }
@@ -66,9 +77,7 @@ fn parse_index_payload_file(
     None
 }
 
-fn normalized_index_payloads(
-    store_dir: &Path,
-) -> Vec<BTreeMap<String, pacquet_store_dir::PackageFileInfo>> {
+fn normalized_index_payloads(store_dir: &Path) -> Vec<BTreeMap<String, ComparableFileInfo>> {
     let mut payloads = WalkDir::new(store_dir)
         .into_iter()
         .map(|entry| entry.expect("walk store dir entry"))
