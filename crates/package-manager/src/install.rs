@@ -1,6 +1,7 @@
 use crate::{
     InstallFrozenLockfile, InstallWithLockfile, InstallWithoutLockfile, ResolvedPackages,
-    WorkspacePackages,
+    WorkspacePackages, collect_runtime_lockfile_config, get_outdated_lockfile_setting,
+    satisfies_package_manifest,
 };
 use pacquet_lockfile::{Lockfile, RootProjectSnapshot};
 use pacquet_network::ThrottledClient;
@@ -104,6 +105,27 @@ where
                     }
                 };
 
+                let runtime_lockfile_config =
+                    collect_runtime_lockfile_config(config, manifest, lockfile_dir);
+                if let Some(outdated_setting) =
+                    get_outdated_lockfile_setting(lockfile, &runtime_lockfile_config)
+                {
+                    miette::bail!(
+                        "Cannot proceed with the frozen installation. The current \"{outdated_setting}\" configuration doesn't match the value found in the lockfile"
+                    );
+                }
+                if let Err(reason) = satisfies_package_manifest(
+                    project_snapshot,
+                    manifest,
+                    config.auto_install_peers,
+                    config.exclude_links_from_lockfile,
+                ) {
+                    miette::bail!(
+                        "Cannot install with --frozen-lockfile because pnpm-lock.yaml is not up to date with {} ({reason})",
+                        manifest.path().display(),
+                    );
+                }
+
                 InstallFrozenLockfile {
                     http_client,
                     config,
@@ -129,7 +151,6 @@ mod tests {
     use pacquet_package_manifest::{DependencyGroup, PackageManifest};
     use pacquet_registry_mock::AutoMockInstance;
     use pacquet_testing_utils::fs::{get_all_folders, is_symlink_or_junction};
-    use std::env;
     use tempfile::tempdir;
 
     #[tokio::test]

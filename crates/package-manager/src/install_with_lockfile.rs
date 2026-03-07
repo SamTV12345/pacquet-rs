@@ -1,6 +1,6 @@
 use crate::{
-    InstallPackageFromRegistry, ResolvedPackages, WorkspacePackages, resolve_workspace_dependency,
-    symlink_package,
+    InstallPackageFromRegistry, ResolvedPackages, WorkspacePackages,
+    collect_runtime_lockfile_config, resolve_workspace_dependency, symlink_package,
 };
 use async_recursion::async_recursion;
 use dashmap::DashMap;
@@ -118,18 +118,22 @@ where
 
         let project_snapshot =
             merge_project_snapshot(existing_lockfile, lockfile_importer_id, project_snapshot);
+        let runtime_lockfile_config =
+            collect_runtime_lockfile_config(config, manifest, lockfile_dir);
 
         let lockfile = Lockfile {
             lockfile_version: ComVer::new(9, 0),
-            settings: None,
+            settings: Some(runtime_lockfile_config.settings),
             never_built_dependencies: None,
-            ignored_optional_dependencies: None,
-            overrides: None,
-            package_extensions_checksum: None,
-            patched_dependencies: None,
-            pnpmfile_checksum: None,
-            catalogs: None,
-            time: None,
+            ignored_optional_dependencies: existing_lockfile
+                .and_then(|lockfile| lockfile.ignored_optional_dependencies.clone()),
+            overrides: runtime_lockfile_config.overrides,
+            package_extensions_checksum: runtime_lockfile_config.package_extensions_checksum,
+            patched_dependencies: existing_lockfile
+                .and_then(|lockfile| lockfile.patched_dependencies.clone()),
+            pnpmfile_checksum: runtime_lockfile_config.pnpmfile_checksum,
+            catalogs: existing_lockfile.and_then(|lockfile| lockfile.catalogs.clone()),
+            time: existing_lockfile.and_then(|lockfile| lockfile.time.clone()),
             project_snapshot,
             packages: (!packages.is_empty()).then_some(packages),
         };

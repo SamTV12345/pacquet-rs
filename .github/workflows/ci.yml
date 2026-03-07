@@ -79,6 +79,25 @@ jobs:
 
           just registry-mock end
 
+      - name: Build pacquet binary
+        run: cargo build --locked --release -p pacquet-cli --bin pacquet
+
+      - name: Upload pacquet artifact (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pacquet-${{ matrix.os }}
+          path: target/release/pacquet
+          if-no-files-found: error
+
+      - name: Upload pacquet artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pacquet-${{ matrix.os }}
+          path: target/release/pacquet.exe
+          if-no-files-found: error
+
   typos:
     name: Spell Check
     runs-on: ubuntu-latest

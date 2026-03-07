@@ -7,9 +7,9 @@ use std::{fs, path::PathBuf};
 
 use crate::custom_deserializer::{
     bool_true, default_hoist_pattern, default_modules_cache_max_age, default_modules_dir,
-    default_public_hoist_pattern, default_registry, default_store_dir, default_virtual_store_dir,
-    deserialize_bool, deserialize_pathbuf, deserialize_registry, deserialize_store_dir,
-    deserialize_u64,
+    default_peers_suffix_max_length, default_public_hoist_pattern, default_registry,
+    default_store_dir, default_virtual_store_dir, deserialize_bool, deserialize_pathbuf,
+    deserialize_registry, deserialize_store_dir, deserialize_u16, deserialize_u64,
 };
 
 #[derive(Debug, Deserialize, Default, PartialEq)]
@@ -129,6 +129,18 @@ pub struct Npmrc {
     #[serde(default, deserialize_with = "deserialize_bool")]
     pub lockfile_include_tarball_url: bool,
 
+    /// Exclude dependencies that are linked from the lockfile.
+    #[serde(default, deserialize_with = "deserialize_bool")]
+    pub exclude_links_from_lockfile: bool,
+
+    /// Controls whether workspace packages are injected by default.
+    #[serde(default, deserialize_with = "deserialize_bool")]
+    pub inject_workspace_packages: bool,
+
+    /// Maximum length of peer suffixes persisted to the lockfile.
+    #[serde(default = "default_peers_suffix_max_length", deserialize_with = "deserialize_u16")]
+    pub peers_suffix_max_length: u16,
+
     /// The base URL of the npm package registry (trailing slash included).
     #[serde(default = "default_registry", deserialize_with = "deserialize_registry")]
     pub registry: String, // TODO: use Url type (compatible with reqwest)
@@ -222,6 +234,9 @@ mod tests {
         assert_eq!(value.package_import_method, PackageImportMethod::default());
         assert!(value.lockfile);
         assert!(value.prefer_frozen_lockfile);
+        assert!(!value.exclude_links_from_lockfile);
+        assert!(!value.inject_workspace_packages);
+        assert_eq!(value.peers_suffix_max_length, 1000);
         assert!(value.symlink);
         assert!(value.hoist);
         assert_eq!(value.store_dir, default_store_dir());
@@ -244,6 +259,17 @@ mod tests {
     pub fn parse_bool() {
         let value: Npmrc = serde_ini::from_str("prefer-frozen-lockfile=false").unwrap();
         assert!(!value.prefer_frozen_lockfile);
+    }
+
+    #[test]
+    pub fn parse_lockfile_related_settings() {
+        let value: Npmrc = serde_ini::from_str(
+            "exclude-links-from-lockfile=true\ninject-workspace-packages=true\npeers-suffix-max-length=77",
+        )
+        .unwrap();
+        assert!(value.exclude_links_from_lockfile);
+        assert!(value.inject_workspace_packages);
+        assert_eq!(value.peers_suffix_max_length, 77);
     }
 
     #[test]
@@ -285,7 +311,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     pub fn should_use_absolute_virtual_store_dir() {
         let value: Npmrc = serde_ini::from_str("virtual-store-dir=/node_modules/.pacquet").unwrap();
-        assert_eq!(value.virtual_store_dir, PathBuf::from_str("/node_modules/.pacquet").unwrap());
+        assert_eq!(value.virtual_store_dir, PathBuf::from("/node_modules/.pacquet"));
     }
 
     #[test]

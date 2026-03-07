@@ -96,6 +96,10 @@ pub fn default_modules_cache_max_age() -> u64 {
     10080
 }
 
+pub fn default_peers_suffix_max_length() -> u16 {
+    1000
+}
+
 pub fn deserialize_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
     D: Deserializer<'de>,
@@ -110,6 +114,14 @@ where
 {
     let s = String::deserialize(deserializer)?;
     u64::from_str(&s).map_err(de::Error::custom)
+}
+
+pub fn deserialize_u16<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    u16::from_str(&s).map_err(de::Error::custom)
 }
 
 pub fn deserialize_pathbuf<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
