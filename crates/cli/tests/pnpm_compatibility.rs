@@ -8,9 +8,7 @@ use pacquet_testing_utils::{
     bin::{AddMockedRegistry, CommandTempCwd},
     fs::get_all_files,
 };
-use pipe_trait::Pipe;
 use pretty_assertions::assert_eq;
-use serde_json::Value as JsonValue;
 use std::{collections::BTreeMap, fs, path::Path};
 use walkdir::WalkDir;
 
@@ -33,17 +31,19 @@ fn normalize_store_files(files: &[String]) -> Vec<String> {
     normalized
 }
 
-fn parse_index_payload_file(path: &Path) -> Option<BTreeMap<String, JsonValue>> {
+fn parse_index_payload_file(
+    path: &Path,
+) -> Option<BTreeMap<String, pacquet_store_dir::PackageFileInfo>> {
     let path_str = path.to_string_lossy().replace('\\', "/");
 
     if path_str.ends_with("-index.json") {
         let parsed = fs::File::open(path).ok().and_then(|file| {
             serde_json::from_reader::<_, pacquet_store_dir::PackageFilesIndex>(file).ok()
         })?;
-        let mut files = BTreeMap::<String, JsonValue>::new();
+        let mut files = BTreeMap::<String, pacquet_store_dir::PackageFileInfo>::new();
         for (name, mut info) in parsed.files {
             info.checked_at = None;
-            files.insert(name, serde_json::to_value(info).expect("serialize package file info"));
+            files.insert(name, info);
         }
         return Some(files);
     }
@@ -51,13 +51,14 @@ fn parse_index_payload_file(path: &Path) -> Option<BTreeMap<String, JsonValue>> 
     if path_str.contains("/index/") && path_str.ends_with(".json") {
         let value = fs::File::open(path)
             .ok()
-            .and_then(|file| serde_json::from_reader::<_, JsonValue>(file).ok())?;
+            .and_then(|file| serde_json::from_reader::<_, serde_json::Value>(file).ok())?;
         let file_entries = value.get("files")?.as_object()?;
-        let mut files = BTreeMap::<String, JsonValue>::new();
+        let mut files = BTreeMap::<String, pacquet_store_dir::PackageFileInfo>::new();
         for (name, info) in file_entries {
-            let mut object = info.as_object()?.clone();
-            object.remove("checkedAt");
-            files.insert(name.clone(), JsonValue::Object(object));
+            let mut info =
+                serde_json::from_value::<pacquet_store_dir::PackageFileInfo>(info.clone()).ok()?;
+            info.checked_at = None;
+            files.insert(name.clone(), info);
         }
         return Some(files);
     }
@@ -65,15 +66,24 @@ fn parse_index_payload_file(path: &Path) -> Option<BTreeMap<String, JsonValue>> 
     None
 }
 
-fn normalized_index_payloads(store_dir: &Path) -> Vec<JsonValue> {
+fn normalized_index_payloads(
+    store_dir: &Path,
+) -> Vec<BTreeMap<String, pacquet_store_dir::PackageFileInfo>> {
     let mut payloads = WalkDir::new(store_dir)
         .into_iter()
         .map(|entry| entry.expect("walk store dir entry"))
         .filter(|entry| entry.file_type().is_file())
         .filter_map(|entry| parse_index_payload_file(entry.path()))
-        .map(|payload| serde_json::to_value(payload).expect("serialize normalized index payload"))
         .collect::<Vec<_>>();
-    payloads.sort_by_key(|value| value.to_string());
+    payloads.sort_by_key(|payload| {
+        payload
+            .iter()
+            .map(|(name, info)| {
+                format!("{name}|{}|{}|{}", info.integrity, info.mode, info.size.unwrap_or_default())
+            })
+            .collect::<Vec<_>>()
+            .join("||")
+    });
     payloads
 }
 
