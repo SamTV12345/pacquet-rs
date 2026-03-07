@@ -6,7 +6,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STD};
 use dashmap::DashMap;
 use derive_more::{Display, Error, From};
 use miette::Diagnostic;
@@ -20,7 +20,7 @@ use ssri::Integrity;
 use tar::Archive;
 use tokio::sync::{Notify, RwLock};
 use tracing::instrument;
-use zune_inflate::{errors::InflateDecodeErrors, DeflateDecoder, DeflateOptions};
+use zune_inflate::{DeflateDecoder, DeflateOptions, errors::InflateDecodeErrors};
 
 #[derive(Debug, Display, Error, Diagnostic)]
 #[display("Failed to fetch {url}: {error}")]
@@ -276,7 +276,7 @@ impl<'a> DownloadTarballToStore<'a> {
 mod tests {
     use pipe_trait::Pipe;
     use pretty_assertions::assert_eq;
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     use super::*;
 

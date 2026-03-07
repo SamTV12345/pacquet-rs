@@ -1,7 +1,7 @@
 use crate::StoreDir;
 use derive_more::{Display, Error};
 use miette::Diagnostic;
-use pacquet_fs::{ensure_file, EnsureFileError};
+use pacquet_fs::{EnsureFileError, ensure_file};
 use serde::{Deserialize, Serialize};
 use ssri::{Algorithm, Integrity};
 use std::{collections::HashMap, path::PathBuf};

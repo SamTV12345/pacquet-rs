@@ -214,11 +214,7 @@ fn to_lockfile_importer_id(workspace_root: Option<&Path>, project_dir: &Path) ->
         .components()
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
-    }
+    if parts.is_empty() { ".".to_string() } else { parts.join("/") }
 }
 
 /// Private function to load lockfile from current directory should `config.lockfile` is `true`.

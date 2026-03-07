@@ -1,4 +1,4 @@
-use crate::{kill_verdaccio::kill_all_verdaccio_children, MockInstanceOptions, RegistryInfo};
+use crate::{MockInstanceOptions, RegistryInfo, kill_verdaccio::kill_all_verdaccio_children};
 use advisory_lock::{AdvisoryFileLock, FileLockError, FileLockMode};
 use pipe_trait::Pipe;
 use serde::{Deserialize, Serialize};

@@ -1,6 +1,6 @@
 use crate::{
-    kill_verdaccio::kill_all_verdaccio_children, node_registry_mock, port_to_url::port_to_url,
     PreparedRegistryInfo, RegistryAnchor, RegistryInfo,
+    kill_verdaccio::kill_all_verdaccio_children, node_registry_mock, port_to_url::port_to_url,
 };
 use assert_cmd::prelude::*;
 use pipe_trait::Pipe;
@@ -12,7 +12,7 @@ use std::{
     process::{Child, Command, Stdio},
 };
 use sysinfo::{Pid, Signal};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 /// Handler of a mocked registry server instance.
 ///

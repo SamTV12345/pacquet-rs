@@ -1,7 +1,7 @@
 use crate::{FileHash, StoreDir};
 use derive_more::{Display, Error};
 use miette::Diagnostic;
-use pacquet_fs::{ensure_file, file_mode::EXEC_MODE, EnsureFileError};
+use pacquet_fs::{EnsureFileError, ensure_file, file_mode::EXEC_MODE};
 use sha2::{Digest, Sha512};
 use std::path::PathBuf;
 

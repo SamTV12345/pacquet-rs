@@ -2,7 +2,7 @@ use assert_cmd::prelude::*;
 use command_extra::CommandExtra;
 use pacquet_registry_mock::AutoMockInstance;
 use std::{fs, path::PathBuf, process::Command};
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 use text_block_macros::text_block_fnl;
 
 /// Assets for an integration test involving spawning `pacquet` and/or `pnpm` as
@@ -28,8 +28,9 @@ impl CommandTempCwd<()> {
         let workspace = root.path().join("workspace");
         fs::create_dir(&workspace).expect("create temporary workspace for the commands");
         #[allow(deprecated)]
-        let pacquet =
-            Command::cargo_bin("pacquet").expect("find the pacquet binary").with_current_dir(&workspace);
+        let pacquet = Command::cargo_bin("pacquet")
+            .expect("find the pacquet binary")
+            .with_current_dir(&workspace);
         let pnpm = Command::new("pnpm").with_current_dir(&workspace);
         CommandTempCwd { pacquet, pnpm, root, workspace, npmrc_info: () }
     }

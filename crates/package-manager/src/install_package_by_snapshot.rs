@@ -52,7 +52,9 @@ impl<'a> InstallPackageBySnapshot<'a> {
                 (Cow::Owned(tarball_url), integrity)
             }
             LockfileResolution::Directory(_) | LockfileResolution::Git(_) => {
-                panic!("Only TarballResolution and RegistryResolution is supported at the moment, but {dependency_path} requires {resolution:?}");
+                panic!(
+                    "Only TarballResolution and RegistryResolution is supported at the moment, but {dependency_path} requires {resolution:?}"
+                );
             }
         };
 

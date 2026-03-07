@@ -1,5 +1,5 @@
 use pacquet_store_dir::StoreDir;
-use serde::{de, Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, de};
 use std::{env, path::PathBuf, str::FromStr};
 
 #[cfg(windows)]

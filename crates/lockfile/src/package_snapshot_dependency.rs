@@ -72,7 +72,9 @@ mod tests {
         case("/react-json-view@1.21.3-rc.0(react@17.0.2)");
         case("/react-json-view@1.21.3");
         case("/react-json-view@1.21.3-rc.0");
-        case("registry.npmjs.com/react-json-view@1.21.3(@types/react@17.0.49)(react-dom@17.0.2)(react@17.0.2)");
+        case(
+            "registry.npmjs.com/react-json-view@1.21.3(@types/react@17.0.49)(react-dom@17.0.2)(react@17.0.2)",
+        );
         case("registry.npmjs.com/react-json-view@1.21.3(react@17.0.2)");
         case("registry.npmjs.com/react-json-view@1.21.3-rc.0(react@17.0.2)");
         case("registry.npmjs.com/react-json-view@1.21.3");

@@ -1,6 +1,6 @@
 use crate::{
-    resolve_workspace_dependency, symlink_package, InstallPackageFromRegistry, ResolvedPackages,
-    WorkspacePackages,
+    InstallPackageFromRegistry, ResolvedPackages, WorkspacePackages, resolve_workspace_dependency,
+    symlink_package,
 };
 use async_recursion::async_recursion;
 use dashmap::DashMap;
@@ -364,11 +364,7 @@ fn to_relative_path(from: &Path, to: &Path) -> String {
         relative_parts.push(component.as_os_str().to_string_lossy().into_owned());
     }
 
-    if relative_parts.is_empty() {
-        ".".to_string()
-    } else {
-        relative_parts.join("/")
-    }
+    if relative_parts.is_empty() { ".".to_string() } else { relative_parts.join("/") }
 }
 
 #[cfg(test)]
