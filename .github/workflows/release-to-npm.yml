@@ -108,7 +108,7 @@ jobs:
           tar czf $BIN_NAME.tar.gz $BIN_NAME
 
       - name: Upload Binary
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v7
         with:
           if-no-files-found: error
           name: binaries
@@ -129,7 +129,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v6
         with:
           node-version: 18
           registry-url: 'https://registry.npmjs.org'
@@ -160,7 +160,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           name: pacquet v${{ needs.build.outputs.version }}
           draft: true
