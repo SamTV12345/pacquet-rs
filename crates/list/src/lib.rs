@@ -722,14 +722,21 @@ fn insert_long_manifest_fields(dep: &mut Map<String, Value>, package_dir: &Path)
     if let Some(license) = manifest.get("license").and_then(Value::as_str) {
         dep.insert("license".to_string(), Value::String(license.to_string()));
     }
-    if let Some(author) = manifest.get("author") {
-        dep.insert("author".to_string(), author.clone());
+    if let Some(author) = manifest.get("author").and_then(normalize_author_field) {
+        dep.insert("author".to_string(), author);
     }
-    if let Some(homepage) = manifest.get("homepage").and_then(Value::as_str) {
-        dep.insert("homepage".to_string(), Value::String(homepage.to_string()));
-    }
+
+    let mut normalized_homepage =
+        manifest.get("homepage").and_then(Value::as_str).map(ToOwned::to_owned);
     if let Some(repository) = manifest.get("repository").and_then(repository_url) {
-        dep.insert("repository".to_string(), Value::String(repository.to_string()));
+        let normalized = normalize_repository_field(repository);
+        dep.insert("repository".to_string(), Value::String(normalized.repository));
+        if normalized_homepage.is_none() {
+            normalized_homepage = normalized.inferred_homepage;
+        }
+    }
+    if let Some(homepage) = normalized_homepage {
+        dep.insert("homepage".to_string(), Value::String(homepage));
     }
 }
 
@@ -737,6 +744,80 @@ fn repository_url(repository: &Value) -> Option<&str> {
     repository.as_str().or_else(|| {
         repository.as_object().and_then(|repository| repository.get("url")).and_then(Value::as_str)
     })
+}
+
+fn normalize_author_field(author: &Value) -> Option<Value> {
+    match author {
+        Value::Object(_) => Some(author.clone()),
+        Value::String(author) => {
+            let parsed = parse_author_string(author);
+            if parsed.is_empty() {
+                Some(Value::String(author.to_string()))
+            } else {
+                Some(Value::Object(parsed))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_author_string(author: &str) -> Map<String, Value> {
+    let mut value = Map::<String, Value>::new();
+    let author = author.trim();
+    if author.is_empty() {
+        return value;
+    }
+
+    let name_end = author.find(['<', '(']).unwrap_or(author.len());
+    let name = author[..name_end].trim();
+    if !name.is_empty() {
+        value.insert("name".to_string(), Value::String(name.to_string()));
+    }
+
+    if let Some(start) = author.find('<')
+        && let Some(end) = author[start + 1..].find('>')
+    {
+        let email = author[start + 1..start + 1 + end].trim();
+        if !email.is_empty() {
+            value.insert("email".to_string(), Value::String(email.to_string()));
+        }
+    }
+    if let Some(start) = author.find('(')
+        && let Some(end) = author[start + 1..].find(')')
+    {
+        let url = author[start + 1..start + 1 + end].trim();
+        if !url.is_empty() {
+            value.insert("url".to_string(), Value::String(url.to_string()));
+        }
+    }
+
+    value
+}
+
+struct NormalizedRepository {
+    repository: String,
+    inferred_homepage: Option<String>,
+}
+
+fn normalize_repository_field(repository: &str) -> NormalizedRepository {
+    if let Some(rest) = repository.strip_prefix("https://github.com/") {
+        let mut segments = rest.split('/');
+        let owner = segments.next().unwrap_or_default();
+        let repo = segments.next().unwrap_or_default();
+        let tree_literal = segments.next().unwrap_or_default();
+        let branch = segments.next().unwrap_or_default();
+        if !owner.is_empty() && !repo.is_empty() && tree_literal == "tree" && !branch.is_empty() {
+            let repo = repo.trim_end_matches(".git");
+            return NormalizedRepository {
+                repository: format!("git+https://github.com/{owner}/{repo}.git#{branch}"),
+                inferred_homepage: Some(format!(
+                    "https://github.com/{owner}/{repo}/tree/{branch}#readme"
+                )),
+            };
+        }
+    }
+
+    NormalizedRepository { repository: repository.to_string(), inferred_homepage: None }
 }
 
 fn read_package_json(path: PathBuf) -> Option<Map<String, Value>> {
