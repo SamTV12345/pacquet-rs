@@ -60,12 +60,16 @@ impl RegistryAnchor {
         PATH.get_or_init(|| temp_dir().join("pacquet-registry-mock-anchor.json"))
     }
 
+    fn try_load() -> Option<Self> {
+        match RegistryAnchor::path().pipe(fs::read_to_string) {
+            Ok(text) => Some(text.pipe_as_ref(serde_json::from_str).expect("parse anchor")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("read the anchor: {error}"),
+        }
+    }
+
     fn load() -> Self {
-        RegistryAnchor::path()
-            .pipe(fs::read_to_string)
-            .expect("read the anchor")
-            .pipe_as_ref(serde_json::from_str)
-            .expect("parse anchor")
+        Self::try_load().expect("read the anchor")
     }
 
     fn save(&self) {
@@ -74,7 +78,7 @@ impl RegistryAnchor {
     }
 
     pub fn load_or_init(init_options: MockInstanceOptions<'_>) -> Self {
-        if let Some(guard) = GuardFile::try_lock() {
+        let init = |init_options: MockInstanceOptions<'_>| {
             let mock_instance = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -85,14 +89,24 @@ impl RegistryAnchor {
             let info = RegistryInfo { port, pid };
             let anchor = RegistryAnchor { ref_count: 1, info };
             anchor.save();
-            guard.unlock();
             forget(mock_instance); // prevent this process from killing itself on drop
+            anchor
+        };
+
+        if let Some(guard) = GuardFile::try_lock() {
+            let anchor = init(init_options);
+            guard.unlock();
             anchor
         } else {
             let guard = GuardFile::lock();
-            let mut anchor = RegistryAnchor::load();
-            anchor.ref_count = anchor.ref_count.checked_add(1).expect("increment ref_count");
-            anchor.save();
+            let anchor = if let Some(mut anchor) = RegistryAnchor::try_load() {
+                anchor.ref_count = anchor.ref_count.checked_add(1).expect("increment ref_count");
+                anchor.save();
+                anchor
+            } else {
+                eprintln!("warn: anchor file disappeared while waiting for lock, re-initializing");
+                init(init_options)
+            };
             guard.unlock();
             anchor
         }
