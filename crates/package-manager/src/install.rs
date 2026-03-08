@@ -119,6 +119,7 @@ where
                     manifest,
                     config.auto_install_peers,
                     config.exclude_links_from_lockfile,
+                    lockfile_version.major >= 9,
                 ) {
                     miette::bail!(
                         "Cannot install with --frozen-lockfile because pnpm-lock.yaml is not up to date with {} ({reason})",

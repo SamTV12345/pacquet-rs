@@ -118,6 +118,7 @@ pub(crate) fn satisfies_package_manifest(
     manifest: &PackageManifest,
     auto_install_peers: bool,
     exclude_links_from_lockfile: bool,
+    strict_specifier_match: bool,
 ) -> Result<(), String> {
     let mut manifest = extract_manifest(manifest);
 
@@ -148,7 +149,7 @@ pub(crate) fn satisfies_package_manifest(
         specifiers.retain(|_, specifier| !specifier.starts_with("link:"));
     }
 
-    if specifiers != existing_deps {
+    if strict_specifier_match && specifiers != existing_deps {
         return Err("specifiers in the lockfile don't match specifiers in package.json".to_string());
     }
 
@@ -225,8 +226,10 @@ pub(crate) fn satisfies_package_manifest(
         for dep_name in package_dep_names {
             let manifest_specifier =
                 package_deps.get(dep_name.as_str()).expect("dependency exists");
+            let specifier_mismatch =
+                specifiers.get(dep_name.as_str()) != Some(manifest_specifier);
             if !importer_deps.contains_key(dep_name.as_str())
-                || specifiers.get(dep_name.as_str()) != Some(manifest_specifier)
+                || (strict_specifier_match && specifier_mismatch)
             {
                 return Err(format!(
                     "importer {dependency_field}.{dep_name} specifier doesn't match package manifest"
@@ -661,7 +664,7 @@ mod tests {
             publish_directory: None,
         };
 
-        assert!(satisfies_package_manifest(&snapshot, &manifest, false, false).is_ok());
+        assert!(satisfies_package_manifest(&snapshot, &manifest, false, false, true).is_ok());
     }
 
     #[test]
@@ -692,7 +695,38 @@ mod tests {
             publish_directory: None,
         };
 
-        assert!(satisfies_package_manifest(&snapshot, &manifest, false, false).is_err());
+        assert!(satisfies_package_manifest(&snapshot, &manifest, false, false, true).is_err());
+    }
+
+    #[test]
+    fn allows_specifier_drift_when_strict_check_is_disabled() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = load_manifest_from_json(
+            dir.path(),
+            serde_json::json!({
+                "dependencies": { "foo": "^1.0.0" }
+            }),
+        );
+
+        let mut dependencies = ResolvedDependencyMap::new();
+        dependencies.insert(
+            "foo".parse().expect("valid package name"),
+            ResolvedDependencySpec {
+                specifier: "~1.0.0".to_string(),
+                version: ResolvedDependencyVersion::PkgVerPeer("1.0.5".parse().unwrap()),
+            },
+        );
+
+        let snapshot = ProjectSnapshot {
+            specifiers: Some(HashMap::from([("foo".to_string(), "~1.0.0".to_string())])),
+            dependencies: Some(dependencies),
+            optional_dependencies: None,
+            dev_dependencies: None,
+            dependencies_meta: None,
+            publish_directory: None,
+        };
+
+        assert!(satisfies_package_manifest(&snapshot, &manifest, false, false, false).is_ok());
     }
 
     #[test]
