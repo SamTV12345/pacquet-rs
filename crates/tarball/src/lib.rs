@@ -19,6 +19,7 @@ use pipe_trait::Pipe;
 use ssri::Integrity;
 use tar::Archive;
 use tokio::sync::{Notify, RwLock};
+use tokio::time::{Duration, sleep};
 use tracing::instrument;
 use zune_inflate::{DeflateDecoder, DeflateOptions, errors::InflateDecodeErrors};
 
@@ -104,12 +105,48 @@ fn decompress_gzip(gz_data: &[u8], unpacked_size: Option<usize>) -> Result<Vec<u
 pub struct DownloadTarballToStore<'a> {
     pub http_client: &'a ThrottledClient,
     pub store_dir: &'static StoreDir,
+    pub package_id: &'a str,
     pub package_integrity: &'a Integrity,
     pub package_unpacked_size: Option<usize>,
     pub package_url: &'a str,
 }
 
 impl<'a> DownloadTarballToStore<'a> {
+    async fn fetch_tarball_with_retry(
+        http_client: &ThrottledClient,
+        package_url: &str,
+    ) -> Result<Vec<u8>, reqwest::Error> {
+        const MAX_ATTEMPTS: u32 = 4;
+        let mut attempt = 1_u32;
+        loop {
+            let result = async {
+                let response = http_client
+                    .run_with_permit(|client| client.get(package_url).send())
+                    .await?
+                    .error_for_status()?;
+                response.bytes().await.map(|bytes| bytes.to_vec())
+            }
+            .await;
+
+            match result {
+                Ok(body) => return Ok(body),
+                Err(error) if attempt < MAX_ATTEMPTS => {
+                    let backoff_ms = 100_u64 * u64::from(attempt);
+                    tracing::warn!(
+                        target: "pacquet::download",
+                        ?package_url,
+                        attempt,
+                        backoff_ms,
+                        "Transient tarball fetch error, retrying: {error}"
+                    );
+                    sleep(Duration::from_millis(backoff_ms)).await;
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// Execute the subroutine with an in-memory cache.
     pub async fn run_with_mem_cache(
         self,
@@ -157,6 +194,7 @@ impl<'a> DownloadTarballToStore<'a> {
         let &DownloadTarballToStore {
             http_client,
             store_dir,
+            package_id,
             package_integrity,
             package_unpacked_size,
             package_url,
@@ -165,16 +203,10 @@ impl<'a> DownloadTarballToStore<'a> {
 
         tracing::info!(target: "pacquet::download", ?package_url, "New cache");
 
-        let network_error = |error| {
-            TarballError::FetchTarball(NetworkError { url: package_url.to_string(), error })
-        };
-        let response = http_client
-            .run_with_permit(|client| client.get(package_url).send())
-            .await
-            .map_err(network_error)?
-            .bytes()
-            .await
-            .map_err(network_error)?;
+        let response =
+            Self::fetch_tarball_with_retry(http_client, package_url).await.map_err(|error| {
+                TarballError::FetchTarball(NetworkError { url: package_url.to_string(), error })
+            })?;
 
         tracing::info!(target: "pacquet::download", ?package_url, "Download completed");
 
@@ -182,6 +214,7 @@ impl<'a> DownloadTarballToStore<'a> {
         // 1. Use an Arc and convert this line to Arc::clone.
         // 2. Replace ssri with base64 and serde magic (which supports Copy).
         let package_integrity = package_integrity.clone();
+        let package_id = package_id.to_string();
 
         #[derive(Debug, From)]
         enum TaskError {
@@ -252,7 +285,7 @@ impl<'a> DownloadTarballToStore<'a> {
             }
 
             store_dir
-                .write_index_file(&package_integrity, &pkg_files_idx)
+                .write_index_file(&package_integrity, &package_id, &pkg_files_idx)
                 .map_err(TarballError::WriteTarballIndexFile)?;
 
             Ok(cas_paths)
@@ -307,6 +340,7 @@ mod tests {
         let cas_files = DownloadTarballToStore {
             http_client: &Default::default(),
             store_dir: store_path,
+            package_id: "@fastify/error@3.3.0",
             package_integrity: &integrity("sha512-dj7vjIn1Ar8sVXj2yAXiMNCJDmS9MQ9XMlIecX2dIzzhjSHCyKo4DdXjXMs7wKW2kj6yvVRSpuQjOZ3YLrh56w=="),
             package_unpacked_size: Some(16697),
             package_url: "https://registry.npmjs.org/@fastify/error/-/error-3.3.0.tgz"
@@ -346,6 +380,7 @@ mod tests {
         DownloadTarballToStore {
             http_client: &Default::default(),
             store_dir: store_path,
+            package_id: "@fastify/error@3.3.0",
             package_integrity: &integrity("sha512-aaaan1Ar8sVXj2yAXiMNCJDmS9MQ9XMlIecX2dIzzhjSHCyKo4DdXjXMs7wKW2kj6yvVRSpuQjOZ3YLrh56w=="),
             package_unpacked_size: Some(16697),
             package_url: "https://registry.npmjs.org/@fastify/error/-/error-3.3.0.tgz",

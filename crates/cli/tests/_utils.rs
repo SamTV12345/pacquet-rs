@@ -40,7 +40,10 @@ pub fn index_file_contents(
     WalkDir::new(store_dir)
         .into_iter()
         .map(|entry| entry.expect("get entry"))
-        .filter(|entry| entry.file_name().to_string_lossy().ends_with("-index.json"))
+        .filter(|entry| {
+            let path = entry.path().to_string_lossy().replace('\\', "/");
+            path.ends_with("-index.json") || (path.contains("/index/") && path.ends_with(".json"))
+        })
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| (suffix(&entry), content(&entry)))
         .collect()

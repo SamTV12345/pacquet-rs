@@ -22,6 +22,8 @@ pub struct StoreDir {
 }
 
 impl StoreDir {
+    const STORE_LAYOUT_VERSION: &'static str = "v10";
+
     /// Construct an instance of [`StoreDir`].
     pub fn new(root: impl Into<PathBuf>) -> Self {
         root.into().into()
@@ -32,14 +34,18 @@ impl StoreDir {
         self.root.display()
     }
 
-    /// Get `{store}/v3`.
-    fn v3(&self) -> PathBuf {
-        self.root.join("v3")
+    /// Get `{store}/v10`.
+    fn v10(&self) -> PathBuf {
+        self.root.join(Self::STORE_LAYOUT_VERSION)
+    }
+
+    pub(crate) fn version_dir(&self) -> PathBuf {
+        self.v10()
     }
 
     /// The directory that contains all files from the once-installed packages.
     fn files(&self) -> PathBuf {
-        self.v3().join("files")
+        self.v10().join("files")
     }
 
     /// Path to a file in the store directory.
@@ -61,7 +67,7 @@ impl StoreDir {
 
     /// Path to the temporary directory inside the store.
     pub fn tmp(&self) -> PathBuf {
-        self.v3().join("tmp")
+        self.v10().join("tmp")
     }
 }
 
@@ -77,7 +83,7 @@ mod tests {
             .pipe(StoreDir::new)
             .file_path_by_head_tail("3e", "f722d37b016c63ac0126cfdcec");
         let expected = PathBuf::from(
-            "/home/user/.local/share/pnpm/store/v3/files/3e/f722d37b016c63ac0126cfdcec",
+            "/home/user/.local/share/pnpm/store/v10/files/3e/f722d37b016c63ac0126cfdcec",
         );
         assert_eq!(&received, &expected);
     }
@@ -85,7 +91,7 @@ mod tests {
     #[test]
     fn tmp() {
         let received = StoreDir::new("/home/user/.local/share/pnpm/store").tmp();
-        let expected = PathBuf::from("/home/user/.local/share/pnpm/store/v3/tmp");
+        let expected = PathBuf::from("/home/user/.local/share/pnpm/store/v10/tmp");
         assert_eq!(&received, &expected);
     }
 }

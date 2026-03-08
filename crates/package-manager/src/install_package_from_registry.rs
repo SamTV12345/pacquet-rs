@@ -76,11 +76,13 @@ impl<'a> InstallPackageFromRegistry<'a> {
         } = self;
 
         let store_folder_name = package_version.to_virtual_store_name();
+        let package_id = format!("{}@{}", package_version.name, package_version.version);
 
         // TODO: skip when it already exists in store?
         let cas_paths = DownloadTarballToStore {
             http_client,
             store_dir: &config.store_dir,
+            package_id: &package_id,
             package_integrity: package_version
                 .dist
                 .integrity
