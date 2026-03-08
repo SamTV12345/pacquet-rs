@@ -260,8 +260,18 @@ fn golden_list_suite_matrix_should_match_pnpm_output() {
         .success();
 
     for (command, flags, is_json, pacquet_output) in pacquet_outputs {
-        let mut pnpm_args = vec![command.as_str()];
-        pnpm_args.extend(flags.iter().copied());
+        let mut pnpm_global_args = Vec::<&str>::new();
+        let mut pnpm_cmd_args = vec![command.as_str()];
+        for flag in flags.iter().copied() {
+            if matches!(flag, "--no-production" | "--no-dev" | "--no-optional") {
+                pnpm_global_args.push(flag);
+            } else {
+                pnpm_cmd_args.push(flag);
+            }
+        }
+        let mut pnpm_args = Vec::<&str>::new();
+        pnpm_args.extend(pnpm_global_args);
+        pnpm_args.extend(pnpm_cmd_args);
         let pnpm_output = Command::new(pnpm.get_program())
             .with_current_dir(&workspace)
             .with_args(pnpm_args)
