@@ -355,6 +355,7 @@ pub fn render_why(opts: WhyOptions<'_>, report_as: WhyReportAs) -> miette::Resul
         left.1.cmp(&right.1).then_with(|| left.2.cmp(&right.2)).then_with(|| left.0.cmp(&right.0))
     });
 
+    let include_package_path = opts.long || matches!(report_as, WhyReportAs::Json);
     let mut trees = Vec::<WhyTree>::new();
     for (package_key, package_name, _) in package_keys {
         if reachable_nodes
@@ -387,8 +388,7 @@ pub fn render_why(opts: WhyOptions<'_>, report_as: WhyReportAs) -> miette::Resul
             &mut visited,
             &mut expanded,
         );
-        let path = opts
-            .long
+        let path = include_package_path
             .then(|| installed_package_path(opts.modules_dir, &package.name, &package.full_version))
             .flatten();
         trees.push(WhyTree {
