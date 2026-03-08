@@ -38,11 +38,25 @@ impl FromStr for DependencyPath {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (custom_registry, package_specifier) =
             s.split_once('/').ok_or(ParseDependencyPathError::InvalidSyntax)?;
+        if custom_registry.starts_with('@') {
+            return Err(ParseDependencyPathError::InvalidSyntax);
+        }
         let custom_registry =
             if custom_registry.is_empty() { None } else { Some(custom_registry.to_string()) };
-        let package_specifier = package_specifier
-            .parse()
-            .map_err(ParseDependencyPathError::ParsePackageSpecifierFailure)?;
+        let package_specifier = match package_specifier.parse() {
+            Ok(value) => value,
+            Err(_) => {
+                let (base, peers) = package_specifier
+                    .find('(')
+                    .map_or((package_specifier, ""), |index| package_specifier.split_at(index));
+                let (name, version) =
+                    base.rsplit_once('/').ok_or(ParseDependencyPathError::InvalidSyntax)?;
+                let normalized = format!("{name}@{version}{peers}");
+                normalized
+                    .parse()
+                    .map_err(ParseDependencyPathError::ParsePackageSpecifierFailure)?
+            }
+        };
         Ok(DependencyPath { custom_registry, package_specifier })
     }
 }
@@ -151,6 +165,13 @@ mod tests {
             ),
         );
         case(
+            "registry.node-modules.io/ts-node/10.9.1(@types/node@18.7.19)(typescript@5.1.6)",
+            (
+                Some("registry.node-modules.io"),
+                "ts-node@10.9.1(@types/node@18.7.19)(typescript@5.1.6)",
+            ),
+        );
+        case(
             "/@babel/plugin-proposal-object-rest-spread@7.12.1",
             (None, "@babel/plugin-proposal-object-rest-spread@7.12.1"),
         );
@@ -164,6 +185,13 @@ mod tests {
         );
         case(
             "registry.node-modules.io/@babel/plugin-proposal-object-rest-spread@7.12.1(@babel/core@7.12.9)",
+            (
+                Some("registry.node-modules.io"),
+                "@babel/plugin-proposal-object-rest-spread@7.12.1(@babel/core@7.12.9)",
+            ),
+        );
+        case(
+            "registry.node-modules.io/@babel/plugin-proposal-object-rest-spread/7.12.1(@babel/core@7.12.9)",
             (
                 Some("registry.node-modules.io"),
                 "@babel/plugin-proposal-object-rest-spread@7.12.1(@babel/core@7.12.9)",

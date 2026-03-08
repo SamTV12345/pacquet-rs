@@ -286,6 +286,12 @@ where
     ) -> PackageSnapshot {
         let integrity =
             package_version.dist.integrity.clone().expect("registry package has integrity field");
+        let package_id = format!("{}@{}", package_version.name, package_version.version);
+        let requires_build = config
+            .store_dir
+            .read_index_file(&integrity, &package_id)
+            .and_then(|index| index.requires_build)
+            .unwrap_or(false);
 
         let resolution = if config.lockfile_include_tarball_url {
             LockfileResolution::Tarball(TarballResolution {
@@ -308,7 +314,7 @@ where
             deprecated: None,
             has_bin: package_version.has_bin().then_some(true),
             prepare: None,
-            requires_build: None,
+            requires_build: requires_build.then_some(true),
             bundled_dependencies: None,
             peer_dependencies: None,
             peer_dependencies_meta: None,

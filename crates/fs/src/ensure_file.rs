@@ -3,8 +3,27 @@ use miette::Diagnostic;
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
+
+#[cfg(windows)]
+fn to_windows_extended_path(path: &Path) -> PathBuf {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return path.to_path_buf();
+    }
+
+    let raw = path.as_os_str().to_string_lossy();
+    if raw.starts_with(r"\\?\") {
+        return path.to_path_buf();
+    }
+    if let Some(stripped) = raw.strip_prefix(r"\\") {
+        return PathBuf::from(format!(r"\\?\UNC\{stripped}"));
+    }
+    PathBuf::from(format!(r"\\?\{raw}"))
+}
 
 /// Error type of [`ensure_file`].
 #[derive(Debug, Display, Error, Diagnostic)]
@@ -42,7 +61,11 @@ pub fn ensure_file(
     }
 
     let parent_dir = file_path.parent().unwrap();
-    fs::create_dir_all(parent_dir).map_err(|error| EnsureFileError::CreateDir {
+    #[cfg(windows)]
+    let create_dir_target = to_windows_extended_path(parent_dir);
+    #[cfg(not(windows))]
+    let create_dir_target = parent_dir.to_path_buf();
+    fs::create_dir_all(&create_dir_target).map_err(|error| EnsureFileError::CreateDir {
         parent_dir: parent_dir.to_path_buf(),
         error,
     })?;
@@ -58,8 +81,13 @@ pub fn ensure_file(
         }
     }
 
+    #[cfg(windows)]
+    let open_target = to_windows_extended_path(file_path);
+    #[cfg(not(windows))]
+    let open_target = file_path.to_path_buf();
+
     options
-        .open(file_path)
+        .open(&open_target)
         .map_err(|error| EnsureFileError::CreateFile { file_path: file_path.to_path_buf(), error })?
         .write_all(content)
         .map_err(|error| EnsureFileError::WriteFile { file_path: file_path.to_path_buf(), error })

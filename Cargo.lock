@@ -1586,6 +1586,7 @@ dependencies = [
  "pretty_assertions",
  "serde",
  "serde_yaml",
+ "sha2",
  "split-first-char",
  "ssri",
  "tempfile",
@@ -1733,6 +1734,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "ssri",
+ "tempfile",
 ]
 
 [[package]]

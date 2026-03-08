@@ -59,10 +59,12 @@ impl<'a> InstallPackageBySnapshot<'a> {
         };
 
         // TODO: skip when already exists in store?
+        let package_id =
+            format!("{}@{}", package_specifier.name, package_specifier.suffix.version());
         let cas_paths = DownloadTarballToStore {
             http_client,
             store_dir: &config.store_dir,
-            package_id: &package_specifier.to_string(),
+            package_id: &package_id,
             package_integrity: integrity,
             package_unpacked_size: None,
             package_url: &tarball_url,

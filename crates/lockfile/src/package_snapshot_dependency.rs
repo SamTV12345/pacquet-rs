@@ -1,4 +1,4 @@
-use crate::{DependencyPath, PkgVerPeer};
+use crate::{DependencyPath, PkgNameVerPeer, PkgVerPeer};
 use derive_more::{Display, From, TryInto};
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum PackageSnapshotDependency {
     PkgVerPeer(PkgVerPeer),
     DependencyPath(DependencyPath),
+    PkgNameVerPeer(PkgNameVerPeer),
 }
 
 #[cfg(test)]
@@ -34,6 +35,9 @@ mod tests {
         case!("1.21.3-rc.0(react@17.0.2)" => PkgVerPeer);
         case!("1.21.3" => PkgVerPeer);
         case!("1.21.3-rc.0" => PkgVerPeer);
+        case!("string-width@4.2.3" => PkgNameVerPeer);
+        case!("'@scope/pkg@1.2.3'" => PkgNameVerPeer);
+        case!("debug@4.4.3(supports-color@8.1.1)" => PkgNameVerPeer);
         case!("/react-json-view@1.21.3(@types/react@17.0.49)(react-dom@17.0.2)(react@17.0.2)" => DependencyPath);
         case!("/react-json-view@1.21.3(react@17.0.2)" => DependencyPath);
         case!("/react-json-view@1.21.3-rc.0(react@17.0.2)" => DependencyPath);
@@ -67,6 +71,9 @@ mod tests {
         case("1.21.3-rc.0(react@17.0.2)");
         case("1.21.3");
         case("1.21.3-rc.0");
+        case("string-width@4.2.3");
+        case("'@scope/pkg@1.2.3'");
+        case("debug@4.4.3(supports-color@8.1.1)");
         case("/react-json-view@1.21.3(@types/react@17.0.49)(react-dom@17.0.2)(react@17.0.2)");
         case("/react-json-view@1.21.3(react@17.0.2)");
         case("/react-json-view@1.21.3-rc.0(react@17.0.2)");

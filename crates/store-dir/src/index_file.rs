@@ -4,7 +4,7 @@ use miette::Diagnostic;
 use pacquet_fs::{EnsureFileError, ensure_file};
 use serde::{Deserialize, Serialize};
 use ssri::{Algorithm, Integrity};
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, fs::File, path::PathBuf};
 
 impl StoreDir {
     /// Path to an index file of a tarball.
@@ -31,7 +31,15 @@ impl StoreDir {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageFilesIndex {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_build: Option<bool>,
     pub files: HashMap<String, PackageFileInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub side_effects: Option<HashMap<String, SideEffectsDiff>>,
 }
 
 /// Value of the [`files`](PackageFilesIndex::files) map.
@@ -44,6 +52,15 @@ pub struct PackageFileInfo {
     pub mode: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SideEffectsDiff {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added: Option<HashMap<String, PackageFileInfo>>,
 }
 
 /// Error type of [`StoreDir::write_index_file`].
@@ -66,12 +83,25 @@ impl StoreDir {
         ensure_file(&file_path, index_content.as_bytes(), Some(0o666))
             .map_err(WriteIndexFileError::WriteFile)
     }
+
+    /// Read a JSON index file of a tarball from the store directory.
+    pub fn read_index_file(
+        &self,
+        integrity: &Integrity,
+        package_id: &str,
+    ) -> Option<PackageFilesIndex> {
+        let path = self.index_file_path(integrity, package_id);
+        let file = File::open(path).ok()?;
+        serde_json::from_reader(file).ok()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ssri::IntegrityOpts;
+    use std::collections::HashMap;
+    use tempfile::tempdir;
 
     #[test]
     fn index_file_path() {
@@ -82,5 +112,59 @@ mod tests {
         let expected = "STORE_DIR/v10/index/bc/d60799116ebef60071b9f2c7dafd7e2a4e1b366e341f750b2de52dd6995ab4-@scope+pkg@1.0.0.json";
         let expected: PathBuf = expected.split('/').collect();
         assert_eq!(&received, &expected);
+    }
+
+    #[test]
+    fn serialize_side_effects_shape() {
+        let value = PackageFilesIndex {
+            name: Some("pkg".to_string()),
+            version: Some("1.0.0".to_string()),
+            requires_build: Some(true),
+            files: HashMap::new(),
+            side_effects: Some(HashMap::from([(
+                "linux;x64;node20".to_string(),
+                SideEffectsDiff {
+                    deleted: Some(vec!["a.js".to_string()]),
+                    added: Some(HashMap::from([(
+                        "b.js".to_string(),
+                        PackageFileInfo {
+                            checked_at: Some(1),
+                            integrity: "sha512-abc".to_string(),
+                            mode: 0o644,
+                            size: Some(1),
+                        },
+                    )])),
+                },
+            )])),
+        };
+
+        let json = serde_json::to_value(value).expect("serialize index");
+        assert!(json.get("sideEffects").is_some());
+        assert!(json["sideEffects"]["linux;x64;node20"].get("deleted").is_some());
+        assert!(json["sideEffects"]["linux;x64;node20"].get("added").is_some());
+    }
+
+    #[test]
+    fn write_and_read_index_roundtrip() {
+        let dir = tempdir().expect("create tempdir");
+        let store_dir = StoreDir::new(dir.path());
+        let integrity = IntegrityOpts::new().algorithm(Algorithm::Sha512).chain(b"hello").result();
+        let package_id = "@scope/pkg@1.0.0";
+
+        let expected = PackageFilesIndex {
+            name: Some("@scope/pkg".to_string()),
+            version: Some("1.0.0".to_string()),
+            requires_build: Some(true),
+            files: HashMap::new(),
+            side_effects: None,
+        };
+
+        store_dir.write_index_file(&integrity, package_id, &expected).expect("write index");
+
+        let received = store_dir.read_index_file(&integrity, package_id).expect("read index");
+        assert_eq!(received.name, expected.name);
+        assert_eq!(received.version, expected.version);
+        assert_eq!(received.requires_build, expected.requires_build);
+        assert_eq!(received.files.len(), expected.files.len());
     }
 }

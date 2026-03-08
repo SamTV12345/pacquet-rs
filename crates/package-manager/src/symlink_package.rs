@@ -7,6 +7,35 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+fn relative_path(target: &Path, from_dir: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut from_components = from_dir.components().peekable();
+    let mut target_components = target.components().peekable();
+
+    while from_components.peek() == target_components.peek() {
+        from_components.next();
+        target_components.next();
+    }
+
+    // If roots differ, fallback to absolute path.
+    if matches!(from_components.peek(), Some(Component::Prefix(_) | Component::RootDir))
+        || matches!(target_components.peek(), Some(Component::Prefix(_) | Component::RootDir))
+    {
+        return target.to_path_buf();
+    }
+
+    let mut relative = PathBuf::new();
+    for _ in from_components {
+        relative.push("..");
+    }
+    for component in target_components {
+        relative.push(component.as_os_str());
+    }
+    relative
+}
+
 /// Error type for [`symlink_package`].
 #[derive(Debug, Display, Error, Diagnostic)]
 pub enum SymlinkPackageError {
@@ -35,20 +64,26 @@ pub fn symlink_package(
     symlink_target: &Path,
     symlink_path: &Path,
 ) -> Result<(), SymlinkPackageError> {
-    // NOTE: symlink target in pacquet is absolute yet in pnpm is relative
-    // TODO: change symlink target to relative
     if let Some(parent) = symlink_path.parent() {
         fs::create_dir_all(parent).map_err(|error| SymlinkPackageError::CreateParentDir {
             dir: parent.to_path_buf(),
             error,
         })?;
     }
-    if let Err(error) = symlink_dir(symlink_target, symlink_path) {
+    #[cfg(unix)]
+    let symlink_target = symlink_path.parent().map_or_else(
+        || symlink_target.to_path_buf(),
+        |parent| relative_path(symlink_target, parent),
+    );
+    #[cfg(windows)]
+    let symlink_target = symlink_target.to_path_buf();
+
+    if let Err(error) = symlink_dir(&symlink_target, symlink_path) {
         match error.kind() {
             ErrorKind::AlreadyExists => {}
             _ => {
                 return Err(SymlinkPackageError::SymlinkDir {
-                    symlink_target: symlink_target.to_path_buf(),
+                    symlink_target,
                     symlink_path: symlink_path.to_path_buf(),
                     error,
                 });

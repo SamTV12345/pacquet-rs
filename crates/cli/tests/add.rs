@@ -84,8 +84,8 @@ pub fn should_symlink_correctly() {
             .join("node_modules")
             .join("@pnpm.e2e")
             .join("hello-world-js-bin")
-            .pipe(fs::read_link)
-            .expect("read link"),
+            .pipe(fs::canonicalize)
+            .expect("canonicalize link"),
         virtual_store_dir
             .join("@pnpm.e2e+hello-world-js-bin@1.0.0")
             .join("node_modules")

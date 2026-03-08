@@ -13,6 +13,10 @@ use std::fs;
 #[cfg(not(target_os = "macos"))] // It causes ConnectionReset on CI
 use pacquet_testing_utils::fixtures::{BIG_LOCKFILE, BIG_MANIFEST};
 
+fn normalize_store_files_for_snapshot(files: Vec<String>) -> Vec<String> {
+    files.into_iter().filter(|path| !path.starts_with("v10/projects/")).collect()
+}
+
 #[test]
 fn should_install_dependencies() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
@@ -44,7 +48,7 @@ fn should_install_dependencies() {
 
     eprintln!("Snapshot");
     let workspace_folders = get_all_folders(&workspace);
-    let store_files = get_all_files(&store_dir);
+    let store_files = normalize_store_files_for_snapshot(get_all_files(&store_dir));
     insta::assert_debug_snapshot!((workspace_folders, store_files));
 
     drop((root, mock_instance)); // cleanup
@@ -69,7 +73,7 @@ fn should_install_exec_files() {
     pacquet.with_arg("install").assert().success();
 
     eprintln!("Listing all files in the store...");
-    let store_files = get_all_files(&store_dir);
+    let store_files = normalize_store_files_for_snapshot(get_all_files(&store_dir));
 
     #[cfg(unix)]
     {

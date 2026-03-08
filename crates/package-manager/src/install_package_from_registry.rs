@@ -191,8 +191,8 @@ mod tests {
 
         // Make sure the symlink is resolving to the correct path
         assert_eq!(
-            fs::read_link(modules_dir.path().join(&package.name)).unwrap(),
-            virtual_store_path
+            fs::canonicalize(modules_dir.path().join(&package.name)).unwrap(),
+            fs::canonicalize(virtual_store_path).unwrap()
         );
     }
 }

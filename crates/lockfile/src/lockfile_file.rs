@@ -1,7 +1,7 @@
 use crate::{
     ComVer, DependencyPath, Lockfile, LockfilePeerDependencyMetaValue, LockfileResolution,
     LockfileSettings, LockfileVersion, MultiProjectSnapshot, PackageSnapshot,
-    PackageSnapshotDependency, PkgName, ProjectSnapshot, ResolvedDependencyMap,
+    PackageSnapshotDependency, PkgName, PkgNameVerPeer, ProjectSnapshot, ResolvedDependencyMap,
     RootProjectSnapshot,
 };
 use derive_more::{Display, Error};
@@ -201,9 +201,30 @@ fn convert_v9_to_lockfile(v9: LockfileV9File) -> Result<Lockfile, LockfileFileEr
     for (snapshot_key, pkg_snapshot) in package_snapshots {
         let dep_path = dependency_path_from_v9_key(&snapshot_key)?;
         let package_id = v9_key_from_dependency_path(&dep_path);
-        let package_info = package_infos.get(&package_id).cloned().ok_or_else(|| {
-            LockfileFileError::MissingPackageInfo { snapshot: snapshot_key.clone(), package_id }
-        })?;
+        let package_info = package_infos
+            .get(&package_id)
+            .cloned()
+            .or_else(|| {
+                let suffix = &dep_path.package_specifier.suffix;
+                if suffix.peer().is_empty() {
+                    return None;
+                }
+                let no_peer_suffix =
+                    suffix.version().to_string().parse().expect("valid semver without peer suffix");
+                let no_peer_dep_path = DependencyPath {
+                    custom_registry: dep_path.custom_registry.clone(),
+                    package_specifier: PkgNameVerPeer::new(
+                        dep_path.package_specifier.name.clone(),
+                        no_peer_suffix,
+                    ),
+                };
+                let no_peer_package_id = v9_key_from_dependency_path(&no_peer_dep_path);
+                package_infos.get(&no_peer_package_id).cloned()
+            })
+            .ok_or_else(|| LockfileFileError::MissingPackageInfo {
+                snapshot: snapshot_key.clone(),
+                package_id,
+            })?;
         packages.insert(dep_path, merge_package_info_and_snapshot(package_info, pkg_snapshot));
     }
 
@@ -503,5 +524,26 @@ mod tests {
                 .to_string(),
             "1.0.0".to_string()
         );
+    }
+
+    #[test]
+    fn parse_v9_snapshot_with_peer_suffix_maps_to_packages_without_peer_suffix() {
+        let v9 = text_block! {
+            "lockfileVersion: '9.0'"
+            "importers:"
+            "  .: {}"
+            "packages:"
+            "  '@radix-ui/react-context@1.1.2':"
+            "    resolution:"
+            "      integrity: sha512-gf6ZldcfCDyNXPRiW3lQjEP1Z9rrUM/4Cn7BZbv3SdTA82zxWRP8OmLwvGR974uuENhGCFgFdN11z3n1Ofpprg=="
+            "snapshots:"
+            "  '@radix-ui/react-context@1.1.2(@types/react@19.2.14)(react@19.2.4)': {}"
+        };
+
+        let lockfile = parse_lockfile_content(v9).expect("parse v9 lockfile");
+        let packages = lockfile.packages.expect("combined package map");
+        assert!(packages.keys().any(|key| {
+            key.to_string() == "/@radix-ui/react-context@1.1.2(@types/react@19.2.14)(react@19.2.4)"
+        }));
     }
 }

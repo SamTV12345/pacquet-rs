@@ -43,6 +43,10 @@ impl StoreDir {
         self.v10()
     }
 
+    pub(crate) fn root_dir(&self) -> &PathBuf {
+        &self.root
+    }
+
     /// The directory that contains all files from the once-installed packages.
     fn files(&self) -> PathBuf {
         self.v10().join("files")

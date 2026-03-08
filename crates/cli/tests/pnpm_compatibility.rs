@@ -24,14 +24,16 @@ fn normalize_store_files(files: &[String]) -> Vec<String> {
         .iter()
         .filter_map(|path| {
             let path = path.replace('\\', "/");
-            let (_, suffix) = path.split_once("/files/")?;
-            // pnpm v10 stores package index metadata in v10/index/*, not in files/*-index.json.
-            // Pacquet currently stores index metadata in files/*-index.json.
-            // For cross-tool compatibility we only compare CAS payload files here.
-            if suffix.ends_with("-index.json") {
-                return None;
+            if let Some((_, suffix)) = path.split_once("/files/") {
+                return Some(format!("files/{suffix}"));
             }
-            Some(format!("files/{suffix}"))
+            if let Some((_, suffix)) = path.split_once("/index/") {
+                return Some(format!("index/{suffix}"));
+            }
+            if let Some((_, suffix)) = path.split_once("/projects/") {
+                return Some(format!("projects/{suffix}"));
+            }
+            None
         })
         .collect::<Vec<_>>();
     normalized.sort();
@@ -293,7 +295,6 @@ fn assert_same_lockfile_for_workspace_manifest(case_name: &str, workspace_spec: 
 }
 
 #[test]
-#[ignore = "requires metadata cache feature which pacquet doesn't yet have"]
 fn store_usable_by_pnpm_offline() {
     let CommandTempCwd { pacquet, pnpm, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();

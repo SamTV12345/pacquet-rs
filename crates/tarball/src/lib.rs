@@ -23,6 +23,24 @@ use tokio::time::{Duration, sleep};
 use tracing::instrument;
 use zune_inflate::{DeflateDecoder, DeflateOptions, errors::InflateDecodeErrors};
 
+fn pkg_requires_build(
+    manifest: Option<&serde_json::Value>,
+    files_index: &HashMap<String, PackageFileInfo>,
+) -> bool {
+    let has_install_scripts = manifest
+        .and_then(|manifest| manifest.get("scripts"))
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|scripts| {
+            ["preinstall", "install", "postinstall"]
+                .into_iter()
+                .any(|name| scripts.get(name).is_some_and(|value| !value.is_null()))
+        });
+    let has_binding_gyp = files_index.contains_key("binding.gyp");
+    let has_hooks =
+        files_index.keys().any(|name| name.starts_with(".hooks/") || name.starts_with(".hooks\\"));
+    has_install_scripts || has_binding_gyp || has_hooks
+}
+
 #[derive(Debug, Display, Error, Diagnostic)]
 #[display("Failed to fetch {url}: {error}")]
 pub struct NetworkError {
@@ -241,7 +259,14 @@ impl<'a> DownloadTarballToStore<'a> {
 
             let ((_, Some(capacity)) | (capacity, None)) = entries.size_hint();
             let mut cas_paths = HashMap::<String, PathBuf>::with_capacity(capacity);
-            let mut pkg_files_idx = PackageFilesIndex { files: HashMap::with_capacity(capacity) };
+            let mut pkg_files_idx = PackageFilesIndex {
+                name: None,
+                version: None,
+                requires_build: None,
+                files: HashMap::with_capacity(capacity),
+                side_effects: None,
+            };
+            let mut package_manifest: Option<serde_json::Value> = None;
 
             for entry in entries {
                 let mut entry = entry.unwrap();
@@ -261,6 +286,9 @@ impl<'a> DownloadTarballToStore<'a> {
                     .into_os_string()
                     .into_string()
                     .expect("entry path must be valid UTF-8");
+                if cleaned_entry_path == "package.json" {
+                    package_manifest = serde_json::from_slice(&buffer).ok();
+                }
                 let (file_path, file_hash) = store_dir
                     .write_cas_file(&buffer, file_is_executable)
                     .map_err(TarballError::WriteCasFile)?;
@@ -283,6 +311,19 @@ impl<'a> DownloadTarballToStore<'a> {
                     tracing::warn!(?previous, "Duplication detected. Old entry has been ejected");
                 }
             }
+
+            pkg_files_idx.name = package_manifest
+                .as_ref()
+                .and_then(|manifest| manifest.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string);
+            pkg_files_idx.version = package_manifest
+                .as_ref()
+                .and_then(|manifest| manifest.get("version"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string);
+            pkg_files_idx.requires_build =
+                Some(pkg_requires_build(package_manifest.as_ref(), &pkg_files_idx.files));
 
             store_dir
                 .write_index_file(&package_integrity, &package_id, &pkg_files_idx)
