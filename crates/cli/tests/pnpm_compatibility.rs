@@ -97,8 +97,8 @@ fn normalized_index_payloads(store_dir: &Path) -> Vec<BTreeMap<String, Comparabl
 }
 
 fn normalized_lockfile(lockfile_text: &str) -> serde_json::Value {
-    let mut value = serde_yaml::from_str::<serde_yaml::Value>(lockfile_text)
-        .expect("parse lockfile YAML");
+    let mut value =
+        serde_yaml::from_str::<serde_yaml::Value>(lockfile_text).expect("parse lockfile YAML");
 
     let Some(root) = value.as_mapping_mut() else {
         return serde_json::to_value(value).expect("convert yaml to json");
@@ -197,9 +197,8 @@ fn assert_same_lockfile_for_registry_case(case: RegistryLockfileCase) {
 
     eprintln!("[{case_name}] Installing with pacquet...");
     pacquet.with_arg("install").assert().success();
-    let pacquet_lockfile = normalized_lockfile(
-        &fs::read_to_string(&lockfile_path).expect("read pacquet lockfile"),
-    );
+    let pacquet_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pacquet lockfile"));
 
     cleanup();
 
@@ -255,9 +254,8 @@ fn assert_same_lockfile_for_workspace_manifest(case_name: &str, workspace_spec: 
 
     eprintln!("[{case_name}] Installing with pacquet...");
     pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
-    let pacquet_lockfile = normalized_lockfile(
-        &fs::read_to_string(&lockfile_path).expect("read pacquet lockfile"),
-    );
+    let pacquet_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pacquet lockfile"));
 
     cleanup();
 
