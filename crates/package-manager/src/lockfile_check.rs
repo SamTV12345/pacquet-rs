@@ -226,8 +226,7 @@ pub(crate) fn satisfies_package_manifest(
         for dep_name in package_dep_names {
             let manifest_specifier =
                 package_deps.get(dep_name.as_str()).expect("dependency exists");
-            let specifier_mismatch =
-                specifiers.get(dep_name.as_str()) != Some(manifest_specifier);
+            let specifier_mismatch = specifiers.get(dep_name.as_str()) != Some(manifest_specifier);
             if !importer_deps.contains_key(dep_name.as_str())
                 || (strict_specifier_match && specifier_mismatch)
             {
