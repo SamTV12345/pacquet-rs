@@ -306,7 +306,7 @@ where
             os: None,
             libc: None,
             deprecated: None,
-            has_bin: None,
+            has_bin: package_version.has_bin().then_some(true),
             prepare: None,
             requires_build: None,
             bundled_dependencies: None,

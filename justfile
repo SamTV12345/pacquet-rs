@@ -1,5 +1,7 @@
 #!/usr/bin/env -S just --justfile
 
+set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
+
 _default:
   just --list -u
 

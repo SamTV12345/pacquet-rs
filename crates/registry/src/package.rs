@@ -97,6 +97,7 @@ mod tests {
             dependencies: Some(dependencies),
             dev_dependencies: None,
             peer_dependencies: Some(peer_dependencies),
+            bin: None,
         };
 
         let dependencies = |peer| version.dependencies(peer).collect::<HashMap<_, _>>();
@@ -116,6 +117,7 @@ mod tests {
             dependencies: None,
             dev_dependencies: None,
             peer_dependencies: None,
+            bin: None,
         };
 
         assert_eq!(version.serialize(true), "3.2.1");

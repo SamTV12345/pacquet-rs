@@ -8,8 +8,10 @@ use std::{
     fs,
     io::ErrorKind,
     mem::forget,
+    net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     sync::OnceLock,
+    time::Duration,
 };
 use sysinfo::{Pid, Signal};
 
@@ -23,6 +25,16 @@ pub struct RegistryInfo {
 impl RegistryInfo {
     pub fn url(&self) -> String {
         port_to_url(self.port)
+    }
+
+    fn is_alive(&self) -> bool {
+        let mut system = sysinfo::System::new();
+        let pid = Pid::from_u32(self.pid);
+        if system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), false) == 0 {
+            return false;
+        }
+        let addr = SocketAddr::from(([127, 0, 0, 1], self.port));
+        TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
     }
 }
 
@@ -41,10 +53,21 @@ impl PreparedRegistryInfo {
 
     pub fn try_load() -> Option<Self> {
         match PreparedRegistryInfo::path().pipe(fs::read_to_string) {
-            Ok(text) => text
-                .pipe_as_ref(serde_json::from_str::<PreparedRegistryInfo>)
-                .expect("parse prepared registry info")
-                .pipe(Some),
+            Ok(text) => {
+                let prepared = text
+                    .pipe_as_ref(serde_json::from_str::<PreparedRegistryInfo>)
+                    .expect("parse prepared registry info");
+                if prepared.info.is_alive() {
+                    Some(prepared)
+                } else {
+                    eprintln!(
+                        "warn: Prepared mocked registry info is stale (pid={}, port={}). Removing it.",
+                        prepared.info.pid, prepared.info.port
+                    );
+                    PreparedRegistryInfo::delete();
+                    None
+                }
+            }
             Err(error) if error.kind() == ErrorKind::NotFound => None,
             Err(error) => panic!("Failed to load prepared registry info: {error}"),
         }
@@ -56,7 +79,11 @@ impl PreparedRegistryInfo {
     }
 
     fn delete() {
-        fs::remove_file(PreparedRegistryInfo::path()).expect("delete prepared registry info")
+        if let Err(error) = fs::remove_file(PreparedRegistryInfo::path())
+            && error.kind() != ErrorKind::NotFound
+        {
+            panic!("delete prepared registry info: {error}");
+        }
     }
 
     pub async fn launch(options: MockInstanceOptions<'_>) -> Self {

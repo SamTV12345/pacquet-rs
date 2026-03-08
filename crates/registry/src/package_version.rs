@@ -15,6 +15,8 @@ pub struct PackageVersion {
     pub dependencies: Option<HashMap<String, String>>,
     pub dev_dependencies: Option<HashMap<String, String>>,
     pub peer_dependencies: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub bin: Option<serde_json::Value>,
 }
 
 impl PartialEq for PackageVersion {
@@ -79,5 +81,9 @@ impl PackageVersion {
     pub fn serialize(&self, save_exact: bool) -> String {
         let prefix = if save_exact { "" } else { "^" };
         format!("{0}{1}", prefix, self.version)
+    }
+
+    pub fn has_bin(&self) -> bool {
+        self.bin.is_some()
     }
 }
