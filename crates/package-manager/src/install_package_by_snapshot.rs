@@ -92,6 +92,7 @@ impl<'a> InstallPackageBySnapshot<'a> {
             package_id: &package_id,
             package_integrity: integrity,
             package_unpacked_size: None,
+            auth_header: config.auth_header_for_url(&tarball_url),
             package_url: &tarball_url,
         }
         .run_without_mem_cache()

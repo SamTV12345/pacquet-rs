@@ -55,11 +55,6 @@ where
 
         let result = async {
         tracing::info!(target: "pacquet::install", "Start all");
-        if let Some(project_dir) = manifest.path().parent()
-            && let Err(error) = config.store_dir.register_project(project_dir)
-        {
-            tracing::warn!(target: "pacquet::install", ?project_dir, "Failed to register project in store: {error}");
-        }
 
         match (config.lockfile, frozen_lockfile, lockfile) {
             (false, _, _) => {

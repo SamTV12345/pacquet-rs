@@ -32,19 +32,21 @@ impl PackageVersion {
         tag: PackageTag,
         http_client: &ThrottledClient,
         registry: &str,
+        auth_header: Option<&str>,
     ) -> Result<Self, RegistryError> {
         let url = || format!("{registry}{name}/{tag}");
         let network_error = |error| NetworkError { error, url: url() };
 
         http_client
             .run_with_permit(|client| {
-                client
-                    .get(url())
-                    .header(
-                        "accept",
-                        "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*",
-                    )
-                    .send()
+                let mut request = client.get(url()).header(
+                    "accept",
+                    "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*",
+                );
+                if let Some(auth_header) = auth_header {
+                    request = request.header("authorization", auth_header);
+                }
+                request.send()
             })
             .await
             .map_err(network_error)?
@@ -88,5 +90,44 @@ impl PackageVersion {
 
     pub fn has_bin(&self) -> bool {
         self.bin.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::Server;
+    use pacquet_network::ThrottledClient;
+
+    #[tokio::test]
+    async fn fetch_from_registry_sends_authorization_header() {
+        let mut server = Server::new_async().await;
+        let body = serde_json::json!({
+            "name": "pkg",
+            "version": "1.0.0",
+            "dist": {
+                "tarball": "https://registry.example/pkg/-/pkg-1.0.0.tgz"
+            }
+        });
+        let _mock = server
+            .mock("GET", "/pkg/latest")
+            .match_header("authorization", "Bearer top-secret")
+            .with_status(200)
+            .with_body(body.to_string())
+            .create_async()
+            .await;
+        let registry = format!("{}/", server.url());
+
+        let value = PackageVersion::fetch_from_registry(
+            "pkg",
+            PackageTag::Latest,
+            &ThrottledClient::new_from_cpu_count(),
+            &registry,
+            Some("Bearer top-secret"),
+        )
+        .await
+        .expect("fetch package version with auth header");
+
+        assert_eq!(value.name, "pkg");
     }
 }

@@ -64,11 +64,14 @@ where
             resolved_packages,
         } = self;
 
+        let auth_header =
+            config.auth_header_for_url(&format!("{}{}/latest", &config.registry, package_name));
         let latest_version = PackageVersion::fetch_from_registry(
             package_name,
             PackageTag::Latest, // TODO: add support for specifying tags
             http_client,
             &config.registry,
+            auth_header.as_deref(),
         )
         .await
         .expect("resolve latest tag"); // TODO: properly propagate this error

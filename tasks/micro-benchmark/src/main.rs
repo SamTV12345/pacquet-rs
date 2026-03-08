@@ -42,6 +42,7 @@ fn bench_tarball(c: &mut Criterion, server: &mut ServerGuard, fixtures_folder: &
                 package_id: "@fastify/error@3.3.0",
                 package_integrity: &package_integrity,
                 package_unpacked_size: Some(16697),
+                auth_header: None,
                 package_url: url,
             }
             .run_without_mem_cache()

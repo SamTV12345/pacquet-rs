@@ -1683,6 +1683,7 @@ dependencies = [
 name = "pacquet-npmrc"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "home",
  "pacquet-store-dir",
  "pipe-trait",
@@ -1690,6 +1691,7 @@ dependencies = [
  "serde",
  "serde_ini",
  "tempfile",
+ "url",
 ]
 
 [[package]]
@@ -1748,6 +1750,7 @@ version = "0.0.1"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
+ "mockito",
  "node-semver",
  "pacquet-diagnostics",
  "pacquet-network",
@@ -1801,7 +1804,9 @@ dependencies = [
  "base64 0.22.1",
  "dashmap",
  "derive_more",
+ "flate2",
  "miette 7.6.0",
+ "mockito",
  "pacquet-diagnostics",
  "pacquet-fs",
  "pacquet-network",
@@ -1811,6 +1816,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "ssri",
  "tar",
  "tempfile",

@@ -31,18 +31,20 @@ impl Package {
         name: &str,
         http_client: &ThrottledClient,
         registry: &str,
+        auth_header: Option<&str>,
     ) -> Result<Self, RegistryError> {
         let url = || format!("{registry}{name}"); // TODO: use reqwest URL directly
         let network_error = |error| NetworkError { error, url: url() };
         http_client
             .run_with_permit(|client| {
-                client
-                    .get(url())
-                    .header(
-                        "accept",
-                        "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*",
-                    )
-                    .send()
+                let mut request = client.get(url()).header(
+                    "accept",
+                    "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*",
+                );
+                if let Some(auth_header) = auth_header {
+                    request = request.header("authorization", auth_header);
+                }
+                request.send()
             })
             .await
             .map_err(network_error)?
@@ -78,7 +80,9 @@ impl Package {
 mod tests {
     use std::collections::HashMap;
 
+    use mockito::Server;
     use node_semver::Version;
+    use pacquet_network::ThrottledClient;
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -124,5 +128,42 @@ mod tests {
 
         assert_eq!(version.serialize(true), "3.2.1");
         assert_eq!(version.serialize(false), "^3.2.1");
+    }
+
+    #[tokio::test]
+    async fn fetch_from_registry_sends_authorization_header() {
+        let mut server = Server::new_async().await;
+        let body = serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "1.0.0" },
+            "versions": {
+                "1.0.0": {
+                    "name": "pkg",
+                    "version": "1.0.0",
+                    "dist": {
+                        "tarball": "https://registry.example/pkg/-/pkg-1.0.0.tgz"
+                    }
+                }
+            }
+        });
+        let _mock = server
+            .mock("GET", "/pkg")
+            .match_header("authorization", "Bearer secret-token")
+            .with_status(200)
+            .with_body(body.to_string())
+            .create_async()
+            .await;
+        let registry = format!("{}/", server.url());
+
+        let value = Package::fetch_from_registry(
+            "pkg",
+            &ThrottledClient::new_from_cpu_count(),
+            &registry,
+            Some("Bearer secret-token"),
+        )
+        .await
+        .expect("fetch package with auth header");
+
+        assert_eq!(value.name, "pkg");
     }
 }

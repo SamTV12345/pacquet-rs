@@ -129,34 +129,15 @@ impl InstallArgs {
 }
 
 fn config_for_project(config: &Npmrc, project_dir: &Path) -> Npmrc {
-    Npmrc {
-        hoist: config.hoist,
-        hoist_pattern: config.hoist_pattern.clone(),
-        public_hoist_pattern: config.public_hoist_pattern.clone(),
-        shamefully_hoist: config.shamefully_hoist,
-        store_dir: StoreDir::new(config.store_dir.display().to_string()),
-        modules_dir: project_dir.join("node_modules"),
-        node_linker: match config.node_linker {
-            NodeLinker::Isolated => NodeLinker::Isolated,
-            NodeLinker::Hoisted => NodeLinker::Hoisted,
-            NodeLinker::Pnp => NodeLinker::Pnp,
-        },
-        symlink: config.symlink,
-        virtual_store_dir: config.virtual_store_dir.clone(),
-        package_import_method: config.package_import_method,
-        modules_cache_max_age: config.modules_cache_max_age,
-        lockfile: config.lockfile,
-        prefer_frozen_lockfile: config.prefer_frozen_lockfile,
-        lockfile_include_tarball_url: config.lockfile_include_tarball_url,
-        exclude_links_from_lockfile: config.exclude_links_from_lockfile,
-        inject_workspace_packages: config.inject_workspace_packages,
-        peers_suffix_max_length: config.peers_suffix_max_length,
-        registry: config.registry.clone(),
-        auto_install_peers: config.auto_install_peers,
-        dedupe_peer_dependents: config.dedupe_peer_dependents,
-        strict_peer_dependencies: config.strict_peer_dependencies,
-        resolve_peers_from_workspace_root: config.resolve_peers_from_workspace_root,
-    }
+    let mut next = config.clone();
+    next.store_dir = StoreDir::new(config.store_dir.display().to_string());
+    next.modules_dir = project_dir.join("node_modules");
+    next.node_linker = match config.node_linker {
+        NodeLinker::Isolated => NodeLinker::Isolated,
+        NodeLinker::Hoisted => NodeLinker::Hoisted,
+        NodeLinker::Pnp => NodeLinker::Pnp,
+    };
+    next
 }
 
 fn to_lockfile_importer_id(workspace_root: &Path, project_dir: &Path) -> String {

@@ -57,11 +57,16 @@ impl<'a> InstallPackageFromRegistry<'a> {
             Self::parse_npm_alias(version_range).unwrap_or((name, version_range));
 
         Ok(if let Ok(tag) = requested_range.parse::<Tag>() {
+            let auth_header = config.auth_header_for_url(&format!(
+                "{}{requested_name}/{requested_range}",
+                &config.registry
+            ));
             let package_version = PackageVersion::fetch_from_registry(
                 requested_name,
                 tag.into(),
                 http_client,
                 &config.registry,
+                auth_header.as_deref(),
             )
             .await
             .map_err(InstallPackageFromRegistryError::FetchFromRegistry)?;
@@ -69,10 +74,16 @@ impl<'a> InstallPackageFromRegistry<'a> {
             self.install_package_version(&package_version, name).await?;
             package_version
         } else {
-            let package =
-                Package::fetch_from_registry(requested_name, http_client, &config.registry)
-                    .await
-                    .map_err(InstallPackageFromRegistryError::FetchFromRegistry)?;
+            let auth_header =
+                config.auth_header_for_url(&format!("{}{requested_name}", &config.registry));
+            let package = Package::fetch_from_registry(
+                requested_name,
+                http_client,
+                &config.registry,
+                auth_header.as_deref(),
+            )
+            .await
+            .map_err(InstallPackageFromRegistryError::FetchFromRegistry)?;
             let package_version = package.pinned_version(requested_range).unwrap(); // TODO: propagate error for when no version satisfies range
             progress_reporter::resolved();
             self.install_package_version(package_version, name).await?;
@@ -135,6 +146,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
                 .as_ref()
                 .expect("has integrity field"),
             package_unpacked_size: package_version.dist.unpacked_size,
+            auth_header: config.auth_header_for_url(package_version.as_tarball_url()),
             package_url: package_version.as_tarball_url(),
         }
         .run_with_mem_cache(tarball_mem_cache)
@@ -192,30 +204,30 @@ mod tests {
     use tempfile::tempdir;
 
     fn create_config(store_dir: &Path, modules_dir: &Path, virtual_store_dir: &Path) -> Npmrc {
-        Npmrc {
-            hoist: false,
-            hoist_pattern: vec![],
-            public_hoist_pattern: vec![],
-            shamefully_hoist: false,
-            store_dir: StoreDir::new(store_dir),
-            modules_dir: modules_dir.to_path_buf(),
-            node_linker: Default::default(),
-            symlink: false,
-            virtual_store_dir: virtual_store_dir.to_path_buf(),
-            package_import_method: Default::default(),
-            modules_cache_max_age: 0,
-            lockfile: false,
-            prefer_frozen_lockfile: false,
-            lockfile_include_tarball_url: false,
-            exclude_links_from_lockfile: false,
-            inject_workspace_packages: false,
-            peers_suffix_max_length: 1000,
-            registry: "https://registry.npmjs.com/".to_string(),
-            auto_install_peers: false,
-            dedupe_peer_dependents: false,
-            strict_peer_dependencies: false,
-            resolve_peers_from_workspace_root: false,
-        }
+        let mut config = Npmrc::new();
+        config.hoist = false;
+        config.hoist_pattern = vec![];
+        config.public_hoist_pattern = vec![];
+        config.shamefully_hoist = false;
+        config.store_dir = StoreDir::new(store_dir);
+        config.modules_dir = modules_dir.to_path_buf();
+        config.node_linker = Default::default();
+        config.symlink = false;
+        config.virtual_store_dir = virtual_store_dir.to_path_buf();
+        config.package_import_method = Default::default();
+        config.modules_cache_max_age = 0;
+        config.lockfile = false;
+        config.prefer_frozen_lockfile = false;
+        config.lockfile_include_tarball_url = false;
+        config.exclude_links_from_lockfile = false;
+        config.inject_workspace_packages = false;
+        config.peers_suffix_max_length = 1000;
+        config.registry = "https://registry.npmjs.com/".to_string();
+        config.auto_install_peers = false;
+        config.dedupe_peer_dependents = false;
+        config.strict_peer_dependencies = false;
+        config.resolve_peers_from_workspace_root = false;
+        config
     }
 
     #[tokio::test]

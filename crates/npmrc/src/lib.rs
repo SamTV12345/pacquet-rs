@@ -1,11 +1,13 @@
 mod custom_deserializer;
 
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STD};
 use pacquet_store_dir::StoreDir;
 use pipe_trait::Pipe;
 use serde::Deserialize;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
-use std::{fs, path::PathBuf};
+use std::{collections::HashMap, fs, path::PathBuf, process::Command};
+use url::Url;
 
 use crate::custom_deserializer::{
     bool_true, default_hoist_pattern, default_modules_cache_max_age, default_modules_dir,
@@ -165,6 +167,16 @@ pub struct Npmrc {
     /// projects in the workspace use the same versions of the peer dependencies.
     #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
     pub resolve_peers_from_workspace_root: bool,
+
+    /// Raw merged `.npmrc` key/value pairs used for auth resolution.
+    #[serde(skip, default)]
+    raw_settings: HashMap<String, String>,
+    /// Authorization header values keyed by nerfed URL (`//host/path/`).
+    #[serde(skip, default)]
+    auth_headers_by_uri: HashMap<String, String>,
+    /// Largest number of slash-separated segments among auth header keys.
+    #[serde(skip, default)]
+    auth_header_max_parts: usize,
 }
 
 #[cfg(test)]
@@ -175,9 +187,184 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
     ENV_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn parse_raw_npmrc(content: &str) -> HashMap<String, String> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                return None;
+            }
+            let (key, value) = line.split_once('=')?;
+            Some((key.trim().to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+fn read_npmrc_raw(dir: Option<PathBuf>) -> HashMap<String, String> {
+    let Some(dir) = dir else {
+        return HashMap::new();
+    };
+    let path = dir.join(".npmrc");
+    let Ok(content) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    parse_raw_npmrc(&content)
+}
+
+fn normalize_auth_key_uri(uri: &str) -> Option<String> {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("//") {
+        return Some(if trimmed.ends_with('/') {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}/")
+        });
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return nerf_url(trimmed);
+    }
+    None
+}
+
+fn split_auth_setting_key(key: &str) -> Option<(&str, &str)> {
+    let idx = key.rfind(':')?;
+    if idx == 0 || idx + 1 >= key.len() {
+        return None;
+    }
+    Some((&key[..idx], &key[idx + 1..]))
+}
+
+fn nerf_url(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    let mut out = String::from("//");
+    out.push_str(host);
+    if let Some(port) = parsed.port() {
+        out.push(':');
+        out.push_str(&port.to_string());
+    }
+    let path = parsed.path();
+    if path.is_empty() || path == "/" {
+        out.push('/');
+    } else {
+        out.push_str(path);
+        if !path.ends_with('/') {
+            out.push('/');
+        }
+    }
+    Some(out)
+}
+
+fn basic_auth_from_url(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    if parsed.username().is_empty() && parsed.password().is_none() {
+        return None;
+    }
+    let raw = format!("{}:{}", parsed.username(), parsed.password().unwrap_or_default());
+    Some(format!("Basic {}", BASE64_STD.encode(raw)))
+}
+
+fn remove_default_port(url: &str) -> Option<String> {
+    let mut parsed = Url::parse(url).ok()?;
+    let has_default_port =
+        matches!((parsed.scheme(), parsed.port()), ("https", Some(443)) | ("http", Some(80)));
+    if !has_default_port {
+        return None;
+    }
+    if parsed.set_port(None).is_err() {
+        return None;
+    }
+    Some(parsed.to_string())
+}
+
+fn load_token_helper(helper_path: &str) -> Option<String> {
+    let helper = PathBuf::from(helper_path);
+    if !helper.is_absolute() || !helper.exists() {
+        return None;
+    }
+    let output = Command::new(helper).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let token = String::from_utf8(output.stdout).ok()?;
+    Some(token.trim_end().to_string())
+}
+
+fn get_max_parts(keys: impl Iterator<Item = String>) -> usize {
+    keys.map(|key| key.split('/').count()).max().unwrap_or(0)
+}
+
+fn auth_headers_from_settings(
+    settings: &HashMap<String, String>,
+    registry_url: &str,
+) -> (HashMap<String, String>, usize) {
+    let mut auth_by_uri = HashMap::<String, HashMap<String, String>>::new();
+
+    for (key, value) in settings {
+        let Some((uri_key, auth_type)) = split_auth_setting_key(key) else {
+            continue;
+        };
+        let Some(uri) = normalize_auth_key_uri(uri_key) else {
+            continue;
+        };
+        auth_by_uri.entry(uri).or_default().insert(auth_type.to_string(), value.to_string());
+    }
+
+    let mut headers = HashMap::<String, String>::new();
+    for (uri, auth_fields) in &auth_by_uri {
+        if let Some(token_helper) = auth_fields.get("tokenHelper")
+            && let Some(token) = load_token_helper(token_helper)
+        {
+            headers.insert(uri.clone(), token);
+            continue;
+        }
+        if let Some(token) = auth_fields.get("_authToken") {
+            headers.insert(uri.clone(), format!("Bearer {token}"));
+            continue;
+        }
+        if let Some(auth) = auth_fields.get("_auth") {
+            headers.insert(uri.clone(), format!("Basic {auth}"));
+            continue;
+        }
+        if let (Some(username), Some(password_b64)) =
+            (auth_fields.get("username"), auth_fields.get("_password"))
+            && let Ok(decoded) = BASE64_STD.decode(password_b64)
+            && let Ok(password) = String::from_utf8(decoded)
+        {
+            let raw = format!("{username}:{password}");
+            headers.insert(uri.clone(), format!("Basic {}", BASE64_STD.encode(raw)));
+        }
+    }
+
+    let registry_key = normalize_auth_key_uri(registry_url)
+        .or_else(|| nerf_url(registry_url))
+        .unwrap_or_else(|| "//registry.npmjs.org/".to_string());
+    if let Some(token_helper) = settings.get("tokenHelper").and_then(|path| load_token_helper(path))
+    {
+        headers.insert(registry_key.clone(), token_helper);
+    } else if let Some(token) = settings.get("_authToken") {
+        headers.insert(registry_key.clone(), format!("Bearer {token}"));
+    } else if let Some(auth) = settings.get("_auth") {
+        headers.insert(registry_key.clone(), format!("Basic {auth}"));
+    } else if let (Some(username), Some(password)) =
+        (settings.get("username"), settings.get("_password"))
+    {
+        let raw = format!("{username}:{password}");
+        headers.insert(registry_key, format!("Basic {}", BASE64_STD.encode(raw)));
+    }
+
+    let max_parts = get_max_parts(headers.keys().cloned());
+    (headers, max_parts)
+}
+
 impl Npmrc {
     pub fn new() -> Self {
-        let config: Npmrc = serde_ini::from_str("").unwrap(); // TODO: derive `SmartDefault` for `Npmrc and call `Npmrc::default()`
+        let mut config: Npmrc = serde_ini::from_str("").unwrap(); // TODO: derive `SmartDefault` for `Npmrc and call `Npmrc::default()`
+        config.recompute_auth_headers();
         config
     }
 
@@ -194,10 +381,10 @@ impl Npmrc {
         HomeDir: FnOnce() -> Option<PathBuf>,
         Default: FnOnce() -> Npmrc,
     {
-        // TODO: this code makes no sense.
-        // TODO: it should have merged the settings.
+        let current_dir = current_dir().ok();
+        let home_dir = home_dir();
 
-        let load = |dir: PathBuf| -> Option<Npmrc> {
+        let load = |dir: &PathBuf| -> Option<Npmrc> {
             dir.join(".npmrc")
                 .pipe(fs::read_to_string)
                 .ok()? // TODO: should it throw error instead?
@@ -205,11 +392,49 @@ impl Npmrc {
                 .ok() // TODO: should it throw error instead?
         };
 
-        current_dir()
-            .ok()
+        let mut merged_raw = read_npmrc_raw(home_dir.clone());
+        merged_raw.extend(read_npmrc_raw(current_dir.clone()));
+
+        let mut config = current_dir
+            .as_ref()
             .and_then(load)
-            .or_else(|| home_dir().and_then(load))
-            .unwrap_or_else(default)
+            .or_else(|| home_dir.as_ref().and_then(load))
+            .unwrap_or_else(default);
+        config.raw_settings = merged_raw;
+        if !config.raw_settings.contains_key("registry") {
+            config.raw_settings.insert("registry".to_string(), config.registry.clone());
+        }
+        config.recompute_auth_headers();
+        config
+    }
+
+    fn recompute_auth_headers(&mut self) {
+        let (headers, max_parts) = auth_headers_from_settings(&self.raw_settings, &self.registry);
+        self.auth_headers_by_uri = headers;
+        self.auth_header_max_parts = max_parts;
+    }
+
+    pub fn auth_header_for_url(&self, url: &str) -> Option<String> {
+        if let Some(basic) = basic_auth_from_url(url) {
+            return Some(basic);
+        }
+        if self.auth_headers_by_uri.is_empty() {
+            return None;
+        }
+        let try_match = |candidate_url: &str| -> Option<String> {
+            let nerfed = nerf_url(candidate_url)?;
+            let parts = nerfed.split('/').collect::<Vec<_>>();
+            let max_parts = self.auth_header_max_parts.min(parts.len());
+            for idx in (3..max_parts).rev() {
+                let key = format!("{}/", parts[..idx].join("/"));
+                if let Some(value) = self.auth_headers_by_uri.get(&key) {
+                    return Some(value.clone());
+                }
+            }
+            None
+        };
+        try_match(url)
+            .or_else(|| remove_default_port(url).and_then(|without_port| try_match(&without_port)))
     }
 
     /// Persist the config data until the program terminates.
@@ -226,7 +451,7 @@ impl Default for Npmrc {
 
 #[cfg(test)]
 mod tests {
-    use std::env;
+    use std::{collections::HashMap, env};
 
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
@@ -350,7 +575,7 @@ mod tests {
         fs::write(tmp.path().join(".npmrc"), "symlink=false").expect("write to .npmrc");
         let config = Npmrc::current(
             || tmp.path().to_path_buf().pipe(Ok::<_, ()>),
-            || unreachable!("shouldn't reach home dir"),
+            || None,
             || unreachable!("shouldn't reach default"),
         );
         assert!(!config.symlink);
@@ -390,5 +615,74 @@ mod tests {
             || serde_ini::from_str("symlink=false").unwrap(),
         );
         assert!(!config.symlink);
+    }
+
+    #[test]
+    pub fn auth_header_uses_longest_matching_prefix() {
+        let mut config = Npmrc::new();
+        config.registry = "https://reg.example/".to_string();
+        config.raw_settings = HashMap::from([
+            ("registry".to_string(), "https://reg.example/".to_string()),
+            ("//reg.example/:_authToken".to_string(), "outer".to_string()),
+            ("//reg.example/tarballs/:_authToken".to_string(), "inner".to_string()),
+        ]);
+        config.recompute_auth_headers();
+
+        assert_eq!(
+            config.auth_header_for_url("https://reg.example/tarballs/pkg/-/pkg-1.0.0.tgz"),
+            Some("Bearer inner".to_string())
+        );
+        assert_eq!(
+            config.auth_header_for_url("https://reg.example/@scope/pkg"),
+            Some("Bearer outer".to_string())
+        );
+    }
+
+    #[test]
+    pub fn auth_header_supports_global_auth_token_and_default_port() {
+        let mut config = Npmrc::new();
+        config.registry = "https://reg.example/".to_string();
+        config.raw_settings = HashMap::from([
+            ("registry".to_string(), "https://reg.example/".to_string()),
+            ("_authToken".to_string(), "abc123".to_string()),
+        ]);
+        config.recompute_auth_headers();
+
+        assert_eq!(
+            config.auth_header_for_url("https://reg.example:443/pkg"),
+            Some("Bearer abc123".to_string())
+        );
+    }
+
+    #[test]
+    pub fn auth_header_prefers_basic_auth_from_url_credentials() {
+        let config = Npmrc::new();
+        let expected = format!("Basic {}", BASE64_STD.encode("foo:bar"));
+        assert_eq!(config.auth_header_for_url("https://foo:bar@reg.example/pkg"), Some(expected));
+    }
+
+    #[test]
+    pub fn current_merges_raw_auth_settings_from_home_and_project_npmrc() {
+        let home = tempdir().unwrap();
+        let project = tempdir().unwrap();
+
+        fs::write(
+            home.path().join(".npmrc"),
+            "_authToken=from-home\nregistry=https://reg.example/\n",
+        )
+        .expect("write home npmrc");
+        fs::write(project.path().join(".npmrc"), "//reg.example/:_authToken=from-project\n")
+            .expect("write project npmrc");
+
+        let config = Npmrc::current(
+            || Ok::<_, ()>(project.path().to_path_buf()),
+            || Some(home.path().to_path_buf()),
+            Npmrc::new,
+        );
+
+        assert_eq!(
+            config.auth_header_for_url("https://reg.example/foo"),
+            Some("Bearer from-project".to_string())
+        );
     }
 }

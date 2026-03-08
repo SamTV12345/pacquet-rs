@@ -127,6 +127,7 @@ pub struct DownloadTarballToStore<'a> {
     pub package_id: &'a str,
     pub package_integrity: &'a Integrity,
     pub package_unpacked_size: Option<usize>,
+    pub auth_header: Option<String>,
     pub package_url: &'a str,
 }
 
@@ -170,13 +171,20 @@ impl<'a> DownloadTarballToStore<'a> {
     async fn fetch_tarball_with_retry(
         http_client: &ThrottledClient,
         package_url: &str,
+        auth_header: Option<&str>,
     ) -> Result<Vec<u8>, reqwest::Error> {
         const MAX_ATTEMPTS: u32 = 4;
         let mut attempt = 1_u32;
         loop {
             let result = async {
                 let response = http_client
-                    .run_with_permit(|client| client.get(package_url).send())
+                    .run_with_permit(|client| {
+                        let mut request = client.get(package_url);
+                        if let Some(auth_header) = auth_header {
+                            request = request.header("authorization", auth_header);
+                        }
+                        request.send()
+                    })
                     .await?
                     .error_for_status()?;
                 response.bytes().await.map(|bytes| bytes.to_vec())
@@ -252,6 +260,7 @@ impl<'a> DownloadTarballToStore<'a> {
             package_id,
             package_integrity,
             package_unpacked_size,
+            ref auth_header,
             package_url,
             ..
         } = self;
@@ -270,9 +279,11 @@ impl<'a> DownloadTarballToStore<'a> {
         tracing::info!(target: "pacquet::download", ?package_url, "New cache");
 
         let response =
-            Self::fetch_tarball_with_retry(http_client, package_url).await.map_err(|error| {
-                TarballError::FetchTarball(NetworkError { url: package_url.to_string(), error })
-            })?;
+            Self::fetch_tarball_with_retry(http_client, package_url, auth_header.as_deref())
+                .await
+                .map_err(|error| {
+                    TarballError::FetchTarball(NetworkError { url: package_url.to_string(), error })
+                })?;
 
         tracing::info!(target: "pacquet::download", ?package_url, "Download completed");
 
@@ -396,13 +407,31 @@ impl<'a> DownloadTarballToStore<'a> {
 
 #[cfg(test)]
 mod tests {
+    use flate2::{Compression, write::GzEncoder};
+    use mockito::Server;
     use pipe_trait::Pipe;
+    use sha2::{Digest, Sha512};
+    use std::io::Write;
     use tempfile::{TempDir, tempdir};
 
     use super::*;
 
     fn integrity(integrity_str: &str) -> Integrity {
         integrity_str.parse().expect("parse integrity string")
+    }
+
+    fn create_tgz_with_single_file(path: &str, content: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::<u8>::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_path(path).expect("set tar path");
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, content).expect("append tar entry");
+        let tar_bytes = builder.into_inner().expect("finish tar build");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&tar_bytes).expect("gzip write");
+        encoder.finish().expect("finish gzip")
     }
 
     /// **Problem:**
@@ -432,6 +461,7 @@ mod tests {
             package_id: "@fastify/error@3.3.0",
             package_integrity: &integrity("sha512-dj7vjIn1Ar8sVXj2yAXiMNCJDmS9MQ9XMlIecX2dIzzhjSHCyKo4DdXjXMs7wKW2kj6yvVRSpuQjOZ3YLrh56w=="),
             package_unpacked_size: Some(16697),
+            auth_header: None,
             package_url: "https://registry.npmjs.org/@fastify/error/-/error-3.3.0.tgz"
         }
         .run_without_mem_cache()
@@ -472,6 +502,7 @@ mod tests {
             package_id: "@fastify/error@3.3.0",
             package_integrity: &integrity("sha512-aaaan1Ar8sVXj2yAXiMNCJDmS9MQ9XMlIecX2dIzzhjSHCyKo4DdXjXMs7wKW2kj6yvVRSpuQjOZ3YLrh56w=="),
             package_unpacked_size: Some(16697),
+            auth_header: None,
             package_url: "https://registry.npmjs.org/@fastify/error/-/error-3.3.0.tgz",
         }
         .run_without_mem_cache()
@@ -495,6 +526,7 @@ mod tests {
             package_id: "@fastify/error@3.3.0",
             package_integrity: &integrity,
             package_unpacked_size: Some(16697),
+            auth_header: None,
             package_url: "https://registry.npmjs.org/@fastify/error/-/error-3.3.0.tgz",
         }
         .run_without_mem_cache()
@@ -507,6 +539,7 @@ mod tests {
             package_id: "@fastify/error@3.3.0",
             package_integrity: &integrity,
             package_unpacked_size: Some(16697),
+            auth_header: None,
             package_url: "http://127.0.0.1:1/this-url-should-never-be-called.tgz",
         }
         .run_without_mem_cache()
@@ -515,6 +548,42 @@ mod tests {
 
         assert_eq!(first.len(), second.len());
 
+        drop(store_dir);
+    }
+
+    #[tokio::test]
+    async fn should_send_auth_header_when_downloading_tarball() {
+        let (store_dir, store_path) = tempdir_with_leaked_path();
+        let mut server = Server::new_async().await;
+        let body = create_tgz_with_single_file(
+            "package/package.json",
+            br#"{"name":"pkg","version":"1.0.0"}"#,
+        );
+        let hash = Sha512::digest(&body);
+        let integrity = integrity(&format!("sha512-{}", BASE64_STD.encode(hash)));
+        let _mock = server
+            .mock("GET", "/pkg.tgz")
+            .match_header("authorization", "Bearer tarball-secret")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+        let url = format!("{}/pkg.tgz", server.url());
+
+        let cas_files = DownloadTarballToStore {
+            http_client: &Default::default(),
+            store_dir: store_path,
+            package_id: "pkg@1.0.0",
+            package_integrity: &integrity,
+            package_unpacked_size: None,
+            auth_header: Some("Bearer tarball-secret".to_string()),
+            package_url: &url,
+        }
+        .run_without_mem_cache()
+        .await
+        .expect("download tarball with auth header");
+
+        assert!(cas_files.contains_key("package.json"));
         drop(store_dir);
     }
 }
