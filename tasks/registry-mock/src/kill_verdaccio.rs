@@ -1,13 +1,20 @@
 use pipe_trait::Pipe;
+use std::collections::HashSet;
 use sysinfo::{Pid, Process, ProcessRefreshKind, RefreshKind, Signal, System};
 
 fn is_descent_of(process: &Process, suspect_ancestor: Pid, system: &System) -> bool {
-    let Some(parent) = process.parent() else { return false };
-    if parent == suspect_ancestor {
-        return true;
+    let mut current = process.parent();
+    let mut visited = HashSet::<Pid>::new();
+    while let Some(parent) = current {
+        if parent == suspect_ancestor {
+            return true;
+        }
+        if !visited.insert(parent) {
+            return false;
+        }
+        current = system.processes().get(&parent).and_then(Process::parent);
     }
-    let Some(parent) = system.processes().get(&parent) else { return false };
-    is_descent_of(parent, suspect_ancestor, system)
+    false
 }
 
 pub fn kill_all_verdaccio_children_in(root: Pid, signal: Signal, system: &System) -> usize {
