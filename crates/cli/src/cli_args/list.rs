@@ -60,12 +60,9 @@ impl ListArgs {
         if self.optional {
             include.optional_dependencies = true;
         }
-        if self.no_production {
-            include.dependencies = false;
-        }
-        if self.no_dev {
-            include.dev_dependencies = false;
-        }
+        // pnpm currently treats `--no-production` and `--no-dev` as no-op for `list`.
+        let _ = self.no_production;
+        let _ = self.no_dev;
         if self.no_optional {
             include.optional_dependencies = false;
         }

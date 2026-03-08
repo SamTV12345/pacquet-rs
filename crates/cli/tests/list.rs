@@ -40,7 +40,7 @@ fn pacquet_command(workspace: &Path, pacquet_bin: &OsString) -> Command {
 }
 
 #[test]
-fn ls_json_long_depth0_no_production_should_filter_groups_like_pnpm() {
+fn ls_json_long_depth0_no_production_should_match_pnpm_behavior() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
     let AddMockedRegistry { mock_instance, .. } = npmrc_info;
@@ -77,7 +77,14 @@ fn ls_json_long_depth0_no_production_should_filter_groups_like_pnpm() {
         .as_array()
         .and_then(|items| items.first())
         .expect("expect one project in list output");
-    assert!(root_json.get("dependencies").is_none());
+    assert_eq!(
+        root_json
+            .get("dependencies")
+            .and_then(|deps| deps.get("@pnpm.e2e/hello-world-js-bin-parent"))
+            .and_then(|dep| dep.get("from"))
+            .and_then(Value::as_str),
+        Some("@pnpm.e2e/hello-world-js-bin-parent"),
+    );
     assert_eq!(
         root_json
             .get("devDependencies")
