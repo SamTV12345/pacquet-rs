@@ -327,8 +327,8 @@ fn same_file_structure() {
     let modules_dir = workspace.join("node_modules");
     let cleanup = || {
         eprintln!("Cleaning up...");
-        fs::remove_dir_all(&store_dir).expect("delete store dir");
-        fs::remove_dir_all(&modules_dir).expect("delete node_modules");
+        remove_path_if_exists(&store_dir);
+        remove_path_if_exists(&modules_dir);
     };
 
     eprintln!("Creating package.json...");
@@ -367,8 +367,8 @@ fn same_index_file_contents() {
     let modules_dir = workspace.join("node_modules");
     let cleanup = || {
         eprintln!("Cleaning up...");
-        fs::remove_dir_all(&store_dir).expect("delete store dir");
-        fs::remove_dir_all(&modules_dir).expect("delete node_modules");
+        remove_path_if_exists(&store_dir);
+        remove_path_if_exists(&modules_dir);
     };
 
     eprintln!("Creating package.json...");
@@ -408,9 +408,9 @@ fn same_lockfile_content() {
     let lockfile_path = workspace.join("pnpm-lock.yaml");
     let cleanup = || {
         eprintln!("Cleaning up...");
-        fs::remove_dir_all(&store_dir).expect("delete store dir");
-        fs::remove_dir_all(&modules_dir).expect("delete node_modules");
-        fs::remove_file(&lockfile_path).expect("delete lockfile");
+        remove_path_if_exists(&store_dir);
+        remove_path_if_exists(&modules_dir);
+        remove_path_if_exists(&lockfile_path);
     };
 
     eprintln!("Creating package.json...");
@@ -451,9 +451,9 @@ fn same_lockfile_content_with_dev_dependencies() {
     let lockfile_path = workspace.join("pnpm-lock.yaml");
     let cleanup = || {
         eprintln!("Cleaning up...");
-        fs::remove_dir_all(&store_dir).expect("delete store dir");
-        fs::remove_dir_all(&modules_dir).expect("delete node_modules");
-        fs::remove_file(&lockfile_path).expect("delete lockfile");
+        remove_path_if_exists(&store_dir);
+        remove_path_if_exists(&modules_dir);
+        remove_path_if_exists(&lockfile_path);
     };
 
     eprintln!("Creating package.json...");
@@ -524,9 +524,9 @@ fn same_lockfile_content_for_workspace_link() {
     let lockfile_path = workspace.join("pnpm-lock.yaml");
     let cleanup = || {
         eprintln!("Cleaning up...");
-        fs::remove_dir_all(workspace.join("node_modules")).expect("delete node_modules");
-        fs::remove_dir_all(app_dir.join("node_modules")).expect("delete app node_modules");
-        fs::remove_file(&lockfile_path).expect("delete lockfile");
+        remove_path_if_exists(&workspace.join("node_modules"));
+        remove_path_if_exists(&app_dir.join("node_modules"));
+        remove_path_if_exists(&lockfile_path);
     };
 
     eprintln!("Installing with pacquet...");
