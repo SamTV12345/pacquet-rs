@@ -1552,6 +1552,7 @@ dependencies = [
  "pacquet-env",
  "pacquet-executor",
  "pacquet-fs",
+ "pacquet-list",
  "pacquet-lockfile",
  "pacquet-network",
  "pacquet-npmrc",
@@ -1566,6 +1567,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "shlex",
  "tempfile",
  "tokio",
  "walkdir",
@@ -1631,6 +1633,17 @@ dependencies = [
  "reqwest",
  "tokio",
  "which",
+]
+
+[[package]]
+name = "pacquet-list"
+version = "0.0.1"
+dependencies = [
+ "glob",
+ "miette 7.6.0",
+ "pacquet-lockfile",
+ "pacquet-package-manifest",
+ "serde_json",
 ]
 
 [[package]]

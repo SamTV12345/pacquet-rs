@@ -2,9 +2,11 @@ pub mod add;
 pub mod ci;
 pub mod env;
 pub mod install;
+pub mod list;
 pub mod remove;
 pub mod run;
 pub mod store;
+pub mod why;
 
 use crate::State;
 use add::AddArgs;
@@ -12,6 +14,7 @@ use ci::CiArgs;
 use clap::{Parser, Subcommand};
 use env::EnvArgs;
 use install::InstallArgs;
+use list::ListArgs;
 use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::PackageManifest;
@@ -19,6 +22,7 @@ use remove::RemoveArgs;
 use run::{RunArgs, run_start, run_test};
 use std::{env as std_env, path::PathBuf};
 use store::StoreCommand;
+use why::WhyArgs;
 
 /// Experimental package manager for node.js written in rust.
 #[derive(Debug, Parser)]
@@ -50,6 +54,11 @@ pub enum CliCommand {
     /// Remove package(s)
     #[clap(alias = "rm", alias = "uninstall", alias = "un", alias = "uni")]
     Remove(RemoveArgs),
+    /// List installed dependencies.
+    #[clap(alias = "ls", alias = "la", alias = "ll")]
+    List(ListArgs),
+    /// Shows all packages that depend on the specified package.
+    Why(WhyArgs),
     /// Runs a package's "test" script, if one was provided.
     Test,
     /// Runs a defined package script.
@@ -89,6 +98,8 @@ impl CliArgs {
             CliCommand::Ci(args) => args.run(state()?).await?,
             CliCommand::Env(args) => args.run().await?,
             CliCommand::Remove(args) => args.run(state()?).await?,
+            CliCommand::List(args) => args.run(state()?)?,
+            CliCommand::Why(args) => args.run(state()?)?,
             CliCommand::Test => run_test(manifest_path(), npmrc())?,
             CliCommand::Run(args) => args.run(manifest_path(), npmrc())?,
             CliCommand::Start => run_start(manifest_path(), npmrc())?,

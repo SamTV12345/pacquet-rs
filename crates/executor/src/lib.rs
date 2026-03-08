@@ -3,6 +3,8 @@ use miette::Diagnostic;
 use std::{
     env,
     ffi::OsString,
+    fs,
+    hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -28,6 +30,14 @@ pub enum ExecutorError {
         help("Use a .exe shell, or unset script-shell")
     )]
     InvalidScriptShellWindows(#[error(not(source))] String),
+
+    #[display("Failed to resolve current executable path: {_0}")]
+    #[diagnostic(code(pacquet_executor::current_exe))]
+    CurrentExe(#[error(source)] std::io::Error),
+
+    #[display("Failed to prepare pnpm shim: {_0}")]
+    #[diagnostic(code(pacquet_executor::pnpm_shim))]
+    PnpmShim(#[error(source)] std::io::Error),
 }
 
 /// Parameters used to run one lifecycle script in a package.
@@ -42,18 +52,41 @@ pub struct ExecuteLifecycleScript<'a> {
     pub init_cwd: &'a Path,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct LifecycleScriptOutput {
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// Execute one script through a shell with pnpm-like script environment.
 pub fn execute_lifecycle_script(opts: ExecuteLifecycleScript<'_>) -> Result<(), ExecutorError> {
     let command_line = append_args_to_script(opts.script, opts.args);
     let common_env = build_common_env(&opts)?;
 
     if opts.shell_emulator {
-        return execute_with_shell_emulator(opts.pkg_root, &command_line, &common_env);
+        execute_with_shell_emulator(opts.pkg_root, &command_line, &common_env, false)?;
+        return Ok(());
     }
 
     let mut command = shell_command(opts.script_shell, &command_line)?;
     apply_common_env(&mut command, opts.pkg_root, &common_env);
     wait_for_command(&mut command)
+}
+
+/// Execute one script and capture its output instead of writing directly to stdio.
+pub fn execute_lifecycle_script_capture(
+    opts: ExecuteLifecycleScript<'_>,
+) -> Result<LifecycleScriptOutput, ExecutorError> {
+    let command_line = append_args_to_script(opts.script, opts.args);
+    let common_env = build_common_env(&opts)?;
+
+    if opts.shell_emulator {
+        return execute_with_shell_emulator(opts.pkg_root, &command_line, &common_env, true);
+    }
+
+    let mut command = shell_command(opts.script_shell, &command_line)?;
+    apply_common_env(&mut command, opts.pkg_root, &common_env);
+    wait_for_command_capture(&mut command)
 }
 
 fn shell_command(script_shell: Option<&str>, command_line: &str) -> Result<Command, ExecutorError> {
@@ -109,11 +142,57 @@ fn is_windows_batch_file(script_shell: &str) -> bool {
 }
 
 fn prepend_node_modules_bin_paths(pkg_root: &Path) -> Result<OsString, ExecutorError> {
-    let mut bins = collect_node_modules_bin_paths(pkg_root);
+    let mut bins = vec![prepare_pnpm_shim_dir()?];
+    bins.extend(collect_node_modules_bin_paths(pkg_root));
     if let Some(current_path) = env::var_os("PATH") {
         bins.extend(env::split_paths(&current_path));
     }
     env::join_paths(bins).map_err(ExecutorError::JoinPaths)
+}
+
+fn prepare_pnpm_shim_dir() -> Result<PathBuf, ExecutorError> {
+    let pacquet_bin = env::current_exe().map_err(ExecutorError::CurrentExe)?;
+
+    let mut hasher = DefaultHasher::new();
+    pacquet_bin.hash(&mut hasher);
+    let hash = hasher.finish();
+    let shim_dir = env::temp_dir().join("pacquet-pnpm-shim").join(format!("{hash:016x}"));
+    fs::create_dir_all(&shim_dir).map_err(ExecutorError::PnpmShim)?;
+
+    if cfg!(windows) {
+        create_windows_pnpm_shims(&shim_dir, &pacquet_bin)?;
+    } else {
+        create_unix_pnpm_shim(&shim_dir, &pacquet_bin)?;
+    }
+    Ok(shim_dir)
+}
+
+fn create_windows_pnpm_shims(shim_dir: &Path, pacquet_bin: &Path) -> Result<(), ExecutorError> {
+    let pacquet = pacquet_bin.to_string_lossy();
+    let cmd_content = format!("@echo off\r\n\"{pacquet}\" %*\r\n");
+    fs::write(shim_dir.join("pnpm.cmd"), cmd_content).map_err(ExecutorError::PnpmShim)?;
+
+    let ps_path = pacquet.replace('\'', "''");
+    let ps_content = format!("& '{ps_path}' @args\r\n");
+    fs::write(shim_dir.join("pnpm.ps1"), ps_content).map_err(ExecutorError::PnpmShim)?;
+    Ok(())
+}
+
+fn create_unix_pnpm_shim(shim_dir: &Path, pacquet_bin: &Path) -> Result<(), ExecutorError> {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    let pacquet = shell_quote_posix(&pacquet_bin.to_string_lossy());
+    let content = format!("#!/bin/sh\nexec {pacquet} \"$@\"\n");
+    let script_path = shim_dir.join("pnpm");
+    fs::write(&script_path, content).map_err(ExecutorError::PnpmShim)?;
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&script_path).map_err(ExecutorError::PnpmShim)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).map_err(ExecutorError::PnpmShim)?;
+    }
+    Ok(())
 }
 
 fn build_common_env(
@@ -143,11 +222,25 @@ fn wait_for_command(command: &mut Command) -> Result<(), ExecutorError> {
     if status.success() { Ok(()) } else { Err(ExecutorError::ExitStatus { code: status.code() }) }
 }
 
+fn wait_for_command_capture(command: &mut Command) -> Result<LifecycleScriptOutput, ExecutorError> {
+    let output = command.output().map_err(ExecutorError::SpawnCommand)?;
+    if !output.status.success() {
+        return Err(ExecutorError::ExitStatus { code: output.status.code() });
+    }
+
+    Ok(LifecycleScriptOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
 fn execute_with_shell_emulator(
     pkg_root: &Path,
     command_line: &str,
     common_env: &[(OsString, OsString)],
-) -> Result<(), ExecutorError> {
+    capture: bool,
+) -> Result<LifecycleScriptOutput, ExecutorError> {
+    let mut output = LifecycleScriptOutput::default();
     let command_segments = split_by_double_and(command_line);
     for segment in command_segments {
         let tokens = shlex::split(segment.trim()).ok_or_else(|| {
@@ -172,9 +265,15 @@ fn execute_with_shell_emulator(
         for (key, value) in assignments {
             command.env(key, value);
         }
-        wait_for_command(&mut command)?;
+        if capture {
+            let command_output = wait_for_command_capture(&mut command)?;
+            output.stdout.push_str(&command_output.stdout);
+            output.stderr.push_str(&command_output.stderr);
+        } else {
+            wait_for_command(&mut command)?;
+        }
     }
-    Ok(())
+    Ok(output)
 }
 
 fn resolve_program_for_emulator(program: &str, common_env: &[(OsString, OsString)]) -> OsString {

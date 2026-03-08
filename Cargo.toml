@@ -27,6 +27,7 @@ pacquet-executor         = { path = "crates/executor" }
 pacquet-diagnostics      = { path = "crates/diagnostics" }
 pacquet-store-dir        = { path = "crates/store-dir" }
 pacquet-env              = { path = "crates/env" }
+pacquet-list             = { path = "crates/list" }
 
 # Tasks
 pacquet-registry-mock = { path = "tasks/registry-mock" }
