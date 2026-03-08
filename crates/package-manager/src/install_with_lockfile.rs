@@ -118,6 +118,8 @@ where
 
         let project_snapshot =
             merge_project_snapshot(existing_lockfile, lockfile_importer_id, project_snapshot);
+        let project_snapshot =
+            ensure_workspace_importers(project_snapshot, lockfile_dir, workspace_packages);
         let runtime_lockfile_config =
             collect_runtime_lockfile_config(config, manifest, lockfile_dir);
 
@@ -352,6 +354,42 @@ fn merge_project_snapshot(
     }
 }
 
+fn ensure_workspace_importers(
+    project_snapshot: RootProjectSnapshot,
+    lockfile_dir: &Path,
+    workspace_packages: &WorkspacePackages,
+) -> RootProjectSnapshot {
+    if workspace_packages.is_empty() {
+        return project_snapshot;
+    }
+
+    let mut importers = match project_snapshot {
+        RootProjectSnapshot::Single(snapshot) => HashMap::from([(".".to_string(), snapshot)]),
+        RootProjectSnapshot::Multi(snapshot) => snapshot.importers,
+    };
+
+    for info in workspace_packages.values() {
+        let importer_id = to_lockfile_importer_id(lockfile_dir, &info.root_dir);
+        importers.entry(importer_id).or_insert_with(ProjectSnapshot::default);
+    }
+
+    RootProjectSnapshot::Multi(MultiProjectSnapshot { importers })
+}
+
+fn to_lockfile_importer_id(lockfile_dir: &Path, project_dir: &Path) -> String {
+    let Ok(relative) = project_dir.strip_prefix(lockfile_dir) else {
+        return ".".to_string();
+    };
+    if relative.as_os_str().is_empty() {
+        return ".".to_string();
+    }
+    relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn to_relative_path(from: &Path, to: &Path) -> String {
     let from_components = from.components().collect::<Vec<_>>();
     let to_components = to.components().collect::<Vec<_>>();
@@ -380,6 +418,7 @@ fn to_relative_path(from: &Path, to: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WorkspacePackageInfo;
 
     fn empty_lockfile(project_snapshot: RootProjectSnapshot) -> Lockfile {
         Lockfile {
@@ -434,5 +473,36 @@ mod tests {
         let from = Path::new("/repo/packages/app");
         let to = Path::new("/repo/packages/lib");
         assert_eq!(to_relative_path(from, to), "../lib".to_string());
+    }
+
+    #[test]
+    fn ensure_workspace_importers_adds_missing_packages() {
+        let mut workspace_packages = WorkspacePackages::new();
+        workspace_packages.insert(
+            "@repo/app".to_string(),
+            WorkspacePackageInfo {
+                root_dir: Path::new("/repo/packages/app").to_path_buf(),
+                version: "1.0.0".to_string(),
+            },
+        );
+        workspace_packages.insert(
+            "@repo/lib".to_string(),
+            WorkspacePackageInfo {
+                root_dir: Path::new("/repo/packages/lib").to_path_buf(),
+                version: "1.0.0".to_string(),
+            },
+        );
+
+        let mut importers = HashMap::new();
+        importers.insert("packages/app".to_string(), ProjectSnapshot::default());
+        let snapshot = RootProjectSnapshot::Multi(MultiProjectSnapshot { importers });
+
+        let received =
+            ensure_workspace_importers(snapshot, Path::new("/repo"), &workspace_packages);
+        let RootProjectSnapshot::Multi(received) = received else {
+            panic!("expected multi project snapshot");
+        };
+        assert!(received.importers.contains_key("packages/app"));
+        assert!(received.importers.contains_key("packages/lib"));
     }
 }

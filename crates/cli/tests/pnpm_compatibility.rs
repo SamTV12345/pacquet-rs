@@ -97,16 +97,36 @@ fn normalized_index_payloads(store_dir: &Path) -> Vec<BTreeMap<String, Comparabl
 }
 
 fn normalized_lockfile(lockfile_text: &str) -> serde_json::Value {
+    fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut sorted = std::collections::BTreeMap::new();
+                for (key, value) in map {
+                    sorted.insert(key, canonicalize_json(value));
+                }
+                let mut canonical = serde_json::Map::new();
+                for (key, value) in sorted {
+                    canonical.insert(key, value);
+                }
+                serde_json::Value::Object(canonical)
+            }
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.into_iter().map(canonicalize_json).collect())
+            }
+            other => other,
+        }
+    }
+
     let mut value =
         serde_yaml::from_str::<serde_yaml::Value>(lockfile_text).expect("parse lockfile YAML");
 
     let Some(root) = value.as_mapping_mut() else {
-        return serde_json::to_value(value).expect("convert yaml to json");
+        return canonicalize_json(serde_json::to_value(value).expect("convert yaml to json"));
     };
     let settings_key = serde_yaml::Value::String("settings".to_string());
     let Some(settings) = root.get_mut(&settings_key).and_then(serde_yaml::Value::as_mapping_mut)
     else {
-        return serde_json::to_value(value).expect("convert yaml to json");
+        return canonicalize_json(serde_json::to_value(value).expect("convert yaml to json"));
     };
 
     let remove_if = |settings: &mut serde_yaml::Mapping, key: &str, expected: serde_yaml::Value| {
@@ -129,7 +149,7 @@ fn normalized_lockfile(lockfile_text: &str) -> serde_json::Value {
         root.remove(&settings_key);
     }
 
-    serde_json::to_value(value).expect("convert yaml to json")
+    canonicalize_json(serde_json::to_value(value).expect("convert yaml to json"))
 }
 
 fn write_manifest(workspace: &Path, manifest: serde_json::Value) {

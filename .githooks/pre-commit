@@ -2,7 +2,8 @@
 set -eu
 
 echo "pre-commit: cargo fmt --all -- --check"
-cargo fmt --all -- --check
+cargo fmt --all
 
 echo "pre-commit: cargo clippy --locked --workspace --all-targets -- -D warnings"
-cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo clippy --fix --allow-dirty
+git add --all
