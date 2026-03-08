@@ -1,4 +1,6 @@
-use crate::{CreateCasFilesError, SymlinkPackageError, create_cas_files, symlink_package};
+use crate::{
+    CreateCasFilesError, SymlinkPackageError, create_cas_files, progress_reporter, symlink_package,
+};
 use derive_more::{Display, Error};
 use miette::Diagnostic;
 use pacquet_network::ThrottledClient;
@@ -35,30 +37,44 @@ pub enum InstallPackageFromRegistryError {
 }
 
 impl<'a> InstallPackageFromRegistry<'a> {
+    fn parse_npm_alias(version_range: &str) -> Option<(&str, &str)> {
+        let alias = version_range.strip_prefix("npm:")?;
+        let separator = alias.rfind('@');
+        match separator {
+            Some(index) if index > 0 => Some((&alias[..index], &alias[index + 1..])),
+            _ => Some((alias, "latest")),
+        }
+    }
+
     /// Execute the subroutine.
     pub async fn run<Tag>(self) -> Result<PackageVersion, InstallPackageFromRegistryError>
     where
         Tag: FromStr + Into<PackageTag>,
     {
         let &InstallPackageFromRegistry { http_client, config, name, version_range, .. } = &self;
+        let (requested_name, requested_range) =
+            Self::parse_npm_alias(version_range).unwrap_or((name, version_range));
 
-        Ok(if let Ok(tag) = version_range.parse::<Tag>() {
+        Ok(if let Ok(tag) = requested_range.parse::<Tag>() {
             let package_version = PackageVersion::fetch_from_registry(
-                name,
+                requested_name,
                 tag.into(),
                 http_client,
                 &config.registry,
             )
             .await
             .map_err(InstallPackageFromRegistryError::FetchFromRegistry)?;
-            self.install_package_version(&package_version).await?;
+            progress_reporter::resolved();
+            self.install_package_version(&package_version, name).await?;
             package_version
         } else {
-            let package = Package::fetch_from_registry(name, http_client, &config.registry)
-                .await
-                .map_err(InstallPackageFromRegistryError::FetchFromRegistry)?;
-            let package_version = package.pinned_version(version_range).unwrap(); // TODO: propagate error for when no version satisfies range
-            self.install_package_version(package_version).await?;
+            let package =
+                Package::fetch_from_registry(requested_name, http_client, &config.registry)
+                    .await
+                    .map_err(InstallPackageFromRegistryError::FetchFromRegistry)?;
+            let package_version = package.pinned_version(requested_range).unwrap(); // TODO: propagate error for when no version satisfies range
+            progress_reporter::resolved();
+            self.install_package_version(package_version, name).await?;
             package_version.clone()
         })
     }
@@ -66,6 +82,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
     async fn install_package_version(
         self,
         package_version: &PackageVersion,
+        symlink_name: &str,
     ) -> Result<(), InstallPackageFromRegistryError> {
         let InstallPackageFromRegistry {
             tarball_mem_cache,
@@ -94,6 +111,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
         .run_with_mem_cache(tarball_mem_cache)
         .await
         .map_err(InstallPackageFromRegistryError::DownloadTarballToStore)?;
+        progress_reporter::fetched();
 
         let save_path = config
             .virtual_store_dir
@@ -101,7 +119,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
             .join("node_modules")
             .join(&package_version.name);
 
-        let symlink_path = node_modules_dir.join(&package_version.name);
+        let symlink_path = node_modules_dir.join(symlink_name);
 
         tracing::info!(target: "pacquet::import", ?save_path, ?symlink_path, "Import package");
 
@@ -110,6 +128,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
 
         symlink_package(&save_path, &symlink_path)
             .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
+        progress_reporter::linked();
 
         Ok(())
     }

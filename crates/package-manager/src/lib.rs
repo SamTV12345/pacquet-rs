@@ -11,6 +11,7 @@ mod install_with_lockfile;
 mod install_without_lockfile;
 mod link_file;
 mod lockfile_check;
+mod progress_reporter;
 mod symlink_direct_dependencies;
 mod symlink_package;
 mod workspace_packages;

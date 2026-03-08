@@ -1,7 +1,11 @@
 use crate::State;
 use clap::Args;
+use miette::Context;
+use pacquet_lockfile::Lockfile;
 use pacquet_package_manager::Install;
-use pacquet_package_manifest::DependencyGroup;
+use pacquet_package_manifest::{DependencyGroup, PackageManifest};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Args)]
 pub struct InstallDependencyOptions {
@@ -61,25 +65,81 @@ impl InstallArgs {
             resolved_packages,
         } = &state;
         let InstallArgs { dependency_options, frozen_lockfile } = self;
+        let dependency_groups = dependency_options.dependency_groups().collect::<Vec<_>>();
 
-        Install {
-            tarball_mem_cache,
-            http_client,
-            config,
-            manifest,
-            lockfile: lockfile.as_ref(),
-            lockfile_dir,
-            lockfile_importer_id,
-            workspace_packages,
-            dependency_groups: dependency_options.dependency_groups(),
-            frozen_lockfile,
-            resolved_packages,
+        let mut install_targets = BTreeMap::<String, PathBuf>::new();
+        install_targets.insert(lockfile_importer_id.clone(), manifest.path().to_path_buf());
+
+        let is_workspace_root = lockfile_importer_id == "."
+            && manifest.path().parent().is_some_and(|parent| parent == lockfile_dir.as_path());
+        if is_workspace_root {
+            for info in workspace_packages.values() {
+                let importer_id = to_lockfile_importer_id(lockfile_dir, &info.root_dir);
+                install_targets
+                    .entry(importer_id)
+                    .or_insert_with(|| info.root_dir.join("package.json"));
+            }
         }
-        .run()
-        .await?;
+
+        let mut current_lockfile = lockfile.clone();
+        for (importer_id, manifest_path) in install_targets {
+            let workspace_manifest = if manifest_path == manifest.path() {
+                None
+            } else {
+                Some(PackageManifest::from_path(manifest_path.clone()).wrap_err_with(|| {
+                    format!("load workspace manifest: {}", manifest_path.display())
+                })?)
+            };
+            let target_manifest = workspace_manifest.as_ref().unwrap_or(manifest);
+            let project_dir = target_manifest
+                .path()
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| lockfile_dir.to_path_buf());
+            let mut target_config = (*config).clone();
+            target_config.modules_dir = project_dir.join("node_modules");
+            let target_config = target_config.leak();
+
+            Install {
+                tarball_mem_cache,
+                http_client,
+                config: target_config,
+                manifest: target_manifest,
+                lockfile: current_lockfile.as_ref(),
+                lockfile_dir,
+                lockfile_importer_id: &importer_id,
+                workspace_packages,
+                dependency_groups: dependency_groups.iter().copied(),
+                frozen_lockfile,
+                resolved_packages,
+            }
+            .run()
+            .await?;
+
+            current_lockfile = if config.lockfile {
+                Lockfile::load_from_dir(lockfile_dir)
+                    .wrap_err("reload lockfile after workspace install")?
+            } else {
+                None
+            };
+        }
 
         Ok(())
     }
+}
+
+fn to_lockfile_importer_id(workspace_root: &Path, project_dir: &Path) -> String {
+    let Ok(relative) = project_dir.strip_prefix(workspace_root) else {
+        return ".".to_string();
+    };
+    if relative.as_os_str().is_empty() {
+        return ".".to_string();
+    }
+    relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[cfg(test)]

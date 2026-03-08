@@ -13,6 +13,7 @@ pub struct PackageVersion {
     pub version: node_semver::Version,
     pub dist: PackageDistribution,
     pub dependencies: Option<HashMap<String, String>>,
+    pub optional_dependencies: Option<HashMap<String, String>>,
     pub dev_dependencies: Option<HashMap<String, String>>,
     pub peer_dependencies: Option<HashMap<String, String>>,
     #[serde(default)]
@@ -66,6 +67,7 @@ impl PackageVersion {
         with_peer_dependencies: bool,
     ) -> impl Iterator<Item = (&'_ str, &'_ str)> {
         let dependencies = self.dependencies.iter().flatten();
+        let optional_dependencies = self.optional_dependencies.iter().flatten();
 
         let peer_dependencies = with_peer_dependencies
             .then_some(&self.peer_dependencies)
@@ -74,6 +76,7 @@ impl PackageVersion {
             .flatten();
 
         dependencies
+            .chain(optional_dependencies)
             .chain(peer_dependencies)
             .map(|(name, version)| (name.as_str(), version.as_str()))
     }

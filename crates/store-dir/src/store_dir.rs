@@ -12,7 +12,7 @@ pub type FileHash = digest::Output<Sha512>;
 /// * The files in `node_modules` directories are hardlinks or reflinks to the files in the store directory.
 /// * The store directory can and often act as a global shared cache of all installation of different workspaces.
 /// * The location of the store directory can be customized by `store-dir` field.
-#[derive(Debug, PartialEq, Eq, From, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, From, Deserialize, Serialize)]
 #[serde(transparent)]
 pub struct StoreDir {
     /// Path to the root of the store directory from which all sub-paths are derived.

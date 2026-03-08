@@ -1,7 +1,7 @@
 use crate::{
     InstallFrozenLockfile, InstallWithLockfile, InstallWithoutLockfile, ResolvedPackages,
     WorkspacePackages, collect_runtime_lockfile_config, get_outdated_lockfile_setting,
-    satisfies_package_manifest,
+    progress_reporter, satisfies_package_manifest,
 };
 use pacquet_lockfile::{Lockfile, RootProjectSnapshot};
 use pacquet_network::ThrottledClient;
@@ -49,6 +49,11 @@ where
             frozen_lockfile,
         } = self;
 
+        let dependency_groups = dependency_groups.into_iter().collect::<Vec<_>>();
+        let direct_dependencies = manifest.dependencies(dependency_groups.iter().copied()).count();
+        progress_reporter::start(direct_dependencies, frozen_lockfile);
+
+        let result = async {
         tracing::info!(target: "pacquet::install", "Start all");
         if let Some(project_dir) = manifest.path().parent()
             && let Err(error) = config.store_dir.register_project(project_dir)
@@ -64,12 +69,61 @@ where
                     http_client,
                     config,
                     manifest,
-                    dependency_groups,
+                    dependency_groups: dependency_groups.clone(),
                 }
                 .run()
                 .await;
             }
-            (true, false, Some(_)) | (true, false, None) => {
+            (true, false, Some(lockfile)) => {
+                let runtime_lockfile_config =
+                    collect_runtime_lockfile_config(config, manifest, lockfile_dir);
+                let maybe_project_snapshot = match &lockfile.project_snapshot {
+                    RootProjectSnapshot::Single(snapshot) => Some(snapshot),
+                    RootProjectSnapshot::Multi(snapshot) => {
+                        snapshot.importers.get(lockfile_importer_id)
+                    }
+                };
+
+                let lockfile_is_reusable = maybe_project_snapshot.is_some_and(|project_snapshot| {
+                    get_outdated_lockfile_setting(lockfile, &runtime_lockfile_config).is_none()
+                        && satisfies_package_manifest(
+                            project_snapshot,
+                            manifest,
+                            config.auto_install_peers,
+                            config.exclude_links_from_lockfile,
+                            lockfile.lockfile_version.major >= 9,
+                        )
+                        .is_ok()
+                });
+
+                if lockfile_is_reusable {
+                    InstallFrozenLockfile {
+                        http_client,
+                        config,
+                        project_snapshot: maybe_project_snapshot.expect("checked above"),
+                        packages: lockfile.packages.as_ref(),
+                        dependency_groups: dependency_groups.clone(),
+                    }
+                    .run()
+                    .await;
+                } else {
+                    InstallWithLockfile {
+                        tarball_mem_cache,
+                        resolved_packages,
+                        http_client,
+                        config,
+                        manifest,
+                        existing_lockfile: Some(lockfile),
+                        lockfile_dir,
+                        lockfile_importer_id,
+                        workspace_packages,
+                        dependency_groups: dependency_groups.clone(),
+                    }
+                    .run()
+                    .await;
+                }
+            }
+            (true, false, None) => {
                 InstallWithLockfile {
                     tarball_mem_cache,
                     resolved_packages,
@@ -80,7 +134,7 @@ where
                     lockfile_dir,
                     lockfile_importer_id,
                     workspace_packages,
-                    dependency_groups,
+                    dependency_groups: dependency_groups.clone(),
                 }
                 .run()
                 .await;
@@ -137,7 +191,7 @@ where
                     config,
                     project_snapshot,
                     packages: packages.as_ref(),
-                    dependency_groups,
+                    dependency_groups: dependency_groups.clone(),
                 }
                 .run()
                 .await;
@@ -147,6 +201,11 @@ where
         tracing::info!(target: "pacquet::install", "Complete all");
 
         Ok(())
+        }
+        .await;
+
+        progress_reporter::finish(result.is_ok());
+        result
     }
 }
 

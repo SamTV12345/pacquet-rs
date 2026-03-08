@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fmt::Write as _,
     io::{Cursor, Read},
     path::PathBuf,
     sync::Arc,
@@ -130,6 +131,42 @@ pub struct DownloadTarballToStore<'a> {
 }
 
 impl<'a> DownloadTarballToStore<'a> {
+    fn cas_paths_from_store_index(
+        store_dir: &StoreDir,
+        package_integrity: &Integrity,
+        package_id: &str,
+    ) -> Option<HashMap<String, PathBuf>> {
+        let index =
+            std::panic::catch_unwind(|| store_dir.read_index_file(package_integrity, package_id))
+                .ok()
+                .flatten()?;
+        let v10_dir = store_dir.tmp().parent()?.to_path_buf();
+        let files_dir = v10_dir.join("files");
+
+        let mut cas_paths = HashMap::with_capacity(index.files.len());
+        for (file_name, file_info) in index.files {
+            let integrity = file_info.integrity.strip_prefix("sha512-")?;
+            let hash_bytes = BASE64_STD.decode(integrity).ok()?;
+            if hash_bytes.len() != 64 {
+                return None;
+            }
+
+            let mut hex = String::with_capacity(hash_bytes.len() * 2);
+            for byte in &hash_bytes {
+                let _ = write!(&mut hex, "{byte:02x}");
+            }
+
+            let suffix = if file_mode::is_all_exec(file_info.mode) { "-exec" } else { "" };
+            let cas_path = files_dir.join(&hex[..2]).join(format!("{}{}", &hex[2..], suffix));
+            if !cas_path.is_file() {
+                return None;
+            }
+            cas_paths.insert(file_name, cas_path);
+        }
+
+        Some(cas_paths)
+    }
+
     async fn fetch_tarball_with_retry(
         http_client: &ThrottledClient,
         package_url: &str,
@@ -218,6 +255,17 @@ impl<'a> DownloadTarballToStore<'a> {
             package_url,
             ..
         } = self;
+
+        if let Some(cas_paths) =
+            Self::cas_paths_from_store_index(store_dir, package_integrity, package_id)
+        {
+            tracing::info!(
+                target: "pacquet::download",
+                ?package_url,
+                "Reused package from store index cache"
+            );
+            return Ok(cas_paths);
+        }
 
         tracing::info!(target: "pacquet::download", ?package_url, "New cache");
 
@@ -429,6 +477,43 @@ mod tests {
         .run_without_mem_cache()
         .await
         .expect_err("checksum mismatch");
+
+        drop(store_dir);
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn should_reuse_store_index_without_network() {
+        let (store_dir, store_path) = tempdir_with_leaked_path();
+        let integrity = integrity(
+            "sha512-dj7vjIn1Ar8sVXj2yAXiMNCJDmS9MQ9XMlIecX2dIzzhjSHCyKo4DdXjXMs7wKW2kj6yvVRSpuQjOZ3YLrh56w==",
+        );
+
+        let first = DownloadTarballToStore {
+            http_client: &Default::default(),
+            store_dir: store_path,
+            package_id: "@fastify/error@3.3.0",
+            package_integrity: &integrity,
+            package_unpacked_size: Some(16697),
+            package_url: "https://registry.npmjs.org/@fastify/error/-/error-3.3.0.tgz",
+        }
+        .run_without_mem_cache()
+        .await
+        .expect("first download");
+
+        let second = DownloadTarballToStore {
+            http_client: &Default::default(),
+            store_dir: store_path,
+            package_id: "@fastify/error@3.3.0",
+            package_integrity: &integrity,
+            package_unpacked_size: Some(16697),
+            package_url: "http://127.0.0.1:1/this-url-should-never-be-called.tgz",
+        }
+        .run_without_mem_cache()
+        .await
+        .expect("reuse from store cache");
+
+        assert_eq!(first.len(), second.len());
 
         drop(store_dir);
     }

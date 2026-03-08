@@ -9,6 +9,7 @@ use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_registry::PackageVersion;
 use pacquet_tarball::MemCache;
 use pipe_trait::Pipe;
+use std::path::Path;
 
 /// In-memory cache for packages that have started resolving dependencies.
 ///
@@ -53,6 +54,18 @@ impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
         let _: Vec<()> = manifest
             .dependencies(dependency_groups.into_iter())
             .map(|(name, version_range)| async move {
+                if let Some(link_target) = version_range.strip_prefix("link:") {
+                    let project_dir = manifest.path().parent().unwrap_or_else(|| Path::new("."));
+                    let link_target = if Path::new(link_target).is_absolute() {
+                        Path::new(link_target).to_path_buf()
+                    } else {
+                        project_dir.join(link_target)
+                    };
+                    crate::symlink_package(&link_target, &config.modules_dir.join(name))
+                        .expect("symlink local link dependency");
+                    return;
+                }
+
                 let dependency = InstallPackageFromRegistry {
                     tarball_mem_cache,
                     http_client,

@@ -45,6 +45,15 @@ where
                             .join("node_modules")
                             .join(&name_str)
                     }
+                    ResolvedDependencyVersion::PkgNameVerPeer(name_ver_peer) => {
+                        let virtual_store_name = name_ver_peer.to_virtual_store_name();
+                        let target_name = name_ver_peer.name.to_string();
+                        config
+                            .virtual_store_dir
+                            .join(virtual_store_name)
+                            .join("node_modules")
+                            .join(target_name)
+                    }
                     ResolvedDependencyVersion::Link(link) => {
                         let relative = link.strip_prefix("link:").unwrap_or(link);
                         config
@@ -56,7 +65,9 @@ where
                 };
 
                 symlink_package(&symlink_target, &config.modules_dir.join(&name_str))
-                    .expect("symlink pkg"); // TODO: properly propagate this error
+                    .unwrap_or_else(|error| {
+                        panic!("direct dependency symlink should succeed ({name_str}): {error}")
+                    });
             });
     }
 }

@@ -328,3 +328,76 @@ fn workspace_protocol_dependency_should_link_local_package() {
 
     drop(root); // cleanup
 }
+
+#[test]
+fn link_protocol_dependency_should_link_local_package() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let lib_dir = workspace.join("src");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create src dir");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write linked package manifest");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "link:../src"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let linked_dep = app_dir.join("node_modules/@repo/lib");
+    assert!(linked_dep.exists());
+    assert!(is_symlink_or_junction(&linked_dep).unwrap());
+
+    let lockfile_content =
+        fs::read_to_string(app_dir.join("pnpm-lock.yaml")).expect("read app lockfile");
+    assert!(lockfile_content.contains("version: link:../src"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn npm_alias_dependency_should_install_under_alias_name() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "name": "app",
+        "version": "1.0.0",
+        "dependencies": {
+            "hello-alias": "npm:@pnpm.e2e/hello-world-js-bin@1.0.0"
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_arg("install").assert().success();
+
+    let alias_path = workspace.join("node_modules/hello-alias");
+    assert!(alias_path.exists());
+    assert!(is_symlink_or_junction(&alias_path).unwrap());
+
+    let lockfile_content =
+        fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read lockfile");
+    assert!(lockfile_content.contains("specifier: npm:@pnpm.e2e/hello-world-js-bin@1.0.0"));
+    assert!(lockfile_content.contains("version: '@pnpm.e2e/hello-world-js-bin@1.0.0'"));
+
+    drop((root, mock_instance)); // cleanup
+}

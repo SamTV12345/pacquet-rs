@@ -14,7 +14,7 @@ use crate::custom_deserializer::{
     deserialize_registry, deserialize_store_dir, deserialize_u16, deserialize_u64,
 };
 
-#[derive(Debug, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum NodeLinker {
     /// dependencies are symlinked from a virtual store at node_modules/.pnpm.
@@ -52,7 +52,7 @@ pub enum PackageImportMethod {
     CloneOrCopy,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Npmrc {
     /// When true, all dependencies are hoisted to node_modules/.pnpm/node_modules.

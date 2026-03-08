@@ -31,6 +31,7 @@ mod tests {
         }
 
         case!("1.21.3(@types/react@17.0.49)(react-dom@17.0.2)(react@17.0.2)" => PkgVerPeer);
+        case!("0.27.1" => PkgVerPeer);
         case!("1.21.3(react@17.0.2)" => PkgVerPeer);
         case!("1.21.3-rc.0(react@17.0.2)" => PkgVerPeer);
         case!("1.21.3" => PkgVerPeer);
@@ -67,6 +68,7 @@ mod tests {
         }
 
         case("1.21.3(@types/react@17.0.49)(react-dom@17.0.2)(react@17.0.2)");
+        case("0.27.1");
         case("1.21.3(react@17.0.2)");
         case("1.21.3-rc.0(react@17.0.2)");
         case("1.21.3");

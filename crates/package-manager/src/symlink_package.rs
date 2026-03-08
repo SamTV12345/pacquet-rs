@@ -53,6 +53,21 @@ pub enum SymlinkPackageError {
         #[error(source)]
         error: io::Error,
     },
+
+    #[display("Failed to remove existing path at {path:?}: {error}")]
+    RemoveExistingPath {
+        path: PathBuf,
+        #[error(source)]
+        error: io::Error,
+    },
+
+    #[display("Failed to rename existing path at {path:?} to {rename_to:?}: {error}")]
+    RenameExistingPath {
+        path: PathBuf,
+        rename_to: PathBuf,
+        #[error(source)]
+        error: io::Error,
+    },
 }
 
 /// Create symlink for a package.
@@ -78,17 +93,119 @@ pub fn symlink_package(
     #[cfg(windows)]
     let symlink_target = symlink_target.to_path_buf();
 
-    if let Err(error) = symlink_dir(&symlink_target, symlink_path) {
-        match error.kind() {
-            ErrorKind::AlreadyExists => {}
-            _ => {
-                return Err(SymlinkPackageError::SymlinkDir {
-                    symlink_target,
+    force_symlink(&symlink_target, symlink_path, false)
+}
+
+fn force_symlink(
+    symlink_target: &Path,
+    symlink_path: &Path,
+    rename_tried: bool,
+) -> Result<(), SymlinkPackageError> {
+    let initial_error = match symlink_dir(symlink_target, symlink_path) {
+        Ok(()) => return Ok(()),
+        Err(error)
+            if matches!(error.kind(), ErrorKind::AlreadyExists | ErrorKind::IsADirectory) =>
+        {
+            error
+        }
+        Err(error) => {
+            return Err(SymlinkPackageError::SymlinkDir {
+                symlink_target: symlink_target.to_path_buf(),
+                symlink_path: symlink_path.to_path_buf(),
+                error,
+            });
+        }
+    };
+
+    if existing_points_to_target(symlink_target, symlink_path) {
+        return Ok(());
+    }
+
+    if rename_tried {
+        remove_existing_path(symlink_path)?;
+    } else {
+        rename_existing_path(symlink_path).map_err(|error| {
+            if error.kind() == ErrorKind::NotFound {
+                SymlinkPackageError::SymlinkDir {
+                    symlink_target: symlink_target.to_path_buf(),
                     symlink_path: symlink_path.to_path_buf(),
+                    error: initial_error,
+                }
+            } else {
+                SymlinkPackageError::RenameExistingPath {
+                    path: symlink_path.to_path_buf(),
+                    rename_to: ignored_path(symlink_path),
                     error,
-                });
+                }
             }
+        })?;
+    }
+
+    force_symlink(symlink_target, symlink_path, true)
+}
+
+fn existing_points_to_target(symlink_target: &Path, symlink_path: &Path) -> bool {
+    let compare_target = if symlink_target.is_absolute() {
+        symlink_target.to_path_buf()
+    } else {
+        symlink_path
+            .parent()
+            .map_or_else(|| symlink_target.to_path_buf(), |parent| parent.join(symlink_target))
+    };
+    fs::canonicalize(symlink_path)
+        .ok()
+        .zip(fs::canonicalize(compare_target).ok())
+        .is_some_and(|(existing, wanted)| existing == wanted)
+}
+
+fn ignored_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .map_or_else(|| "unknown".to_string(), |name| name.to_string_lossy().into_owned());
+    parent.join(format!(".ignored_{file_name}"))
+}
+
+fn remove_existing_path(path: &Path) -> Result<(), SymlinkPackageError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        SymlinkPackageError::RemoveExistingPath { path: path.to_path_buf(), error }
+    })?;
+
+    if metadata.file_type().is_symlink() {
+        fs::remove_file(path).map_err(|error| SymlinkPackageError::RemoveExistingPath {
+            path: path.to_path_buf(),
+            error,
+        })?;
+        return Ok(());
+    }
+
+    if metadata.is_dir() {
+        fs::remove_dir_all(path).map_err(|error| SymlinkPackageError::RemoveExistingPath {
+            path: path.to_path_buf(),
+            error,
+        })?;
+        return Ok(());
+    }
+
+    fs::remove_file(path).map_err(|error| SymlinkPackageError::RemoveExistingPath {
+        path: path.to_path_buf(),
+        error,
+    })?;
+    Ok(())
+}
+
+fn rename_existing_path(path: &Path) -> Result<(), io::Error> {
+    let rename_to = ignored_path(path);
+    if rename_to.exists() {
+        match fs::symlink_metadata(&rename_to) {
+            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&rename_to)?,
+            Ok(_) => fs::remove_file(&rename_to)?,
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
     }
-    Ok(())
+    fs::rename(path, &rename_to)
 }

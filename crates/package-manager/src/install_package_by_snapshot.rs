@@ -1,4 +1,4 @@
-use crate::{CreateVirtualDirBySnapshot, CreateVirtualDirError};
+use crate::{CreateVirtualDirBySnapshot, CreateVirtualDirError, progress_reporter};
 use derive_more::{Display, Error};
 use miette::Diagnostic;
 use pacquet_lockfile::{DependencyPath, LockfileResolution, PackageSnapshot, PkgNameVerPeer};
@@ -72,6 +72,7 @@ impl<'a> InstallPackageBySnapshot<'a> {
         .run_without_mem_cache()
         .await
         .map_err(InstallPackageBySnapshotError::DownloadTarball)?;
+        progress_reporter::fetched();
 
         CreateVirtualDirBySnapshot {
             virtual_store_dir: &config.virtual_store_dir,
@@ -82,6 +83,7 @@ impl<'a> InstallPackageBySnapshot<'a> {
         }
         .run()
         .map_err(InstallPackageBySnapshotError::CreateVirtualDir)?;
+        progress_reporter::linked();
 
         Ok(())
     }

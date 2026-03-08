@@ -1,7 +1,8 @@
 use crate::symlink_package;
 use pacquet_lockfile::{PackageSnapshotDependency, PkgName, PkgNameVerPeer};
-use rayon::prelude::*;
 use std::{collections::HashMap, path::Path};
+#[cfg(windows)]
+use std::{thread, time::Duration};
 
 /// Create symlink layout of dependencies for a package in a virtual dir.
 ///
@@ -11,7 +12,7 @@ pub fn create_symlink_layout(
     virtual_root: &Path,
     virtual_node_modules_dir: &Path,
 ) {
-    dependencies.par_iter().for_each(|(alias, spec)| {
+    for (alias, spec) in dependencies {
         let (virtual_store_name, target_package_name) = match spec {
             PackageSnapshotDependency::PkgVerPeer(ver_peer) => {
                 let package_specifier = PkgNameVerPeer::new(alias.clone(), ver_peer.clone()); // TODO: remove copying here
@@ -26,10 +27,24 @@ pub fn create_symlink_layout(
             ),
         };
         let alias_str = alias.to_string();
-        symlink_package(
-            &virtual_root.join(virtual_store_name).join("node_modules").join(target_package_name),
-            &virtual_node_modules_dir.join(alias_str),
-        )
-        .expect("symlink pkg successful"); // TODO: properly propagate this error
-    });
+        let symlink_target =
+            virtual_root.join(virtual_store_name).join("node_modules").join(target_package_name);
+        let symlink_path = virtual_node_modules_dir.join(alias_str);
+        let symlink_result = symlink_package(&symlink_target, &symlink_path);
+        #[cfg(windows)]
+        let symlink_result = if symlink_result.is_err() {
+            let mut retry = symlink_result;
+            for _ in 0..2 {
+                thread::sleep(Duration::from_millis(20));
+                retry = symlink_package(&symlink_target, &symlink_path);
+                if retry.is_ok() {
+                    break;
+                }
+            }
+            retry
+        } else {
+            symlink_result
+        };
+        symlink_result.unwrap_or_else(|error| panic!("symlink pkg should succeed: {error}"));
+    }
 }

@@ -16,7 +16,10 @@ use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_registry::PackageVersion;
 use pacquet_tarball::MemCache;
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 /// Install dependencies from package.json and update `pnpm-lock.yaml`.
 #[must_use]
@@ -67,6 +70,13 @@ where
         for (name, version_range) in manifest.dependencies(dependency_groups.iter().copied()) {
             let key = (name.to_string(), version_range.to_string());
             if resolved_direct_dependencies.contains_key(&key) {
+                continue;
+            }
+
+            if let Some(resolved_package) =
+                resolve_link_dependency(config, manifest.path(), name, version_range)
+            {
+                resolved_direct_dependencies.insert(key, resolved_package);
                 continue;
             }
 
@@ -168,6 +178,14 @@ where
         .expect("install package from registry");
 
         let ver_peer = Self::to_pkg_ver_peer(&package_version);
+        let resolved_version = if package_version.name == name {
+            ResolvedDependencyVersion::PkgVerPeer(ver_peer.clone())
+        } else {
+            ResolvedDependencyVersion::PkgNameVerPeer(PkgNameVerPeer::new(
+                Self::parse_pkg_name(&package_version.name),
+                ver_peer.clone(),
+            ))
+        };
         let dependency_path = Self::to_dependency_path(&package_version);
         let virtual_store_name = package_version.to_virtual_store_name();
 
@@ -196,12 +214,17 @@ where
 
                 snapshot_dependencies.insert(
                     Self::parse_pkg_name(&dependency_name),
-                    PackageSnapshotDependency::PkgVerPeer(match resolved_dependency.version {
-                        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => ver_peer,
+                    match resolved_dependency.version {
+                        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
+                            PackageSnapshotDependency::PkgVerPeer(ver_peer)
+                        }
+                        ResolvedDependencyVersion::PkgNameVerPeer(name_ver_peer) => {
+                            PackageSnapshotDependency::PkgNameVerPeer(name_ver_peer)
+                        }
                         ResolvedDependencyVersion::Link(_) => {
                             panic!("workspace links are not supported in transitive dependencies")
                         }
-                    }),
+                    },
                 );
             }
 
@@ -210,7 +233,7 @@ where
             package_snapshots.insert(dependency_path, package_snapshot);
         }
 
-        ResolvedPackage { version: ResolvedDependencyVersion::PkgVerPeer(ver_peer) }
+        ResolvedPackage { version: resolved_version }
     }
 
     fn build_project_snapshot(
@@ -419,6 +442,33 @@ fn to_relative_path(from: &Path, to: &Path) -> String {
     }
 
     if relative_parts.is_empty() { ".".to_string() } else { relative_parts.join("/") }
+}
+
+fn resolve_link_dependency(
+    config: &'static Npmrc,
+    manifest_path: &Path,
+    name: &str,
+    version_range: &str,
+) -> Option<ResolvedPackage> {
+    let link_target = version_range.strip_prefix("link:")?;
+    let project_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let local_dep_path = normalize_local_dependency_path(project_dir, link_target);
+    let symlink_path = config.modules_dir.join(name);
+    symlink_package(&local_dep_path, &symlink_path).expect("symlink local link dependency");
+    Some(ResolvedPackage {
+        version: ResolvedDependencyVersion::Link(format!(
+            "link:{}",
+            link_target.replace('\\', "/")
+        )),
+    })
+}
+
+fn normalize_local_dependency_path(project_dir: &Path, target: &str) -> PathBuf {
+    let candidate = Path::new(target);
+    if candidate.is_absolute() {
+        return candidate.to_path_buf();
+    }
+    project_dir.join(candidate)
 }
 
 #[cfg(test)]
