@@ -63,11 +63,14 @@ where
                             .join(relative)
                     }
                 };
+                let dependency_path = config.modules_dir.join(&name_str);
+                if dependency_path.exists() {
+                    return;
+                }
 
-                symlink_package(&symlink_target, &config.modules_dir.join(&name_str))
-                    .unwrap_or_else(|error| {
-                        panic!("direct dependency symlink should succeed ({name_str}): {error}")
-                    });
+                symlink_package(&symlink_target, &dependency_path).unwrap_or_else(|error| {
+                    panic!("direct dependency symlink should succeed ({name_str}): {error}")
+                });
             });
     }
 }

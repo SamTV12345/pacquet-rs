@@ -2,12 +2,14 @@ use crate::State;
 use clap::Args;
 use miette::Context;
 use pacquet_lockfile::Lockfile;
+use pacquet_npmrc::{NodeLinker, Npmrc};
 use pacquet_package_manager::Install;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
+use pacquet_store_dir::StoreDir;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct InstallDependencyOptions {
     /// pacquet will not install any package listed in devDependencies and will remove those insofar
     /// they were already installed, if the NODE_ENV environment variable is set to production.
@@ -96,9 +98,7 @@ impl InstallArgs {
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| lockfile_dir.to_path_buf());
-            let mut target_config = (*config).clone();
-            target_config.modules_dir = project_dir.join("node_modules");
-            let target_config = target_config.leak();
+            let target_config = config_for_project(config, &project_dir).leak();
 
             Install {
                 tarball_mem_cache,
@@ -125,6 +125,37 @@ impl InstallArgs {
         }
 
         Ok(())
+    }
+}
+
+fn config_for_project(config: &Npmrc, project_dir: &Path) -> Npmrc {
+    Npmrc {
+        hoist: config.hoist,
+        hoist_pattern: config.hoist_pattern.clone(),
+        public_hoist_pattern: config.public_hoist_pattern.clone(),
+        shamefully_hoist: config.shamefully_hoist,
+        store_dir: StoreDir::new(config.store_dir.display().to_string()),
+        modules_dir: project_dir.join("node_modules"),
+        node_linker: match config.node_linker {
+            NodeLinker::Isolated => NodeLinker::Isolated,
+            NodeLinker::Hoisted => NodeLinker::Hoisted,
+            NodeLinker::Pnp => NodeLinker::Pnp,
+        },
+        symlink: config.symlink,
+        virtual_store_dir: config.virtual_store_dir.clone(),
+        package_import_method: config.package_import_method,
+        modules_cache_max_age: config.modules_cache_max_age,
+        lockfile: config.lockfile,
+        prefer_frozen_lockfile: config.prefer_frozen_lockfile,
+        lockfile_include_tarball_url: config.lockfile_include_tarball_url,
+        exclude_links_from_lockfile: config.exclude_links_from_lockfile,
+        inject_workspace_packages: config.inject_workspace_packages,
+        peers_suffix_max_length: config.peers_suffix_max_length,
+        registry: config.registry.clone(),
+        auto_install_peers: config.auto_install_peers,
+        dedupe_peer_dependents: config.dedupe_peer_dependents,
+        strict_peer_dependencies: config.strict_peer_dependencies,
+        resolve_peers_from_workspace_root: config.resolve_peers_from_workspace_root,
     }
 }
 

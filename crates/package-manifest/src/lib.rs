@@ -189,6 +189,36 @@ impl PackageManifest {
         Ok(())
     }
 
+    pub fn remove_dependency(
+        &mut self,
+        name: &str,
+        groups: impl IntoIterator<Item = DependencyGroup>,
+    ) -> Result<bool, PackageManifestError> {
+        let mut removed = false;
+
+        for group in groups {
+            let dependency_type: &str = group.into();
+            let mut remove_field = false;
+
+            if let Some(field) = self.value.get_mut(dependency_type) {
+                if let Some(dependencies) = field.as_object_mut() {
+                    removed |= dependencies.remove(name).is_some();
+                    remove_field = dependencies.is_empty();
+                } else {
+                    return Err(PackageManifestError::InvalidAttribute(
+                        "dependencies attribute should be an object".to_string(),
+                    ));
+                }
+            }
+
+            if remove_field && let Some(root) = self.value.as_object_mut() {
+                root.remove(dependency_type);
+            }
+        }
+
+        Ok(removed)
+    }
+
     pub fn script(
         &self,
         command: &str,
@@ -330,5 +360,26 @@ mod tests {
         case!(r#"{ "bundleDependencies": true }"# => true.pipe(BundleDependencies::Boolean).pipe(Some));
         case!(r#"{ "bundledDependencies": true }"# => true.pipe(BundleDependencies::Boolean).pipe(Some));
         case!(r#"{}"# => None);
+    }
+
+    #[test]
+    fn should_remove_dependency() {
+        let dir = tempdir().unwrap();
+        let tmp = dir.path().join("package.json");
+        let mut manifest = PackageManifest::create_if_needed(tmp).unwrap();
+        manifest.add_dependency("left-pad", "1.0.0", DependencyGroup::Prod).unwrap();
+        manifest.add_dependency("left-pad", "1.0.0", DependencyGroup::Dev).unwrap();
+        manifest.add_dependency("foo", "1.0.0", DependencyGroup::Prod).unwrap();
+
+        let removed = manifest
+            .remove_dependency("left-pad", [DependencyGroup::Prod, DependencyGroup::Dev])
+            .unwrap();
+        assert!(removed);
+
+        let prod: HashMap<_, _> = manifest.dependencies([DependencyGroup::Prod]).collect();
+        let dev: HashMap<_, _> = manifest.dependencies([DependencyGroup::Dev]).collect();
+        assert!(!prod.contains_key("left-pad"));
+        assert!(!dev.contains_key("left-pad"));
+        assert!(prod.contains_key("foo"));
     }
 }

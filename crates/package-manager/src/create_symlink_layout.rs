@@ -1,6 +1,6 @@
 use crate::symlink_package;
 use pacquet_lockfile::{PackageSnapshotDependency, PkgName, PkgNameVerPeer};
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, fs, path::Path};
 #[cfg(windows)]
 use std::{thread, time::Duration};
 
@@ -30,6 +30,9 @@ pub fn create_symlink_layout(
         let symlink_target =
             virtual_root.join(virtual_store_name).join("node_modules").join(target_package_name);
         let symlink_path = virtual_node_modules_dir.join(alias_str);
+        if path_points_to_target(&symlink_target, &symlink_path) {
+            continue;
+        }
         let symlink_result = symlink_package(&symlink_target, &symlink_path);
         #[cfg(windows)]
         let symlink_result = if symlink_result.is_err() {
@@ -47,4 +50,14 @@ pub fn create_symlink_layout(
         };
         symlink_result.unwrap_or_else(|error| panic!("symlink pkg should succeed: {error}"));
     }
+}
+
+fn path_points_to_target(target: &Path, link: &Path) -> bool {
+    if !link.exists() {
+        return false;
+    }
+    fs::canonicalize(link)
+        .ok()
+        .zip(fs::canonicalize(target).ok())
+        .is_some_and(|(existing, wanted)| existing == wanted)
 }

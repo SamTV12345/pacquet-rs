@@ -1,0 +1,242 @@
+use crate::State;
+use clap::Args;
+use miette::{Context, IntoDiagnostic};
+use pacquet_package_manager::Install;
+use pacquet_package_manifest::{DependencyGroup, PackageManifest};
+use serde_json::Value;
+use std::{fs, path::Path};
+
+#[derive(Debug, Args)]
+pub struct RemoveDependencyOptions {
+    /// Remove the dependency only from dependencies.
+    #[clap(short = 'P', long)]
+    save_prod: bool,
+    /// Remove the dependency only from devDependencies.
+    #[clap(short = 'D', long)]
+    save_dev: bool,
+    /// Remove the dependency only from optionalDependencies.
+    #[clap(short = 'O', long)]
+    save_optional: bool,
+}
+
+impl RemoveDependencyOptions {
+    fn dependency_groups(&self) -> Vec<DependencyGroup> {
+        let &RemoveDependencyOptions { save_prod, save_dev, save_optional } = self;
+        if save_prod || save_dev || save_optional {
+            return std::iter::empty()
+                .chain(save_prod.then_some(DependencyGroup::Prod))
+                .chain(save_dev.then_some(DependencyGroup::Dev))
+                .chain(save_optional.then_some(DependencyGroup::Optional))
+                .collect();
+        }
+
+        vec![
+            DependencyGroup::Prod,
+            DependencyGroup::Dev,
+            DependencyGroup::Optional,
+            DependencyGroup::Peer,
+        ]
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct RemoveArgs {
+    /// Package names to remove.
+    pub packages: Vec<String>,
+    /// --save-prod, --save-dev, --save-optional
+    #[clap(flatten)]
+    pub dependency_options: RemoveDependencyOptions,
+}
+
+impl RemoveArgs {
+    pub async fn run(self, mut state: State) -> miette::Result<()> {
+        let RemoveArgs { packages, dependency_options } = self;
+        if packages.is_empty() {
+            miette::bail!("At least one dependency name should be specified for removal");
+        }
+
+        let State {
+            tarball_mem_cache,
+            http_client,
+            config,
+            manifest,
+            lockfile,
+            lockfile_dir,
+            lockfile_importer_id,
+            workspace_packages,
+            resolved_packages,
+        } = &mut state;
+
+        let groups = dependency_options.dependency_groups();
+        let mut missing = Vec::<String>::new();
+        let manifest_path = manifest.path().to_path_buf();
+        let mut manifest_json: Value = fs::read_to_string(&manifest_path)
+            .into_diagnostic()
+            .wrap_err("read package.json before removal")
+            .and_then(|content| {
+                serde_json::from_str(&content)
+                    .into_diagnostic()
+                    .wrap_err("parse package.json before removal")
+            })?;
+
+        for package_name in &packages {
+            let removed = remove_dependency_from_manifest_json(
+                &mut manifest_json,
+                package_name,
+                groups.iter().copied(),
+            )
+            .wrap_err_with(|| format!("remove {package_name} from package.json"))?;
+            if !removed {
+                missing.push(package_name.to_string());
+                continue;
+            }
+
+            let direct_dep_path = config.modules_dir.join(package_name);
+            let _ = remove_existing_path(&direct_dep_path);
+        }
+
+        if !missing.is_empty() {
+            miette::bail!("Cannot remove missing dependency: {}", missing.join(", "));
+        }
+
+        fs::write(
+            &manifest_path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&manifest_json)
+                    .into_diagnostic()
+                    .wrap_err("serialize package.json after removal")?
+            ),
+        )
+        .into_diagnostic()
+        .wrap_err("save package.json")?;
+        *manifest = PackageManifest::from_path(manifest_path)
+            .wrap_err("reload package.json after removal")?;
+
+        Install {
+            tarball_mem_cache,
+            resolved_packages,
+            http_client,
+            config,
+            manifest,
+            lockfile: lockfile.as_ref(),
+            lockfile_dir,
+            lockfile_importer_id,
+            workspace_packages,
+            dependency_groups: [
+                DependencyGroup::Prod,
+                DependencyGroup::Dev,
+                DependencyGroup::Optional,
+            ],
+            frozen_lockfile: false,
+        }
+        .run()
+        .await
+        .wrap_err("reinstall after removal")
+    }
+}
+
+fn remove_existing_path(path: &Path) -> miette::Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+
+    if metadata.file_type().is_symlink() {
+        if metadata.is_dir() {
+            fs::remove_dir(path).into_diagnostic()?;
+        } else {
+            fs::remove_file(path).into_diagnostic()?;
+        }
+        return Ok(());
+    }
+
+    if metadata.is_dir() {
+        fs::remove_dir_all(path).into_diagnostic()?;
+        return Ok(());
+    }
+
+    fs::remove_file(path).into_diagnostic()?;
+    Ok(())
+}
+
+fn remove_dependency_from_manifest_json(
+    manifest_json: &mut Value,
+    name: &str,
+    groups: impl IntoIterator<Item = DependencyGroup>,
+) -> miette::Result<bool> {
+    let Some(root) = manifest_json.as_object_mut() else {
+        miette::bail!("package.json root should be an object");
+    };
+
+    let mut removed = false;
+    for group in groups {
+        let dependency_type: &str = group.into();
+        let mut remove_field = false;
+        if let Some(field) = root.get_mut(dependency_type) {
+            if let Some(dependencies) = field.as_object_mut() {
+                removed |= dependencies.remove(name).is_some();
+                remove_field = dependencies.is_empty();
+            } else {
+                miette::bail!("package.json `{dependency_type}` should be an object");
+            }
+        }
+        if remove_field {
+            root.remove(dependency_type);
+        }
+    }
+
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn dependency_options_to_dependency_groups() {
+        use DependencyGroup::{Dev, Optional, Peer, Prod};
+        let groups = |opts: RemoveDependencyOptions| opts.dependency_groups();
+
+        assert_eq!(
+            groups(RemoveDependencyOptions {
+                save_prod: false,
+                save_dev: false,
+                save_optional: false
+            }),
+            vec![Prod, Dev, Optional, Peer]
+        );
+        assert_eq!(
+            groups(RemoveDependencyOptions {
+                save_prod: true,
+                save_dev: false,
+                save_optional: false
+            }),
+            vec![Prod]
+        );
+        assert_eq!(
+            groups(RemoveDependencyOptions {
+                save_prod: false,
+                save_dev: true,
+                save_optional: false
+            }),
+            vec![Dev]
+        );
+        assert_eq!(
+            groups(RemoveDependencyOptions {
+                save_prod: false,
+                save_dev: false,
+                save_optional: true
+            }),
+            vec![Optional]
+        );
+        assert_eq!(
+            groups(RemoveDependencyOptions {
+                save_prod: true,
+                save_dev: true,
+                save_optional: false
+            }),
+            vec![Prod, Dev]
+        );
+    }
+}

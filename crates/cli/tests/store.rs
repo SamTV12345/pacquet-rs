@@ -19,6 +19,18 @@ fn canonicalize(path: &Path) -> PathBuf {
 }
 
 #[test]
+fn store_status_should_fail_with_clear_message() {
+    let CommandTempCwd { pacquet, root, .. } = CommandTempCwd::init();
+
+    let output = pacquet.with_args(["store", "status"]).output().expect("run pacquet store status");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("`pacquet store status` is not implemented yet"));
+
+    drop(root); // cleanup
+}
+
+#[test]
 fn store_path_should_return_store_dir_from_npmrc() {
     let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
 

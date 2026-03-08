@@ -16,6 +16,7 @@ path = "src/bin/main.rs"
 
 [dependencies]
 pacquet-executor         = { workspace = true }
+pacquet-env              = { workspace = true }
 pacquet-fs               = { workspace = true }
 pacquet-lockfile         = { workspace = true }
 pacquet-network          = { workspace = true }
@@ -23,6 +24,7 @@ pacquet-npmrc            = { workspace = true }
 pacquet-package-manifest = { workspace = true }
 pacquet-package-manager  = { workspace = true }
 pacquet-registry         = { workspace = true }
+pacquet-store-dir        = { workspace = true }
 pacquet-tarball          = { workspace = true }
 pacquet-diagnostics      = { workspace = true }
 
@@ -34,10 +36,10 @@ pipe-trait  = { workspace = true }
 tokio       = { workspace = true }
 serde       = { workspace = true }
 serde_yaml  = { workspace = true }
+serde_json  = { workspace = true }
 glob        = "0.3.3"
 
 [dev-dependencies]
-pacquet-store-dir     = { workspace = true }
 pacquet-testing-utils = { workspace = true }
 
 assert_cmd        = { workspace = true }

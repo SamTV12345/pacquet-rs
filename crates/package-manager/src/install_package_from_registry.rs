@@ -6,8 +6,9 @@ use miette::Diagnostic;
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
 use pacquet_registry::{Package, PackageTag, PackageVersion, RegistryError};
+use pacquet_store_dir::PackageFileInfo;
 use pacquet_tarball::{DownloadTarballToStore, MemCache, TarballError};
-use std::{path::Path, str::FromStr};
+use std::{collections::HashMap, path::Path, str::FromStr};
 
 /// This subroutine executes the following and returns the package
 /// * Retrieves the package from the registry
@@ -94,6 +95,34 @@ impl<'a> InstallPackageFromRegistry<'a> {
 
         let store_folder_name = package_version.to_virtual_store_name();
         let package_id = format!("{}@{}", package_version.name, package_version.version);
+        let save_path = config
+            .virtual_store_dir
+            .join(store_folder_name)
+            .join("node_modules")
+            .join(&package_version.name);
+        let symlink_path = node_modules_dir.join(symlink_name);
+
+        // Fast warm-install check: this package is already imported to the virtual store.
+        if save_path.join("package.json").is_file() {
+            symlink_package(&save_path, &symlink_path)
+                .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
+            progress_reporter::linked();
+            return Ok(());
+        }
+
+        if config
+            .store_dir
+            .read_index_file(
+                package_version.dist.integrity.as_ref().expect("has integrity field"),
+                &package_id,
+            )
+            .is_some_and(|index| package_is_already_imported(&save_path, &index.files))
+        {
+            symlink_package(&save_path, &symlink_path)
+                .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
+            progress_reporter::linked();
+            return Ok(());
+        }
 
         // TODO: skip when it already exists in store?
         let cas_paths = DownloadTarballToStore {
@@ -113,14 +142,6 @@ impl<'a> InstallPackageFromRegistry<'a> {
         .map_err(InstallPackageFromRegistryError::DownloadTarballToStore)?;
         progress_reporter::fetched();
 
-        let save_path = config
-            .virtual_store_dir
-            .join(store_folder_name)
-            .join("node_modules")
-            .join(&package_version.name);
-
-        let symlink_path = node_modules_dir.join(symlink_name);
-
         tracing::info!(target: "pacquet::import", ?save_path, ?symlink_path, "Import package");
 
         create_cas_files(config.package_import_method, &save_path, &cas_paths)
@@ -132,6 +153,30 @@ impl<'a> InstallPackageFromRegistry<'a> {
 
         Ok(())
     }
+}
+
+fn package_is_already_imported(
+    save_path: &Path,
+    index_files: &HashMap<String, PackageFileInfo>,
+) -> bool {
+    let Some(file_name) = representative_file_name(index_files.keys().map(String::as_str)) else {
+        return false;
+    };
+    save_path.join(file_name).exists()
+}
+
+fn representative_file_name<'a>(file_names: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let mut fallback: Option<&'a str> = None;
+    for file_name in file_names {
+        if file_name == "package.json" {
+            return Some(file_name);
+        }
+        fallback = match fallback {
+            Some(current) if current <= file_name => Some(current),
+            _ => Some(file_name),
+        };
+    }
+    fallback
 }
 
 #[cfg(test)]

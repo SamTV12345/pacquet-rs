@@ -99,6 +99,7 @@ where
                 if lockfile_is_reusable {
                     InstallFrozenLockfile {
                         http_client,
+                        resolved_packages,
                         config,
                         project_snapshot: maybe_project_snapshot.expect("checked above"),
                         packages: lockfile.packages.as_ref(),
@@ -188,6 +189,7 @@ where
 
                 InstallFrozenLockfile {
                     http_client,
+                    resolved_packages,
                     config,
                     project_snapshot,
                     packages: packages.as_ref(),

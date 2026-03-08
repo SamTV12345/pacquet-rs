@@ -123,22 +123,27 @@ fn force_symlink(
 
     if rename_tried {
         remove_existing_path(symlink_path)?;
-    } else {
-        rename_existing_path(symlink_path).map_err(|error| {
-            if error.kind() == ErrorKind::NotFound {
-                SymlinkPackageError::SymlinkDir {
-                    symlink_target: symlink_target.to_path_buf(),
-                    symlink_path: symlink_path.to_path_buf(),
-                    error: initial_error,
-                }
-            } else {
-                SymlinkPackageError::RenameExistingPath {
-                    path: symlink_path.to_path_buf(),
-                    rename_to: ignored_path(symlink_path),
-                    error,
-                }
-            }
-        })?;
+    } else if let Err(error) = rename_existing_path(symlink_path) {
+        if error.kind() == ErrorKind::NotFound {
+            return Err(SymlinkPackageError::SymlinkDir {
+                symlink_target: symlink_target.to_path_buf(),
+                symlink_path: symlink_path.to_path_buf(),
+                error: initial_error,
+            });
+        }
+
+        // Windows often returns EPERM/PermissionDenied when renaming existing junctions.
+        // Fall back to direct deletion before retrying symlink creation.
+        if let Err(remove_error) = remove_existing_path(symlink_path) {
+            return Err(SymlinkPackageError::RenameExistingPath {
+                path: symlink_path.to_path_buf(),
+                rename_to: ignored_path(symlink_path),
+                error: io::Error::new(
+                    error.kind(),
+                    format!("{error}; fallback remove failed: {remove_error}"),
+                ),
+            });
+        }
     }
 
     force_symlink(symlink_target, symlink_path, true)

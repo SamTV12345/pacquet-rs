@@ -1,4 +1,4 @@
-use crate::{CreateCasFilesError, create_cas_files, create_symlink_layout};
+use crate::{CreateCasFilesError, create_cas_files};
 use derive_more::{Display, Error};
 use miette::Diagnostic;
 use pacquet_lockfile::{
@@ -44,7 +44,7 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
             cas_paths,
             import_method,
             dependency_path,
-            package_snapshot,
+            package_snapshot: _,
         } = self;
 
         // node_modules/.pacquet/pkg-name@x.y.z/node_modules
@@ -63,12 +63,6 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
             virtual_node_modules_dir.join(dependency_path.package_specifier.name.to_string());
         create_cas_files(import_method, &save_path, cas_paths)
             .map_err(CreateVirtualDirError::CreateCasFiles)?;
-
-        // 2. Create the symlink layout (dependencies + optionalDependencies)
-        let all_dependencies = package_dependency_map(package_snapshot);
-        if !all_dependencies.is_empty() {
-            create_symlink_layout(&all_dependencies, virtual_store_dir, &virtual_node_modules_dir);
-        }
 
         Ok(())
     }
