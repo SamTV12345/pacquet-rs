@@ -1,9 +1,11 @@
 use derive_more::{Display, Error};
 use miette::Diagnostic;
+#[cfg(windows)]
+use std::path::Component;
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 #[cfg(windows)]
