@@ -30,9 +30,6 @@ fn normalize_store_files(files: &[String]) -> Vec<String> {
             if let Some((_, suffix)) = path.split_once("/index/") {
                 return Some(format!("index/{suffix}"));
             }
-            if let Some((_, suffix)) = path.split_once("/projects/") {
-                return Some(format!("projects/{suffix}"));
-            }
             None
         })
         .collect::<Vec<_>>();

@@ -62,8 +62,8 @@
 
 | Done | Command                      | Notes |
 | ---- | ---------------------------- | ----- |
-|      | script-shell                 |       |
-|      | shell-emulator               |       |
+| ✅   | script-shell                 |       |
+| ✅   | shell-emulator               | basic shell-emulation (env-prefix + `&&`) |
 |      | --recursive                  |       |
 | ✅   | --if-present                 |       |
 |      | --parallel                   |       |

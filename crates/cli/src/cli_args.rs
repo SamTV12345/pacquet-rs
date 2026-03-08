@@ -13,11 +13,10 @@ use clap::{Parser, Subcommand};
 use env::EnvArgs;
 use install::InstallArgs;
 use miette::{Context, IntoDiagnostic};
-use pacquet_executor::execute_shell;
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::PackageManifest;
 use remove::RemoveArgs;
-use run::RunArgs;
+use run::{RunArgs, run_start, run_test};
 use std::{env as std_env, path::PathBuf};
 use store::StoreCommand;
 
@@ -90,25 +89,9 @@ impl CliArgs {
             CliCommand::Ci(args) => args.run(state()?).await?,
             CliCommand::Env(args) => args.run().await?,
             CliCommand::Remove(args) => args.run(state()?).await?,
-            CliCommand::Test => {
-                let manifest = PackageManifest::from_path(manifest_path())
-                    .wrap_err("getting the package.json in current directory")?;
-                if let Some(script) = manifest.script("test", false)? {
-                    execute_shell(script)
-                        .wrap_err(format!("executing command: \"{0}\"", script))?;
-                }
-            }
-            CliCommand::Run(args) => args.run(manifest_path())?,
-            CliCommand::Start => {
-                // Runs an arbitrary command specified in the package's start property of its scripts
-                // object. If no start property is specified on the scripts object, it will attempt to
-                // run node server.js as a default, failing if neither are present.
-                // The intended usage of the property is to specify a command that starts your program.
-                let manifest = PackageManifest::from_path(manifest_path())
-                    .wrap_err("getting the package.json in current directory")?;
-                let command = manifest.script("start", true)?.unwrap_or("node server.js");
-                execute_shell(command).wrap_err(format!("executing command: \"{0}\"", command))?;
-            }
+            CliCommand::Test => run_test(manifest_path(), npmrc())?,
+            CliCommand::Run(args) => args.run(manifest_path(), npmrc())?,
+            CliCommand::Start => run_start(manifest_path(), npmrc())?,
             CliCommand::Store(command) => command.run(|| npmrc())?,
         }
 

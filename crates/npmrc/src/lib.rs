@@ -168,6 +168,18 @@ pub struct Npmrc {
     #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
     pub resolve_peers_from_workspace_root: bool,
 
+    /// Controls whether pre- and post- scripts are executed when running a script explicitly.
+    #[serde(default, deserialize_with = "deserialize_bool")]
+    pub enable_pre_post_scripts: bool,
+
+    /// Custom shell binary to run lifecycle scripts in.
+    #[serde(default)]
+    pub script_shell: Option<String>,
+
+    /// When true, a shell emulator can be used (not yet implemented in pacquet).
+    #[serde(default, deserialize_with = "deserialize_bool")]
+    pub shell_emulator: bool,
+
     /// Raw merged `.npmrc` key/value pairs used for auth resolution.
     #[serde(skip, default)]
     raw_settings: HashMap<String, String>,
@@ -479,6 +491,9 @@ mod tests {
         assert_eq!(value.peers_suffix_max_length, 1000);
         assert!(value.symlink);
         assert!(value.hoist);
+        assert!(!value.enable_pre_post_scripts);
+        assert_eq!(value.script_shell, None);
+        assert!(!value.shell_emulator);
         assert_eq!(value.store_dir, default_store_dir());
         assert_eq!(value.registry, "https://registry.npmjs.org/");
     }
@@ -510,6 +525,17 @@ mod tests {
         assert!(value.exclude_links_from_lockfile);
         assert!(value.inject_workspace_packages);
         assert_eq!(value.peers_suffix_max_length, 77);
+    }
+
+    #[test]
+    pub fn parse_script_runner_settings() {
+        let value: Npmrc = serde_ini::from_str(
+            "enable-pre-post-scripts=true\nscript-shell=/bin/bash\nshell-emulator=true",
+        )
+        .unwrap();
+        assert!(value.enable_pre_post_scripts);
+        assert_eq!(value.script_shell.as_deref(), Some("/bin/bash"));
+        assert!(value.shell_emulator);
     }
 
     #[test]
