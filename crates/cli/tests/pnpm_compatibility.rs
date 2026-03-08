@@ -9,7 +9,7 @@ use pacquet_testing_utils::{
     fs::get_all_files,
 };
 use pretty_assertions::assert_eq;
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, io::Write, path::Path};
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -94,6 +94,184 @@ fn normalized_index_payloads(store_dir: &Path) -> Vec<BTreeMap<String, Comparabl
             .join("||")
     });
     payloads
+}
+
+fn normalized_lockfile(lockfile_text: &str) -> serde_json::Value {
+    let mut value = serde_yaml::from_str::<serde_yaml::Value>(lockfile_text)
+        .expect("parse lockfile YAML");
+
+    let Some(root) = value.as_mapping_mut() else {
+        return serde_json::to_value(value).expect("convert yaml to json");
+    };
+    let settings_key = serde_yaml::Value::String("settings".to_string());
+    let Some(settings) = root.get_mut(&settings_key).and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return serde_json::to_value(value).expect("convert yaml to json");
+    };
+
+    let remove_if = |settings: &mut serde_yaml::Mapping, key: &str, expected: serde_yaml::Value| {
+        let map_key = serde_yaml::Value::String(key.to_string());
+        if settings.get(&map_key) == Some(&expected) {
+            settings.remove(&map_key);
+        }
+    };
+
+    remove_if(settings, "autoInstallPeers", serde_yaml::Value::Bool(true));
+    remove_if(settings, "excludeLinksFromLockfile", serde_yaml::Value::Bool(false));
+    remove_if(
+        settings,
+        "peersSuffixMaxLength",
+        serde_yaml::Value::Number(serde_yaml::Number::from(1000_u64)),
+    );
+    remove_if(settings, "injectWorkspacePackages", serde_yaml::Value::Bool(false));
+
+    if settings.is_empty() {
+        root.remove(&settings_key);
+    }
+
+    serde_json::to_value(value).expect("convert yaml to json")
+}
+
+fn write_manifest(workspace: &Path, manifest: serde_json::Value) {
+    fs::write(workspace.join("package.json"), manifest.to_string()).expect("write to package.json");
+}
+
+#[derive(Clone)]
+struct RegistryLockfileCase {
+    name: &'static str,
+    manifest: serde_json::Value,
+    npmrc_append: Option<&'static str>,
+    workspace_yaml: Option<&'static str>,
+    pnpmfile_cjs: Option<&'static str>,
+}
+
+fn remove_path_if_exists(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    if path.is_dir() {
+        fs::remove_dir_all(path).expect("remove dir");
+    } else {
+        fs::remove_file(path).expect("remove file");
+    }
+}
+
+fn assert_same_lockfile_for_registry_case(case: RegistryLockfileCase) {
+    let RegistryLockfileCase {
+        name: case_name,
+        manifest,
+        npmrc_append,
+        workspace_yaml,
+        pnpmfile_cjs,
+    } = case;
+
+    let CommandTempCwd { pacquet, pnpm, root, workspace, npmrc_info } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { store_dir, mock_instance, npmrc_path, .. } = npmrc_info;
+
+    let modules_dir = workspace.join("node_modules");
+    let lockfile_path = workspace.join("pnpm-lock.yaml");
+    let cleanup = || {
+        eprintln!("Cleaning up case: {case_name}");
+        remove_path_if_exists(&store_dir);
+        remove_path_if_exists(&modules_dir);
+        remove_path_if_exists(&lockfile_path);
+    };
+
+    write_manifest(&workspace, manifest);
+    if let Some(content) = workspace_yaml {
+        fs::write(workspace.join("pnpm-workspace.yaml"), content)
+            .expect("write pnpm-workspace.yaml");
+    }
+    if let Some(content) = pnpmfile_cjs {
+        fs::write(workspace.join(".pnpmfile.cjs"), content).expect("write .pnpmfile.cjs");
+    }
+    if let Some(content) = npmrc_append {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(npmrc_path)
+            .expect("open .npmrc")
+            .write_all(content.as_bytes())
+            .expect("append to .npmrc");
+    }
+
+    eprintln!("[{case_name}] Installing with pacquet...");
+    pacquet.with_arg("install").assert().success();
+    let pacquet_lockfile = normalized_lockfile(
+        &fs::read_to_string(&lockfile_path).expect("read pacquet lockfile"),
+    );
+
+    cleanup();
+
+    eprintln!("[{case_name}] Installing with pnpm...");
+    pnpm.with_args(["install", "--ignore-scripts"]).assert().success();
+    let pnpm_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pnpm lockfile"));
+
+    cleanup();
+    assert_eq!(&pacquet_lockfile, &pnpm_lockfile);
+
+    drop((root, mock_instance)); // cleanup
+}
+
+fn assert_same_lockfile_for_workspace_manifest(case_name: &str, workspace_spec: &str) {
+    let CommandTempCwd { pacquet, pnpm, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app package dir");
+    fs::create_dir_all(&lib_dir).expect("create lib package dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.2.3"
+        })
+        .to_string(),
+    )
+    .expect("write lib package manifest");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": workspace_spec
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    let lockfile_path = workspace.join("pnpm-lock.yaml");
+    let cleanup = || {
+        eprintln!("Cleaning up case: {case_name}");
+        remove_path_if_exists(&workspace.join("node_modules"));
+        remove_path_if_exists(&app_dir.join("node_modules"));
+        remove_path_if_exists(&lockfile_path);
+    };
+
+    eprintln!("[{case_name}] Installing with pacquet...");
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+    let pacquet_lockfile = normalized_lockfile(
+        &fs::read_to_string(&lockfile_path).expect("read pacquet lockfile"),
+    );
+
+    cleanup();
+
+    eprintln!("[{case_name}] Installing with pnpm...");
+    pnpm.with_args(["-C", app_dir.to_str().unwrap(), "install", "--ignore-scripts"])
+        .assert()
+        .success();
+    let pnpm_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pnpm lockfile"));
+
+    cleanup();
+    assert_eq!(&pacquet_lockfile, &pnpm_lockfile);
+
+    drop(root); // cleanup
 }
 
 #[test]
@@ -200,4 +378,300 @@ fn same_index_file_contents() {
     assert_eq!(&pacquet_index_file_contents, &pnpm_index_file_contents);
 
     drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn same_lockfile_content() {
+    let CommandTempCwd { pacquet, pnpm, root, workspace, npmrc_info } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { store_dir, mock_instance, .. } = npmrc_info;
+
+    let modules_dir = workspace.join("node_modules");
+    let lockfile_path = workspace.join("pnpm-lock.yaml");
+    let cleanup = || {
+        eprintln!("Cleaning up...");
+        fs::remove_dir_all(&store_dir).expect("delete store dir");
+        fs::remove_dir_all(&modules_dir).expect("delete node_modules");
+        fs::remove_file(&lockfile_path).expect("delete lockfile");
+    };
+
+    eprintln!("Creating package.json...");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    write_manifest(&workspace, package_json_content);
+
+    eprintln!("Installing with pacquet...");
+    pacquet.with_arg("install").assert().success();
+    let pacquet_lockfile = fs::read_to_string(&lockfile_path).expect("read pacquet lockfile");
+    let pacquet_lockfile = normalized_lockfile(&pacquet_lockfile);
+
+    cleanup();
+
+    eprintln!("Installing with pnpm...");
+    pnpm.with_args(["install", "--ignore-scripts"]).assert().success();
+    let pnpm_lockfile = fs::read_to_string(&lockfile_path).expect("read pnpm lockfile");
+    let pnpm_lockfile = normalized_lockfile(&pnpm_lockfile);
+
+    cleanup();
+
+    eprintln!("Produce equivalent pnpm-lock.yaml");
+    assert_eq!(&pacquet_lockfile, &pnpm_lockfile);
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn same_lockfile_content_with_dev_dependencies() {
+    let CommandTempCwd { pacquet, pnpm, root, workspace, npmrc_info } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { store_dir, mock_instance, .. } = npmrc_info;
+
+    let modules_dir = workspace.join("node_modules");
+    let lockfile_path = workspace.join("pnpm-lock.yaml");
+    let cleanup = || {
+        eprintln!("Cleaning up...");
+        fs::remove_dir_all(&store_dir).expect("delete store dir");
+        fs::remove_dir_all(&modules_dir).expect("delete node_modules");
+        fs::remove_file(&lockfile_path).expect("delete lockfile");
+    };
+
+    eprintln!("Creating package.json...");
+    write_manifest(
+        &workspace,
+        serde_json::json!({
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+            },
+            "devDependencies": {
+                "@pnpm.e2e/hello-world-js-bin": "1.0.0",
+            }
+        }),
+    );
+
+    eprintln!("Installing with pacquet...");
+    pacquet.with_arg("install").assert().success();
+    let pacquet_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pacquet lockfile"));
+
+    cleanup();
+
+    eprintln!("Installing with pnpm...");
+    pnpm.with_args(["install", "--ignore-scripts"]).assert().success();
+    let pnpm_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pnpm lockfile"));
+
+    cleanup();
+
+    eprintln!("Produce equivalent pnpm-lock.yaml");
+    assert_eq!(&pacquet_lockfile, &pnpm_lockfile);
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn same_lockfile_content_for_workspace_link() {
+    let CommandTempCwd { pacquet, pnpm, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app package dir");
+    fs::create_dir_all(&lib_dir).expect("create lib package dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.2.3"
+        })
+        .to_string(),
+    )
+    .expect("write lib package manifest");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "workspace:*"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    let lockfile_path = workspace.join("pnpm-lock.yaml");
+    let cleanup = || {
+        eprintln!("Cleaning up...");
+        fs::remove_dir_all(workspace.join("node_modules")).expect("delete node_modules");
+        fs::remove_dir_all(app_dir.join("node_modules")).expect("delete app node_modules");
+        fs::remove_file(&lockfile_path).expect("delete lockfile");
+    };
+
+    eprintln!("Installing with pacquet...");
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+    let pacquet_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pacquet lockfile"));
+
+    cleanup();
+
+    eprintln!("Installing with pnpm...");
+    pnpm.with_args(["-C", app_dir.to_str().unwrap(), "install", "--ignore-scripts"])
+        .assert()
+        .success();
+    let pnpm_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pnpm lockfile"));
+
+    cleanup();
+
+    eprintln!("Produce equivalent workspace pnpm-lock.yaml");
+    assert_eq!(&pacquet_lockfile, &pnpm_lockfile);
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn golden_lockfile_suite_matrix_registry() {
+    let cases = vec![
+        RegistryLockfileCase {
+            name: "prod-only",
+            manifest: serde_json::json!({
+                "dependencies": {
+                    "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+                }
+            }),
+            npmrc_append: None,
+            workspace_yaml: None,
+            pnpmfile_cjs: None,
+        },
+        RegistryLockfileCase {
+            name: "prod-and-dev",
+            manifest: serde_json::json!({
+                "dependencies": {
+                    "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+                },
+                "devDependencies": {
+                    "@pnpm.e2e/hello-world-js-bin": "1.0.0",
+                }
+            }),
+            npmrc_append: None,
+            workspace_yaml: None,
+            pnpmfile_cjs: None,
+        },
+        RegistryLockfileCase {
+            name: "prod-and-optional",
+            manifest: serde_json::json!({
+                "dependencies": {
+                    "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+                },
+                "optionalDependencies": {
+                    "@pnpm.e2e/hello-world-js-bin": "1.0.0",
+                }
+            }),
+            npmrc_append: None,
+            workspace_yaml: None,
+            pnpmfile_cjs: None,
+        },
+        RegistryLockfileCase {
+            name: "peer-dependencies",
+            manifest: serde_json::json!({
+                "dependencies": {
+                    "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+                },
+                "peerDependencies": {
+                    "@pnpm.e2e/hello-world-js-bin": "1.0.0",
+                }
+            }),
+            npmrc_append: Some("\nauto-install-peers=false\n"),
+            workspace_yaml: None,
+            pnpmfile_cjs: None,
+        },
+        RegistryLockfileCase {
+            name: "overrides",
+            manifest: serde_json::json!({
+                "dependencies": {
+                    "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+                },
+                "pnpm": {
+                    "overrides": {
+                        "@pnpm.e2e/hello-world-js-bin": "1.0.0",
+                    }
+                }
+            }),
+            npmrc_append: None,
+            workspace_yaml: None,
+            pnpmfile_cjs: None,
+        },
+        RegistryLockfileCase {
+            name: "package-extensions",
+            manifest: serde_json::json!({
+                "dependencies": {
+                    "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+                },
+                "pnpm": {
+                    "packageExtensions": {
+                        "@pnpm.e2e/hello-world-js-bin-parent@1.0.0": {
+                            "dependencies": {
+                                "@pnpm.e2e/hello-world-js-bin": "1.0.0"
+                            }
+                        }
+                    }
+                }
+            }),
+            npmrc_append: None,
+            workspace_yaml: None,
+            pnpmfile_cjs: None,
+        },
+        RegistryLockfileCase {
+            name: "catalog",
+            manifest: serde_json::json!({
+                "dependencies": {
+                    "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+                }
+            }),
+            npmrc_append: None,
+            workspace_yaml: Some("packages:\n  - .\ncatalog:\n  hello: 1.0.0\n"),
+            pnpmfile_cjs: None,
+        },
+        RegistryLockfileCase {
+            name: "pnpmfile-checksum",
+            manifest: serde_json::json!({
+                "dependencies": {
+                    "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+                }
+            }),
+            npmrc_append: None,
+            workspace_yaml: None,
+            pnpmfile_cjs: Some("module.exports = { hooks: {} };\n"),
+        },
+        // Registry in tests is intentionally non-default (`localhost` mock), not npmjs.
+        RegistryLockfileCase {
+            name: "non-default-registry-explicit",
+            manifest: serde_json::json!({
+                "dependencies": {
+                    "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+                }
+            }),
+            npmrc_append: Some("\nstrict-peer-dependencies=false\n"),
+            workspace_yaml: None,
+            pnpmfile_cjs: None,
+        },
+    ];
+
+    for case in cases {
+        eprintln!("CASE: {}", case.name);
+        assert_same_lockfile_for_registry_case(case);
+    }
+}
+
+#[test]
+fn golden_lockfile_suite_matrix_workspace() {
+    let cases = vec![("workspace-star", "workspace:*"), ("workspace-caret", "workspace:^")];
+    for (case_name, workspace_spec) in cases {
+        eprintln!("CASE: {case_name}");
+        assert_same_lockfile_for_workspace_manifest(case_name, workspace_spec);
+    }
 }
