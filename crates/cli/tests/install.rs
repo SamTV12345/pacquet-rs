@@ -7,7 +7,12 @@ use pacquet_testing_utils::{
     bin::{AddMockedRegistry, CommandTempCwd},
     fs::{get_all_files, get_all_folders, is_symlink_or_junction},
 };
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
 
 #[cfg(not(target_os = "windows"))] // It causes ConnectionAborted on CI
 #[cfg(not(target_os = "macos"))] // It causes ConnectionReset on CI
@@ -38,6 +43,23 @@ fn metadata_cache_file(cache_dir: &Path, registry: &str, package_name: &str) -> 
     let registry_namespace = without_scheme.replace(':', "+");
     let encoded_name = package_name.replace('/', "%2f");
     cache_dir.join("metadata-v1.3").join(registry_namespace).join(format!("{encoded_name}.json"))
+}
+
+fn path_exists_or_is_link(path: &Path) -> bool {
+    path.exists() || is_symlink_or_junction(path).unwrap_or(false)
+}
+
+fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if path_exists_or_is_link(path) {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[test]
@@ -309,7 +331,10 @@ fn fix_lockfile_should_override_frozen_lockfile_when_lockfile_is_missing() {
 
     pacquet.with_args(["install", "--frozen-lockfile", "--fix-lockfile"]).assert().success();
     assert!(workspace.join("pnpm-lock.yaml").exists());
-    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+    assert!(wait_for_path(
+        &workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent"),
+        Duration::from_secs(2),
+    ));
 
     drop((root, mock_instance)); // cleanup
 }
@@ -330,7 +355,10 @@ fn should_accept_ignore_scripts_flag() {
 
     pacquet.with_args(["install", "--ignore-scripts"]).assert().success();
 
-    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+    assert!(wait_for_path(
+        &workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent"),
+        Duration::from_secs(2),
+    ));
     assert!(workspace.join("pnpm-lock.yaml").exists());
 
     drop((root, mock_instance)); // cleanup
