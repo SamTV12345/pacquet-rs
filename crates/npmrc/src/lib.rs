@@ -13,10 +13,10 @@ use url::Url;
 
 use crate::custom_deserializer::{
     bool_true, default_cache_dir, default_hoist_pattern, default_modules_cache_max_age,
-    default_modules_dir, default_peers_suffix_max_length, default_public_hoist_pattern,
-    default_registry, default_store_dir, default_virtual_store_dir, deserialize_bool,
-    deserialize_pathbuf, deserialize_registry, deserialize_store_dir, deserialize_u16,
-    deserialize_u64,
+    default_modules_dir, default_network_concurrency, default_peers_suffix_max_length,
+    default_public_hoist_pattern, default_registry, default_store_dir, default_virtual_store_dir,
+    deserialize_bool, deserialize_pathbuf, deserialize_registry, deserialize_store_dir,
+    deserialize_u16, deserialize_u64,
 };
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -125,6 +125,10 @@ pub struct Npmrc {
     /// Default value is 10080 (7 days in minutes)
     #[serde(default = "default_modules_cache_max_age", deserialize_with = "deserialize_u64")]
     pub modules_cache_max_age: u64,
+
+    /// Maximum number of concurrent HTTP requests.
+    #[serde(default = "default_network_concurrency", deserialize_with = "deserialize_u16")]
+    pub network_concurrency: u16,
 
     /// When set to false, pnpm won't read or generate a pnpm-lock.yaml file.
     #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
@@ -520,6 +524,7 @@ mod tests {
         let value = Npmrc::new();
         assert_eq!(value.node_linker, NodeLinker::default());
         assert_eq!(value.package_import_method, PackageImportMethod::default());
+        assert_eq!(value.network_concurrency, 16);
         assert!(value.lockfile);
         assert!(value.prefer_frozen_lockfile);
         assert!(!value.exclude_links_from_lockfile);
@@ -578,6 +583,12 @@ mod tests {
     pub fn parse_u64() {
         let value: Npmrc = serde_ini::from_str("modules-cache-max-age=1000").unwrap();
         assert_eq!(value.modules_cache_max_age, 1000);
+    }
+
+    #[test]
+    pub fn parse_network_concurrency() {
+        let value: Npmrc = serde_ini::from_str("network-concurrency=8").unwrap();
+        assert_eq!(value.network_concurrency, 8);
     }
 
     #[test]

@@ -70,7 +70,7 @@ impl State {
             lockfile_dir,
             lockfile_importer_id,
             workspace_packages,
-            http_client: ThrottledClient::new_from_cpu_count(),
+            http_client: ThrottledClient::new_with_limit(config.network_concurrency as usize),
             tarball_mem_cache: MemCache::new(),
             resolved_packages: ResolvedPackages::new(),
         })
@@ -301,5 +301,17 @@ mod tests {
             Path::new("/repo/examples/a"),
             Some(&["packages/*".to_string(), "!packages/private/*".to_string()])
         ));
+    }
+
+    #[test]
+    fn init_uses_network_concurrency_from_npmrc() {
+        let dir = tempdir().unwrap();
+        let manifest_path = dir.path().join("package.json");
+        let mut config = Npmrc::new();
+        config.network_concurrency = 3;
+        let config = config.leak();
+
+        let state = State::init(manifest_path, config).expect("initialize state");
+        assert_eq!(state.http_client.concurrency_limit(), 3);
     }
 }

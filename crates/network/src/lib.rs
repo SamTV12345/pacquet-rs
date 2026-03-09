@@ -8,6 +8,7 @@ use tokio::sync::Semaphore;
 pub struct ThrottledClient {
     semaphore: Semaphore,
     client: Client,
+    permits: usize,
 }
 
 impl ThrottledClient {
@@ -29,9 +30,20 @@ impl ThrottledClient {
     /// Otherwise, the number of permits will be 16.
     pub fn new_from_cpu_count() -> Self {
         const MIN_PERMITS: usize = 16;
-        let semaphore = num_cpus::get().max(MIN_PERMITS).pipe(Semaphore::new);
+        Self::new_with_limit(num_cpus::get().max(MIN_PERMITS))
+    }
+
+    /// Construct a new throttled client with a fixed permit count.
+    pub fn new_with_limit(permits: usize) -> Self {
+        let permits = permits.max(1);
+        let semaphore = permits.pipe(Semaphore::new);
         let client = Client::new();
-        ThrottledClient { semaphore, client }
+        ThrottledClient { semaphore, client, permits }
+    }
+
+    /// Configured request concurrency limit.
+    pub fn concurrency_limit(&self) -> usize {
+        self.permits
     }
 }
 

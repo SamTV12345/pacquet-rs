@@ -1,5 +1,5 @@
 use crate::{MockInstanceOptions, RegistryInfo, kill_verdaccio::kill_all_verdaccio_children};
-use advisory_lock::{AdvisoryFileLock, FileLockError, FileLockMode};
+use advisory_lock::{AdvisoryFileLock, FileLockMode};
 use pipe_trait::Pipe;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -93,23 +93,25 @@ impl RegistryAnchor {
             anchor
         };
 
-        if let Some(guard) = GuardFile::try_lock() {
-            let anchor = init(init_options);
-            guard.unlock();
-            anchor
-        } else {
-            let guard = GuardFile::lock();
-            let anchor = if let Some(mut anchor) = RegistryAnchor::try_load() {
+        let guard = GuardFile::lock();
+        let anchor = match RegistryAnchor::try_load() {
+            Some(mut anchor) if anchor.info.is_alive() => {
                 anchor.ref_count = anchor.ref_count.checked_add(1).expect("increment ref_count");
                 anchor.save();
                 anchor
-            } else {
-                eprintln!("warn: anchor file disappeared while waiting for lock, re-initializing");
+            }
+            Some(anchor) => {
+                eprintln!(
+                    "warn: stale mocked registry anchor detected (pid={}, port={}). Re-initializing.",
+                    anchor.info.pid, anchor.info.port
+                );
+                RegistryAnchor::delete();
                 init(init_options)
-            };
-            guard.unlock();
-            anchor
-        }
+            }
+            None => init(init_options),
+        };
+        guard.unlock();
+        anchor
     }
 
     fn delete() {
@@ -147,14 +149,6 @@ impl GuardFile {
         AdvisoryFileLock::lock(GuardFile::path(), FileLockMode::Exclusive)
             .expect("acquire file guard");
         GuardFile
-    }
-
-    fn try_lock() -> Option<Self> {
-        match AdvisoryFileLock::try_lock(GuardFile::path(), FileLockMode::Exclusive) {
-            Ok(()) => Some(GuardFile),
-            Err(FileLockError::AlreadyLocked) => None,
-            Err(FileLockError::Io(error)) => panic!("Failed to acquire the file guard: {error}"),
-        }
     }
 
     fn unlock(self) {

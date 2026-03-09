@@ -27,7 +27,7 @@ impl RegistryInfo {
         port_to_url(self.port)
     }
 
-    fn is_alive(&self) -> bool {
+    pub(crate) fn is_alive(&self) -> bool {
         let mut system = sysinfo::System::new();
         let pid = Pid::from_u32(self.pid);
         if system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), false) == 0 {

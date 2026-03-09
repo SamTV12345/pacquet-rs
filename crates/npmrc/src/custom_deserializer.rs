@@ -115,6 +115,10 @@ pub fn default_modules_cache_max_age() -> u64 {
     10080
 }
 
+pub fn default_network_concurrency() -> u16 {
+    16
+}
+
 pub fn default_peers_suffix_max_length() -> u16 {
     1000
 }

@@ -295,6 +295,7 @@ mod tests {
         config.virtual_store_dir = virtual_store_dir.to_path_buf();
         config.package_import_method = Default::default();
         config.modules_cache_max_age = 0;
+        config.network_concurrency = 16;
         config.lockfile = false;
         config.prefer_frozen_lockfile = false;
         config.lockfile_include_tarball_url = false;

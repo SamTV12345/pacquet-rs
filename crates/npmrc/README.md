@@ -39,7 +39,9 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 
 # Request Settings
 
-**Not implemented**
+| Done | Field               | Notes |
+|------|---------------------|-------|
+| ✅    | network_concurrency | limits concurrent HTTP requests |
 
 # Peer Dependency Settings
 
