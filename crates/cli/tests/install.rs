@@ -17,6 +17,18 @@ fn normalize_store_files_for_snapshot(files: Vec<String>) -> Vec<String> {
     files.into_iter().filter(|path| !path.starts_with("v10/projects/")).collect()
 }
 
+fn installed_bin_path(workspace: &std::path::Path, name: &str) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        workspace.join("node_modules/.bin").join(format!("{name}.cmd"))
+    }
+
+    #[cfg(not(windows))]
+    {
+        workspace.join("node_modules/.bin").join(name)
+    }
+}
+
 #[test]
 fn should_install_dependencies() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
@@ -50,6 +62,36 @@ fn should_install_dependencies() {
     let workspace_folders = get_all_folders(&workspace);
     let store_files = normalize_store_files_for_snapshot(get_all_files(&store_dir));
     insta::assert_debug_snapshot!((workspace_folders, store_files));
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn installed_dependency_bin_should_be_runnable_via_pacquet_run() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "name": "app",
+        "version": "1.0.0",
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin": "1.0.0",
+        },
+        "scripts": {
+            "hello": "hello-world-js-bin"
+        }
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_arg("install").assert().success();
+    assert!(installed_bin_path(&workspace, "hello-world-js-bin").exists());
+
+    #[allow(deprecated)]
+    let mut run = std::process::Command::cargo_bin("pacquet").expect("find the pacquet binary");
+    run.current_dir(&workspace);
+    run.with_args(["run", "hello"]).assert().success();
 
     drop((root, mock_instance)); // cleanup
 }

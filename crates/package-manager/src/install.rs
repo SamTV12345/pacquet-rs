@@ -1,7 +1,7 @@
 use crate::{
     InstallFrozenLockfile, InstallWithLockfile, InstallWithoutLockfile, ResolvedPackages,
     WorkspacePackages, collect_runtime_lockfile_config, get_outdated_lockfile_setting,
-    progress_reporter, satisfies_package_manifest,
+    link_bins_for_manifest, progress_reporter, satisfies_package_manifest,
 };
 use pacquet_lockfile::{Lockfile, RootProjectSnapshot};
 use pacquet_network::ThrottledClient;
@@ -196,6 +196,7 @@ where
         }
 
         tracing::info!(target: "pacquet::install", "Complete all");
+        link_bins_for_manifest(config, manifest, dependency_groups.iter().copied())?;
 
         Ok(())
         }
