@@ -119,6 +119,10 @@ pub fn default_network_concurrency() -> u16 {
     16
 }
 
+pub fn default_fetch_timeout() -> u64 {
+    60000
+}
+
 pub fn default_peers_suffix_max_length() -> u16 {
     1000
 }

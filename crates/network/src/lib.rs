@@ -1,6 +1,6 @@
 use pipe_trait::Pipe;
 use reqwest::Client;
-use std::future::IntoFuture;
+use std::{future::IntoFuture, time::Duration};
 use tokio::sync::Semaphore;
 
 /// Wrapper around [`Client`] with concurrent request limit enforced by the [`Semaphore`] mechanism.
@@ -9,6 +9,7 @@ pub struct ThrottledClient {
     semaphore: Semaphore,
     client: Client,
     permits: usize,
+    request_timeout_ms: Option<u64>,
 }
 
 impl ThrottledClient {
@@ -35,15 +36,31 @@ impl ThrottledClient {
 
     /// Construct a new throttled client with a fixed permit count.
     pub fn new_with_limit(permits: usize) -> Self {
+        Self::new_with_options(permits, None)
+    }
+
+    /// Construct a new throttled client with a fixed permit count and optional request timeout.
+    pub fn new_with_options(permits: usize, request_timeout_ms: Option<u64>) -> Self {
         let permits = permits.max(1);
         let semaphore = permits.pipe(Semaphore::new);
-        let client = Client::new();
-        ThrottledClient { semaphore, client, permits }
+        let client = match request_timeout_ms {
+            Some(ms) => Client::builder()
+                .timeout(Duration::from_millis(ms))
+                .build()
+                .expect("build reqwest client with timeout"),
+            None => Client::new(),
+        };
+        ThrottledClient { semaphore, client, permits, request_timeout_ms }
     }
 
     /// Configured request concurrency limit.
     pub fn concurrency_limit(&self) -> usize {
         self.permits
+    }
+
+    /// Configured request timeout in milliseconds.
+    pub fn request_timeout_ms(&self) -> Option<u64> {
+        self.request_timeout_ms
     }
 }
 

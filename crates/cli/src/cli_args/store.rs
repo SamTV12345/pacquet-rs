@@ -80,8 +80,10 @@ impl StoreCommand {
                 temp_config.virtual_store_dir = temp_config.modules_dir.join(".pnpm");
                 temp_config.lockfile = false;
                 let temp_config = temp_config.leak();
-                let http_client =
-                    ThrottledClient::new_with_limit(config.network_concurrency as usize);
+                let http_client = ThrottledClient::new_with_options(
+                    config.network_concurrency as usize,
+                    Some(config.fetch_timeout),
+                );
                 let tarball_mem_cache = MemCache::new();
 
                 for package in &args.packages {

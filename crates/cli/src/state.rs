@@ -70,7 +70,10 @@ impl State {
             lockfile_dir,
             lockfile_importer_id,
             workspace_packages,
-            http_client: ThrottledClient::new_with_limit(config.network_concurrency as usize),
+            http_client: ThrottledClient::new_with_options(
+                config.network_concurrency as usize,
+                Some(config.fetch_timeout),
+            ),
             tarball_mem_cache: MemCache::new(),
             resolved_packages: ResolvedPackages::new(),
         })
@@ -309,9 +312,11 @@ mod tests {
         let manifest_path = dir.path().join("package.json");
         let mut config = Npmrc::new();
         config.network_concurrency = 3;
+        config.fetch_timeout = 1234;
         let config = config.leak();
 
         let state = State::init(manifest_path, config).expect("initialize state");
         assert_eq!(state.http_client.concurrency_limit(), 3);
+        assert_eq!(state.http_client.request_timeout_ms(), Some(1234));
     }
 }

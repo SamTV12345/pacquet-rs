@@ -35,13 +35,14 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 |------|--------------------|-------|
 | ✅    | registry           |       |
 | ✅    | <URL>:_authToken   |       |
-| ✅    | <URL>:tokenHelper  | token helper must be an absolute existing path |
+| ✅    | <URL>:tokenHelper  | token helper must be an absolute existing path; read from user/project config |
 
 # Request Settings
 
 | Done | Field               | Notes |
 |------|---------------------|-------|
 | ✅    | network_concurrency | limits concurrent HTTP requests |
+| ✅    | fetch_timeout       | request timeout (milliseconds) |
 
 # Peer Dependency Settings
 

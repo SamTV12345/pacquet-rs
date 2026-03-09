@@ -12,11 +12,11 @@ use std::{collections::HashMap, fs, path::PathBuf, process::Command};
 use url::Url;
 
 use crate::custom_deserializer::{
-    bool_true, default_cache_dir, default_hoist_pattern, default_modules_cache_max_age,
-    default_modules_dir, default_network_concurrency, default_peers_suffix_max_length,
-    default_public_hoist_pattern, default_registry, default_store_dir, default_virtual_store_dir,
-    deserialize_bool, deserialize_pathbuf, deserialize_registry, deserialize_store_dir,
-    deserialize_u16, deserialize_u64,
+    bool_true, default_cache_dir, default_fetch_timeout, default_hoist_pattern,
+    default_modules_cache_max_age, default_modules_dir, default_network_concurrency,
+    default_peers_suffix_max_length, default_public_hoist_pattern, default_registry,
+    default_store_dir, default_virtual_store_dir, deserialize_bool, deserialize_pathbuf,
+    deserialize_registry, deserialize_store_dir, deserialize_u16, deserialize_u64,
 };
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -130,6 +130,10 @@ pub struct Npmrc {
     #[serde(default = "default_network_concurrency", deserialize_with = "deserialize_u16")]
     pub network_concurrency: u16,
 
+    /// HTTP request timeout in milliseconds.
+    #[serde(default = "default_fetch_timeout", deserialize_with = "deserialize_u64")]
+    pub fetch_timeout: u64,
+
     /// When set to false, pnpm won't read or generate a pnpm-lock.yaml file.
     #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
     pub lockfile: bool,
@@ -194,6 +198,9 @@ pub struct Npmrc {
     /// Raw merged `.npmrc` key/value pairs used for auth resolution.
     #[serde(skip, default)]
     raw_settings: HashMap<String, String>,
+    /// Raw user-level `.npmrc` key/value pairs used for token helper resolution.
+    #[serde(skip, default)]
+    raw_user_settings: HashMap<String, String>,
     /// Authorization header values keyed by nerfed URL (`//host/path/`).
     #[serde(skip, default)]
     auth_headers_by_uri: HashMap<String, String>,
@@ -351,6 +358,7 @@ fn get_max_parts(keys: impl Iterator<Item = String>) -> usize {
 
 fn auth_headers_from_settings(
     settings: &HashMap<String, String>,
+    user_settings: &HashMap<String, String>,
     registry_url: &str,
 ) -> Result<(HashMap<String, String>, usize), AuthConfigError> {
     let mut auth_by_uri = HashMap::<String, HashMap<String, String>>::new();
@@ -367,7 +375,7 @@ fn auth_headers_from_settings(
 
     let mut headers = HashMap::<String, String>::new();
     for (uri, auth_fields) in &auth_by_uri {
-        if let Some(token_helper) = auth_fields.get("tokenHelper") {
+        if let Some(token_helper) = user_settings.get(&format!("{uri}:tokenHelper")) {
             let setting_name = format!("{uri}:tokenHelper");
             let token = load_token_helper(token_helper, &setting_name)?;
             headers.insert(uri.clone(), token);
@@ -394,7 +402,7 @@ fn auth_headers_from_settings(
     let registry_key = normalize_auth_key_uri(registry_url)
         .or_else(|| nerf_url(registry_url))
         .unwrap_or_else(|| "//registry.npmjs.org/".to_string());
-    if let Some(token_helper) = settings.get("tokenHelper") {
+    if let Some(token_helper) = user_settings.get("tokenHelper") {
         let token = load_token_helper(token_helper, "tokenHelper")?;
         headers.insert(registry_key.clone(), token);
     } else if let Some(token) = settings.get("_authToken") {
@@ -445,6 +453,7 @@ impl Npmrc {
 
         let mut merged_raw = read_npmrc_raw(home_dir.clone());
         merged_raw.extend(read_npmrc_raw(current_dir.clone()));
+        let user_raw = read_npmrc_raw(current_dir.clone());
 
         let mut config = current_dir
             .as_ref()
@@ -452,6 +461,7 @@ impl Npmrc {
             .or_else(|| home_dir.as_ref().and_then(load))
             .unwrap_or_else(default);
         config.raw_settings = merged_raw;
+        config.raw_user_settings = user_raw;
         if !config.raw_settings.contains_key("registry") {
             config.raw_settings.insert("registry".to_string(), config.registry.clone());
         }
@@ -460,7 +470,11 @@ impl Npmrc {
     }
 
     fn recompute_auth_headers(&mut self) -> Result<(), AuthConfigError> {
-        let (headers, max_parts) = auth_headers_from_settings(&self.raw_settings, &self.registry)?;
+        let (headers, max_parts) = auth_headers_from_settings(
+            &self.raw_settings,
+            &self.raw_user_settings,
+            &self.registry,
+        )?;
         self.auth_headers_by_uri = headers;
         self.auth_header_max_parts = max_parts;
         Ok(())
@@ -525,6 +539,7 @@ mod tests {
         assert_eq!(value.node_linker, NodeLinker::default());
         assert_eq!(value.package_import_method, PackageImportMethod::default());
         assert_eq!(value.network_concurrency, 16);
+        assert_eq!(value.fetch_timeout, 60000);
         assert!(value.lockfile);
         assert!(value.prefer_frozen_lockfile);
         assert!(!value.exclude_links_from_lockfile);
@@ -589,6 +604,12 @@ mod tests {
     pub fn parse_network_concurrency() {
         let value: Npmrc = serde_ini::from_str("network-concurrency=8").unwrap();
         assert_eq!(value.network_concurrency, 8);
+    }
+
+    #[test]
+    pub fn parse_fetch_timeout() {
+        let value: Npmrc = serde_ini::from_str("fetch-timeout=45000").unwrap();
+        assert_eq!(value.fetch_timeout, 45000);
     }
 
     #[test]
@@ -787,5 +808,25 @@ mod tests {
             Npmrc::current(|| Ok::<_, ()>(project.path().to_path_buf()), || None, Npmrc::new)
                 .expect_err("missing scoped tokenHelper should fail");
         assert!(error.to_string().contains("//reg.example/:tokenHelper"));
+    }
+
+    #[test]
+    pub fn current_ignores_token_helper_from_home_config() {
+        let home = tempdir().expect("home tempdir");
+        let project = tempdir().expect("project tempdir");
+        fs::write(
+            home.path().join(".npmrc"),
+            "tokenHelper=/does/not/exist\nregistry=https://reg.example/\n",
+        )
+        .expect("write home npmrc");
+        fs::write(project.path().join(".npmrc"), "registry=https://reg.example/\n")
+            .expect("write project npmrc");
+
+        let config = Npmrc::current(
+            || Ok::<_, ()>(project.path().to_path_buf()),
+            || Some(home.path().to_path_buf()),
+            Npmrc::new,
+        );
+        assert!(config.is_ok());
     }
 }

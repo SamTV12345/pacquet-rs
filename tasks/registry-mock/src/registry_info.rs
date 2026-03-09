@@ -8,10 +8,8 @@ use std::{
     fs,
     io::ErrorKind,
     mem::forget,
-    net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     sync::OnceLock,
-    time::Duration,
 };
 use sysinfo::{Pid, Signal};
 
@@ -30,11 +28,7 @@ impl RegistryInfo {
     pub(crate) fn is_alive(&self) -> bool {
         let mut system = sysinfo::System::new();
         let pid = Pid::from_u32(self.pid);
-        if system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), false) == 0 {
-            return false;
-        }
-        let addr = SocketAddr::from(([127, 0, 0, 1], self.port));
-        TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), false) > 0
     }
 }
 
