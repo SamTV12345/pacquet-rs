@@ -218,7 +218,7 @@ fn frozen_lockfile_should_be_able_to_handle_big_lockfile() {
         .write(true)
         .open(npmrc_path)
         .expect("open .npmrc to append")
-        .write_all(b"\nlockfile=true\nauto-install-peers=false\n")
+        .write_all(b"\nlockfile=true\nauto-install-peers=true\n")
         .expect("append to .npmrc");
 
     eprintln!("Executing command...");
