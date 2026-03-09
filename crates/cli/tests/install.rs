@@ -810,7 +810,10 @@ fn workspace_root_flag_should_install_workspace_root_manifest_from_subproject() 
 
     pacquet.with_args(["-C", app_dir.to_str().unwrap(), "-w", "install"]).assert().success();
 
-    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+    assert!(wait_for_path(
+        &workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent"),
+        Duration::from_secs(2)
+    ));
     assert!(workspace.join("pnpm-lock.yaml").exists());
     assert!(!app_dir.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
 
@@ -881,9 +884,18 @@ fn workspace_recursive_install_from_subproject_should_install_all_projects() {
         .assert()
         .success();
 
-    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
-    assert!(app_dir.join("node_modules/@pnpm.e2e/hello-world-js-bin").exists());
-    assert!(lib_dir.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+    assert!(wait_for_path(
+        &workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent"),
+        Duration::from_secs(2)
+    ));
+    assert!(wait_for_path(
+        &app_dir.join("node_modules/@pnpm.e2e/hello-world-js-bin"),
+        Duration::from_secs(2)
+    ));
+    assert!(wait_for_path(
+        &lib_dir.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent"),
+        Duration::from_secs(2)
+    ));
 
     let lockfile_content =
         fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
