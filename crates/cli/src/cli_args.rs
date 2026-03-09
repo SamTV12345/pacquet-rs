@@ -93,9 +93,10 @@ impl CliArgs {
             .wrap_err_with(|| format!("set current directory to {dir}", dir = dir.display()))?;
 
         let manifest_path = || dir.join("package.json");
-        let npmrc =
-            || Npmrc::current(std_env::current_dir, home::home_dir, Default::default).leak();
-        let state = || State::init(manifest_path(), npmrc()).wrap_err("initialize the state");
+        let npmrc = Npmrc::current(std_env::current_dir, home::home_dir, Default::default)
+            .wrap_err("load .npmrc")?
+            .leak();
+        let state = || State::init(manifest_path(), npmrc).wrap_err("initialize the state");
 
         match command {
             CliCommand::Init => {
@@ -111,10 +112,10 @@ impl CliArgs {
             CliCommand::Remove(args) => args.run(state()?).await?,
             CliCommand::List(args) => args.run(state()?)?,
             CliCommand::Why(args) => args.run(state()?)?,
-            CliCommand::Test => run_test(manifest_path(), npmrc())?,
-            CliCommand::Run(args) => args.run(manifest_path(), npmrc())?,
-            CliCommand::Start => run_start(manifest_path(), npmrc())?,
-            CliCommand::Store(command) => command.run(|| npmrc()).await?,
+            CliCommand::Test => run_test(manifest_path(), npmrc)?,
+            CliCommand::Run(args) => args.run(manifest_path(), npmrc)?,
+            CliCommand::Start => run_start(manifest_path(), npmrc)?,
+            CliCommand::Store(command) => command.run(|| npmrc).await?,
         }
 
         Ok(())

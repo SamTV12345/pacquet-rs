@@ -147,8 +147,6 @@ impl RunArgs {
             None
         };
         let workspace_concurrency = if sequential { Some(1) } else { workspace_concurrency };
-        let no_bail = no_bail;
-
         if !recursive
             && filter.is_empty()
             && filter_prod.is_empty()

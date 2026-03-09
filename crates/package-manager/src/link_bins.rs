@@ -2,11 +2,10 @@ use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use serde_json::Value;
-use std::{
-    collections::BTreeSet,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeSet, fs, path::Path};
+
+#[cfg(windows)]
+use std::path::PathBuf;
 
 pub fn link_bins_for_manifest(
     config: &Npmrc,

@@ -1,6 +1,8 @@
 mod custom_deserializer;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STD};
+use derive_more::{Display, Error};
+use miette::Diagnostic;
 use pacquet_store_dir::StoreDir;
 use pipe_trait::Pipe;
 use serde::Deserialize;
@@ -204,6 +206,23 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
     ENV_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[derive(Debug, Display, Error, Diagnostic)]
+pub enum AuthConfigError {
+    #[display("{setting_name} must be an absolute path, without arguments")]
+    InvalidTokenHelperPath { setting_name: String },
+    #[display(
+        "Error running \"{helper_path}\" as a token helper, configured as {setting_name}. Exit code {exit_code}"
+    )]
+    TokenHelperExecFailed { setting_name: String, helper_path: String, exit_code: i32 },
+    #[display("Failed to run token helper \"{helper_path}\" configured as {setting_name}: {error}")]
+    TokenHelperExecIo {
+        setting_name: String,
+        helper_path: String,
+        #[error(source)]
+        error: std::io::Error,
+    },
+}
+
 fn parse_raw_npmrc(content: &str) -> HashMap<String, String> {
     content
         .lines()
@@ -298,17 +317,28 @@ fn remove_default_port(url: &str) -> Option<String> {
     Some(parsed.to_string())
 }
 
-fn load_token_helper(helper_path: &str) -> Option<String> {
+fn load_token_helper(helper_path: &str, setting_name: &str) -> Result<String, AuthConfigError> {
     let helper = PathBuf::from(helper_path);
     if !helper.is_absolute() || !helper.exists() {
-        return None;
+        return Err(AuthConfigError::InvalidTokenHelperPath {
+            setting_name: setting_name.to_string(),
+        });
     }
-    let output = Command::new(helper).output().ok()?;
+    let output =
+        Command::new(helper).output().map_err(|error| AuthConfigError::TokenHelperExecIo {
+            setting_name: setting_name.to_string(),
+            helper_path: helper_path.to_string(),
+            error,
+        })?;
     if !output.status.success() {
-        return None;
+        return Err(AuthConfigError::TokenHelperExecFailed {
+            setting_name: setting_name.to_string(),
+            helper_path: helper_path.to_string(),
+            exit_code: output.status.code().unwrap_or_default(),
+        });
     }
-    let token = String::from_utf8(output.stdout).ok()?;
-    Some(token.trim_end().to_string())
+    let token = String::from_utf8(output.stdout).unwrap_or_default();
+    Ok(token.trim_end().to_string())
 }
 
 fn get_max_parts(keys: impl Iterator<Item = String>) -> usize {
@@ -318,7 +348,7 @@ fn get_max_parts(keys: impl Iterator<Item = String>) -> usize {
 fn auth_headers_from_settings(
     settings: &HashMap<String, String>,
     registry_url: &str,
-) -> (HashMap<String, String>, usize) {
+) -> Result<(HashMap<String, String>, usize), AuthConfigError> {
     let mut auth_by_uri = HashMap::<String, HashMap<String, String>>::new();
 
     for (key, value) in settings {
@@ -333,9 +363,9 @@ fn auth_headers_from_settings(
 
     let mut headers = HashMap::<String, String>::new();
     for (uri, auth_fields) in &auth_by_uri {
-        if let Some(token_helper) = auth_fields.get("tokenHelper")
-            && let Some(token) = load_token_helper(token_helper)
-        {
+        if let Some(token_helper) = auth_fields.get("tokenHelper") {
+            let setting_name = format!("{uri}:tokenHelper");
+            let token = load_token_helper(token_helper, &setting_name)?;
             headers.insert(uri.clone(), token);
             continue;
         }
@@ -360,9 +390,9 @@ fn auth_headers_from_settings(
     let registry_key = normalize_auth_key_uri(registry_url)
         .or_else(|| nerf_url(registry_url))
         .unwrap_or_else(|| "//registry.npmjs.org/".to_string());
-    if let Some(token_helper) = settings.get("tokenHelper").and_then(|path| load_token_helper(path))
-    {
-        headers.insert(registry_key.clone(), token_helper);
+    if let Some(token_helper) = settings.get("tokenHelper") {
+        let token = load_token_helper(token_helper, "tokenHelper")?;
+        headers.insert(registry_key.clone(), token);
     } else if let Some(token) = settings.get("_authToken") {
         headers.insert(registry_key.clone(), format!("Bearer {token}"));
     } else if let Some(auth) = settings.get("_auth") {
@@ -375,13 +405,13 @@ fn auth_headers_from_settings(
     }
 
     let max_parts = get_max_parts(headers.keys().cloned());
-    (headers, max_parts)
+    Ok((headers, max_parts))
 }
 
 impl Npmrc {
     pub fn new() -> Self {
         let mut config: Npmrc = serde_ini::from_str("").unwrap(); // TODO: derive `SmartDefault` for `Npmrc and call `Npmrc::default()`
-        config.recompute_auth_headers();
+        config.recompute_auth_headers().expect("default npmrc auth config should be valid");
         config
     }
 
@@ -392,7 +422,7 @@ impl Npmrc {
         current_dir: CurrentDir,
         home_dir: HomeDir,
         default: Default,
-    ) -> Self
+    ) -> Result<Self, AuthConfigError>
     where
         CurrentDir: FnOnce() -> Result<PathBuf, Error>,
         HomeDir: FnOnce() -> Option<PathBuf>,
@@ -421,14 +451,15 @@ impl Npmrc {
         if !config.raw_settings.contains_key("registry") {
             config.raw_settings.insert("registry".to_string(), config.registry.clone());
         }
-        config.recompute_auth_headers();
-        config
+        config.recompute_auth_headers()?;
+        Ok(config)
     }
 
-    fn recompute_auth_headers(&mut self) {
-        let (headers, max_parts) = auth_headers_from_settings(&self.raw_settings, &self.registry);
+    fn recompute_auth_headers(&mut self) -> Result<(), AuthConfigError> {
+        let (headers, max_parts) = auth_headers_from_settings(&self.raw_settings, &self.registry)?;
         self.auth_headers_by_uri = headers;
         self.auth_header_max_parts = max_parts;
+        Ok(())
     }
 
     pub fn auth_header_for_url(&self, url: &str) -> Option<String> {
@@ -608,7 +639,8 @@ mod tests {
             || tmp.path().to_path_buf().pipe(Ok::<_, ()>),
             || None,
             || unreachable!("shouldn't reach default"),
-        );
+        )
+        .expect("load npmrc");
         assert!(!config.symlink);
     }
 
@@ -618,7 +650,8 @@ mod tests {
         // write invalid utf-8 value to npmrc
         fs::write(tmp.path().join(".npmrc"), b"Hello \xff World").expect("write to .npmrc");
         let config =
-            Npmrc::current(|| tmp.path().to_path_buf().pipe(Ok::<_, ()>), || None, Npmrc::new);
+            Npmrc::current(|| tmp.path().to_path_buf().pipe(Ok::<_, ()>), || None, Npmrc::new)
+                .expect("load npmrc");
         assert!(config.symlink); // TODO: what the hell? why succeed?
     }
 
@@ -632,7 +665,8 @@ mod tests {
             || current_dir.path().to_path_buf().pipe(Ok::<_, ()>),
             || home_dir.path().to_path_buf().pipe(Some),
             || unreachable!("shouldn't reach home dir"),
-        );
+        )
+        .expect("load npmrc");
         assert!(!config.symlink);
     }
 
@@ -644,7 +678,8 @@ mod tests {
             || current_dir.path().to_path_buf().pipe(Ok::<_, ()>),
             || home_dir.path().to_path_buf().pipe(Some),
             || serde_ini::from_str("symlink=false").unwrap(),
-        );
+        )
+        .expect("load npmrc");
         assert!(!config.symlink);
     }
 
@@ -657,7 +692,7 @@ mod tests {
             ("//reg.example/:_authToken".to_string(), "outer".to_string()),
             ("//reg.example/tarballs/:_authToken".to_string(), "inner".to_string()),
         ]);
-        config.recompute_auth_headers();
+        config.recompute_auth_headers().expect("recompute auth headers");
 
         assert_eq!(
             config.auth_header_for_url("https://reg.example/tarballs/pkg/-/pkg-1.0.0.tgz"),
@@ -677,7 +712,7 @@ mod tests {
             ("registry".to_string(), "https://reg.example/".to_string()),
             ("_authToken".to_string(), "abc123".to_string()),
         ]);
-        config.recompute_auth_headers();
+        config.recompute_auth_headers().expect("recompute auth headers");
 
         assert_eq!(
             config.auth_header_for_url("https://reg.example:443/pkg"),
@@ -709,11 +744,37 @@ mod tests {
             || Ok::<_, ()>(project.path().to_path_buf()),
             || Some(home.path().to_path_buf()),
             Npmrc::new,
-        );
+        )
+        .expect("load npmrc");
 
         assert_eq!(
             config.auth_header_for_url("https://reg.example/foo"),
             Some("Bearer from-project".to_string())
         );
+    }
+
+    #[test]
+    pub fn current_fails_for_non_absolute_token_helper() {
+        let project = tempdir().expect("tempdir");
+        fs::write(project.path().join(".npmrc"), "tokenHelper=./token-helper")
+            .expect("write npmrc");
+        let error =
+            Npmrc::current(|| Ok::<_, ()>(project.path().to_path_buf()), || None, Npmrc::new)
+                .expect_err("non-absolute tokenHelper should fail");
+        assert!(error.to_string().contains("tokenHelper must be an absolute path"));
+    }
+
+    #[test]
+    pub fn current_fails_for_non_existent_scoped_token_helper() {
+        let project = tempdir().expect("tempdir");
+        fs::write(
+            project.path().join(".npmrc"),
+            "//reg.example/:tokenHelper=/does/not/exist\nregistry=https://reg.example/\n",
+        )
+        .expect("write npmrc");
+        let error =
+            Npmrc::current(|| Ok::<_, ()>(project.path().to_path_buf()), || None, Npmrc::new)
+                .expect_err("missing scoped tokenHelper should fail");
+        assert!(error.to_string().contains("//reg.example/:tokenHelper"));
     }
 }

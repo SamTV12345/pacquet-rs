@@ -34,8 +34,8 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 | Done | Field              | Notes |
 |------|--------------------|-------|
 | ✅    | registry           |       |
-|      | <URL>:_authToken   |       |
-|      | <URL>:_tokenHelper |       |
+| ✅    | <URL>:_authToken   |       |
+| ✅    | <URL>:tokenHelper  | token helper must be an absolute existing path |
 
 # Request Settings
 
