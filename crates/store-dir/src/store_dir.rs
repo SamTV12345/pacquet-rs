@@ -1,7 +1,8 @@
 use derive_more::From;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha512, digest};
-use std::path::{self, PathBuf};
+use ssri::Integrity;
+use std::path::{self, Path, PathBuf};
 
 /// Content hash of a file.
 pub type FileHash = digest::Output<Sha512>;
@@ -73,6 +74,42 @@ impl StoreDir {
     pub fn tmp(&self) -> PathBuf {
         self.v10().join("tmp")
     }
+
+    /// Resolve a CAS file path from an integrity string (`sha512-...`).
+    pub fn cas_file_path_by_integrity(&self, integrity: &str, executable: bool) -> Option<PathBuf> {
+        let integrity = integrity.parse::<Integrity>().ok()?;
+        let (_, hex) = integrity.to_hex();
+        let suffix = if executable { "-exec" } else { "" };
+        Some(self.file_path_by_hex_str(&hex, suffix))
+    }
+
+    /// Iterate all index JSON files under `{store}/v10/index`.
+    pub fn index_file_paths(&self) -> Vec<PathBuf> {
+        fn walk(dir: &Path, acc: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_dir() {
+                    walk(&path, acc);
+                    continue;
+                }
+                if file_type.is_file()
+                    && path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                {
+                    acc.push(path);
+                }
+            }
+        }
+
+        let mut paths = Vec::new();
+        walk(&self.version_dir().join("index"), &mut paths);
+        paths
+    }
 }
 
 #[cfg(test)]
@@ -80,6 +117,8 @@ mod tests {
     use super::*;
     use pipe_trait::Pipe;
     use pretty_assertions::assert_eq;
+    use ssri::{Algorithm, IntegrityOpts};
+    use tempfile::tempdir;
 
     #[test]
     fn file_path_by_head_tail() {
@@ -97,5 +136,31 @@ mod tests {
         let received = StoreDir::new("/home/user/.local/share/pnpm/store").tmp();
         let expected = PathBuf::from("/home/user/.local/share/pnpm/store/v10/tmp");
         assert_eq!(&received, &expected);
+    }
+
+    #[test]
+    fn cas_file_path_by_integrity() {
+        let store = StoreDir::new("/tmp/store");
+        let integrity =
+            IntegrityOpts::new().algorithm(Algorithm::Sha512).chain("hello").result().to_string();
+        let path =
+            store.cas_file_path_by_integrity(&integrity, false).expect("resolve path by integrity");
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        assert!(normalized.contains("/v10/files/"));
+    }
+
+    #[test]
+    fn index_file_paths_discovers_nested_json_files() {
+        let dir = tempdir().expect("create tempdir");
+        let store = StoreDir::new(dir.path());
+        let index_dir = store.version_dir().join("index").join("ab");
+        std::fs::create_dir_all(&index_dir).expect("create index dir");
+        std::fs::write(index_dir.join("one.json"), "{}").expect("write json file");
+        std::fs::write(index_dir.join("two.txt"), "x").expect("write text file");
+
+        let mut paths = store.index_file_paths();
+        paths.sort();
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("one.json"));
     }
 }

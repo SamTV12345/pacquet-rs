@@ -30,6 +30,8 @@ where
     pub project_snapshot: &'a ProjectSnapshot,
     pub packages: Option<&'a HashMap<DependencyPath, PackageSnapshot>>,
     pub dependency_groups: DependencyGroupList,
+    pub offline: bool,
+    pub force: bool,
 }
 
 impl<'a, DependencyGroupList> InstallFrozenLockfile<'a, DependencyGroupList>
@@ -45,6 +47,8 @@ where
             project_snapshot,
             packages,
             dependency_groups,
+            offline,
+            force,
         } = self;
         let dependency_groups = dependency_groups.into_iter().collect::<Vec<_>>();
 
@@ -52,17 +56,21 @@ where
 
         assert!(config.prefer_frozen_lockfile, "Non frozen lockfile is not yet supported");
 
-        if !importer_dependencies_ready(
-            config,
-            project_snapshot,
-            packages,
-            dependency_groups.iter().copied(),
-        ) {
+        if force
+            || !importer_dependencies_ready(
+                config,
+                project_snapshot,
+                packages,
+                dependency_groups.iter().copied(),
+            )
+        {
             CreateVirtualStore {
                 http_client,
                 config,
                 packages,
                 resolved_packages: Some(resolved_packages),
+                offline,
+                force,
             }
             .run()
             .await;

@@ -317,6 +317,140 @@ fn store_usable_by_pnpm_offline() {
 }
 
 #[test]
+fn lockfile_only_behaves_like_pnpm() {
+    let CommandTempCwd { pacquet, pnpm, root, workspace, npmrc_info } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { store_dir, mock_instance, .. } = npmrc_info;
+
+    let modules_dir = workspace.join("node_modules");
+    let lockfile_path = workspace.join("pnpm-lock.yaml");
+    let cleanup = || {
+        remove_path_if_exists(&store_dir);
+        remove_path_if_exists(&modules_dir);
+        remove_path_if_exists(&lockfile_path);
+    };
+
+    write_manifest(
+        &workspace,
+        serde_json::json!({
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+            }
+        }),
+    );
+
+    pacquet.with_args(["install", "--lockfile-only"]).assert().success();
+    assert!(lockfile_path.exists());
+    assert!(!modules_dir.exists());
+    let pacquet_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pacquet lockfile"));
+
+    cleanup();
+
+    pnpm.with_args(["install", "--lockfile-only", "--ignore-scripts"]).assert().success();
+    assert!(lockfile_path.exists());
+    assert!(!modules_dir.exists());
+    let pnpm_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pnpm lockfile"));
+
+    cleanup();
+
+    assert_eq!(&pacquet_lockfile, &pnpm_lockfile);
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn resolution_only_behaves_like_pnpm() {
+    let CommandTempCwd { pacquet, pnpm, root, workspace, npmrc_info } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { store_dir, mock_instance, .. } = npmrc_info;
+
+    let modules_dir = workspace.join("node_modules");
+    let lockfile_path = workspace.join("pnpm-lock.yaml");
+    let cleanup = || {
+        remove_path_if_exists(&store_dir);
+        remove_path_if_exists(&modules_dir);
+        remove_path_if_exists(&lockfile_path);
+    };
+
+    write_manifest(
+        &workspace,
+        serde_json::json!({
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+            }
+        }),
+    );
+
+    pacquet.with_args(["install", "--resolution-only"]).assert().success();
+    assert!(lockfile_path.exists());
+    assert!(!modules_dir.exists());
+    let pacquet_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pacquet lockfile"));
+
+    cleanup();
+
+    pnpm.with_args(["install", "--resolution-only", "--ignore-scripts"]).assert().success();
+    assert!(lockfile_path.exists());
+    assert!(!modules_dir.exists());
+    let pnpm_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pnpm lockfile"));
+
+    cleanup();
+
+    assert_eq!(&pacquet_lockfile, &pnpm_lockfile);
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn fix_lockfile_with_frozen_behaves_like_pnpm() {
+    let CommandTempCwd { pacquet, pnpm, root, workspace, npmrc_info } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { store_dir, mock_instance, .. } = npmrc_info;
+
+    let modules_dir = workspace.join("node_modules");
+    let lockfile_path = workspace.join("pnpm-lock.yaml");
+    let cleanup = || {
+        remove_path_if_exists(&store_dir);
+        remove_path_if_exists(&modules_dir);
+        remove_path_if_exists(&lockfile_path);
+    };
+
+    write_manifest(
+        &workspace,
+        serde_json::json!({
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+            }
+        }),
+    );
+
+    pacquet.with_args(["install", "--frozen-lockfile", "--fix-lockfile"]).assert().success();
+    assert!(lockfile_path.exists());
+    assert!(modules_dir.exists());
+    let pacquet_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pacquet lockfile"));
+
+    cleanup();
+
+    pnpm.with_args(["install", "--frozen-lockfile", "--fix-lockfile", "--ignore-scripts"])
+        .assert()
+        .success();
+    assert!(lockfile_path.exists());
+    assert!(modules_dir.exists());
+    let pnpm_lockfile =
+        normalized_lockfile(&fs::read_to_string(&lockfile_path).expect("read pnpm lockfile"));
+
+    cleanup();
+
+    assert_eq!(&pacquet_lockfile, &pnpm_lockfile);
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
 fn same_file_structure() {
     let CommandTempCwd { pacquet, pnpm, root, workspace, npmrc_info } =
         CommandTempCwd::init().add_mocked_registry();

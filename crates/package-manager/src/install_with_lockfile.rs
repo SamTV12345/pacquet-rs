@@ -1,10 +1,12 @@
 use crate::{
     InstallPackageFromRegistry, ResolvedPackages, WorkspacePackages,
-    collect_runtime_lockfile_config, resolve_workspace_dependency, symlink_package,
+    collect_runtime_lockfile_config, fetch_package_from_registry_and_cache,
+    fetch_package_with_metadata_cache, is_git_spec, is_tarball_spec,
+    read_cached_package_from_config, resolve_package_version_from_git_spec,
+    resolve_package_version_from_tarball_spec, resolve_workspace_dependency, symlink_package,
 };
 use async_recursion::async_recursion;
 use dashmap::DashMap;
-use node_semver::Version;
 use pacquet_lockfile::{
     ComVer, DependencyPath, Lockfile, LockfileResolution, MultiProjectSnapshot, PackageSnapshot,
     PackageSnapshotDependency, PkgName, PkgNameVerPeer, PkgVerPeer, ProjectSnapshot,
@@ -14,7 +16,7 @@ use pacquet_lockfile::{
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
-use pacquet_registry::PackageVersion;
+use pacquet_registry::{PackageTag, PackageVersion};
 use pacquet_tarball::MemCache;
 use std::{
     collections::HashMap,
@@ -37,6 +39,10 @@ where
     pub lockfile_importer_id: &'a str,
     pub workspace_packages: &'a WorkspacePackages,
     pub dependency_groups: DependencyGroupList,
+    pub lockfile_only: bool,
+    pub force: bool,
+    pub prefer_offline: bool,
+    pub offline: bool,
 }
 
 #[derive(Clone)]
@@ -61,6 +67,10 @@ where
             lockfile_importer_id,
             workspace_packages,
             dependency_groups,
+            lockfile_only,
+            force,
+            prefer_offline,
+            offline,
         } = self;
 
         let dependency_groups = dependency_groups.into_iter().collect::<Vec<_>>();
@@ -73,9 +83,14 @@ where
                 continue;
             }
 
-            if let Some(resolved_package) =
-                resolve_link_dependency(config, manifest.path(), name, version_range)
-            {
+            if let Some(resolved_package) = resolve_link_dependency(version_range) {
+                if !lockfile_only && let Some(link_target) = version_range.strip_prefix("link:") {
+                    let project_dir = manifest.path().parent().unwrap_or_else(|| Path::new("."));
+                    let local_dep_path = normalize_local_dependency_path(project_dir, link_target);
+                    let symlink_path = config.modules_dir.join(name);
+                    symlink_package(&local_dep_path, &symlink_path)
+                        .expect("symlink local link dependency");
+                }
                 resolved_direct_dependencies.insert(key, resolved_package);
                 continue;
             }
@@ -83,9 +98,11 @@ where
             if let Some(workspace_package) =
                 resolve_workspace_dependency(workspace_packages, name, version_range)
             {
-                let symlink_path = config.modules_dir.join(name);
-                symlink_package(&workspace_package.root_dir, &symlink_path)
-                    .expect("symlink workspace package");
+                if !lockfile_only {
+                    let symlink_path = config.modules_dir.join(name);
+                    symlink_package(&workspace_package.root_dir, &symlink_path)
+                        .expect("symlink workspace package");
+                }
 
                 let project_dir = manifest.path().parent().unwrap_or_else(|| Path::new("."));
                 let relative = to_relative_path(project_dir, &workspace_package.root_dir);
@@ -99,17 +116,34 @@ where
                 continue;
             }
 
-            let resolved_package = Self::install_and_snapshot_package(
-                tarball_mem_cache,
-                resolved_packages,
-                http_client,
-                config,
-                &package_snapshots,
-                &config.modules_dir,
-                name,
-                version_range,
-            )
-            .await;
+            let resolved_package = if lockfile_only {
+                Self::resolve_and_snapshot_package(
+                    resolved_packages,
+                    http_client,
+                    config,
+                    &package_snapshots,
+                    name,
+                    version_range,
+                    prefer_offline,
+                    offline,
+                )
+                .await
+            } else {
+                Self::install_and_snapshot_package(
+                    tarball_mem_cache,
+                    resolved_packages,
+                    http_client,
+                    config,
+                    &package_snapshots,
+                    &config.modules_dir,
+                    name,
+                    version_range,
+                    offline,
+                    prefer_offline,
+                    force,
+                )
+                .await
+            };
 
             resolved_direct_dependencies.insert(key, resolved_package);
         }
@@ -155,6 +189,84 @@ where
 
     #[async_recursion]
     #[allow(clippy::too_many_arguments)]
+    async fn resolve_and_snapshot_package(
+        resolved_packages: &ResolvedPackages,
+        http_client: &ThrottledClient,
+        config: &'static Npmrc,
+        package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
+        name: &str,
+        version_range: &str,
+        prefer_offline: bool,
+        offline: bool,
+    ) -> ResolvedPackage {
+        let package_version = resolve_package_version(
+            config,
+            http_client,
+            name,
+            version_range,
+            prefer_offline,
+            offline,
+        )
+        .await;
+
+        let ver_peer = Self::to_pkg_ver_peer(&package_version);
+        let resolved_version = if package_version.name == name {
+            ResolvedDependencyVersion::PkgVerPeer(ver_peer.clone())
+        } else {
+            ResolvedDependencyVersion::PkgNameVerPeer(PkgNameVerPeer::new(
+                Self::parse_pkg_name(&package_version.name),
+                ver_peer.clone(),
+            ))
+        };
+        let dependency_path = Self::to_dependency_path(&package_version);
+        let virtual_store_name = package_version.to_virtual_store_name();
+
+        if resolved_packages.insert(virtual_store_name.clone()) {
+            let dependencies = package_version
+                .dependencies(config.auto_install_peers)
+                .map(|(name, version_range)| (name.to_string(), version_range.to_string()))
+                .collect::<Vec<_>>();
+
+            let mut snapshot_dependencies = HashMap::new();
+            for (dependency_name, dependency_version_range) in dependencies {
+                let resolved_dependency = Self::resolve_and_snapshot_package(
+                    resolved_packages,
+                    http_client,
+                    config,
+                    package_snapshots,
+                    &dependency_name,
+                    &dependency_version_range,
+                    prefer_offline,
+                    offline,
+                )
+                .await;
+
+                snapshot_dependencies.insert(
+                    Self::parse_pkg_name(&dependency_name),
+                    match resolved_dependency.version {
+                        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
+                            PackageSnapshotDependency::PkgVerPeer(ver_peer)
+                        }
+                        ResolvedDependencyVersion::PkgNameVerPeer(name_ver_peer) => {
+                            PackageSnapshotDependency::PkgNameVerPeer(name_ver_peer)
+                        }
+                        ResolvedDependencyVersion::Link(_) => {
+                            panic!("workspace links are not supported in transitive dependencies")
+                        }
+                    },
+                );
+            }
+
+            let package_snapshot =
+                Self::to_package_snapshot(config, &package_version, snapshot_dependencies);
+            package_snapshots.insert(dependency_path, package_snapshot);
+        }
+
+        ResolvedPackage { version: resolved_version }
+    }
+
+    #[async_recursion]
+    #[allow(clippy::too_many_arguments)]
     async fn install_and_snapshot_package(
         tarball_mem_cache: &MemCache,
         resolved_packages: &ResolvedPackages,
@@ -164,6 +276,9 @@ where
         node_modules_dir: &Path,
         name: &str,
         version_range: &str,
+        offline: bool,
+        prefer_offline: bool,
+        force: bool,
     ) -> ResolvedPackage {
         let package_version = InstallPackageFromRegistry {
             tarball_mem_cache,
@@ -172,8 +287,11 @@ where
             node_modules_dir,
             name,
             version_range,
+            prefer_offline,
+            offline,
+            force,
         }
-        .run::<Version>()
+        .run()
         .await
         .expect("install package from registry");
 
@@ -209,6 +327,9 @@ where
                     &virtual_node_modules_dir,
                     &dependency_name,
                     &dependency_version_range,
+                    offline,
+                    prefer_offline,
+                    force,
                 )
                 .await;
 
@@ -316,7 +437,19 @@ where
             .and_then(|index| index.requires_build)
             .unwrap_or(false);
 
-        let resolution = if config.lockfile_include_tarball_url {
+        let expected_registry_tarball = {
+            let registry = config.registry.trim_end_matches('/');
+            let bare_name =
+                package_version.name.rsplit('/').next().unwrap_or(package_version.name.as_str());
+            format!(
+                "{registry}/{}/-/{bare_name}-{}.tgz",
+                package_version.name, package_version.version
+            )
+        };
+        let should_use_tarball_resolution = config.lockfile_include_tarball_url
+            || package_version.as_tarball_url() != expected_registry_tarball;
+
+        let resolution = if should_use_tarball_resolution {
             LockfileResolution::Tarball(TarballResolution {
                 tarball: package_version.as_tarball_url().to_string(),
                 integrity: Some(integrity),
@@ -444,17 +577,8 @@ fn to_relative_path(from: &Path, to: &Path) -> String {
     if relative_parts.is_empty() { ".".to_string() } else { relative_parts.join("/") }
 }
 
-fn resolve_link_dependency(
-    config: &'static Npmrc,
-    manifest_path: &Path,
-    name: &str,
-    version_range: &str,
-) -> Option<ResolvedPackage> {
+fn resolve_link_dependency(version_range: &str) -> Option<ResolvedPackage> {
     let link_target = version_range.strip_prefix("link:")?;
-    let project_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let local_dep_path = normalize_local_dependency_path(project_dir, link_target);
-    let symlink_path = config.modules_dir.join(name);
-    symlink_package(&local_dep_path, &symlink_path).expect("symlink local link dependency");
     Some(ResolvedPackage {
         version: ResolvedDependencyVersion::Link(format!(
             "link:{}",
@@ -469,6 +593,75 @@ fn normalize_local_dependency_path(project_dir: &Path, target: &str) -> PathBuf 
         return candidate.to_path_buf();
     }
     project_dir.join(candidate)
+}
+
+fn parse_npm_alias(version_range: &str) -> Option<(&str, &str)> {
+    let alias = version_range.strip_prefix("npm:")?;
+    let separator = alias.rfind('@');
+    match separator {
+        Some(index) if index > 0 => Some((&alias[..index], &alias[index + 1..])),
+        _ => Some((alias, "latest")),
+    }
+}
+
+async fn resolve_package_version(
+    config: &'static Npmrc,
+    http_client: &ThrottledClient,
+    name: &str,
+    version_range: &str,
+    prefer_offline: bool,
+    offline: bool,
+) -> PackageVersion {
+    if is_tarball_spec(version_range) {
+        crate::progress_reporter::resolved();
+        return resolve_package_version_from_tarball_spec(config, http_client, version_range)
+            .await
+            .expect("resolve package version from tarball spec");
+    }
+    if is_git_spec(version_range) {
+        crate::progress_reporter::resolved();
+        return resolve_package_version_from_git_spec(config, http_client, version_range)
+            .await
+            .expect("resolve package version from git spec");
+    }
+    let (requested_name, requested_range) =
+        parse_npm_alias(version_range).unwrap_or((name, version_range));
+    let package = fetch_package_with_metadata_cache(
+        config,
+        http_client,
+        requested_name,
+        prefer_offline,
+        offline,
+    )
+    .await;
+    let resolve = |package: &pacquet_registry::Package| {
+        if let Ok(version) = requested_range.parse::<node_semver::Version>() {
+            return package.versions.get(&version.to_string()).cloned();
+        }
+        if let Ok(tag) = requested_range.parse::<PackageTag>() {
+            return match tag {
+                PackageTag::Latest => Some(package.latest().clone()),
+                PackageTag::Version(version) => package.versions.get(&version.to_string()).cloned(),
+            };
+        }
+        package.pinned_version(requested_range).cloned()
+    };
+
+    let maybe_cached = if prefer_offline && !offline {
+        read_cached_package_from_config(config, requested_name)
+    } else {
+        None
+    };
+    let mut package_version = resolve(&package);
+    if package_version.is_none() && maybe_cached.is_some() {
+        let fresh = fetch_package_from_registry_and_cache(config, http_client, requested_name)
+            .await
+            .expect("fetch package metadata from registry");
+        package_version = resolve(&fresh);
+    }
+
+    crate::progress_reporter::resolved();
+    package_version.expect("resolve package version from metadata")
 }
 
 #[cfg(test)]

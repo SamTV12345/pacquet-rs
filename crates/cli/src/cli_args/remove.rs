@@ -1,10 +1,16 @@
 use crate::State;
 use clap::Args;
 use miette::{Context, IntoDiagnostic};
+use pacquet_lockfile::Lockfile;
+use pacquet_npmrc::Npmrc;
 use pacquet_package_manager::Install;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use serde_json::Value;
-use std::{fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Args)]
 pub struct RemoveDependencyOptions {
@@ -46,11 +52,17 @@ pub struct RemoveArgs {
     /// --save-prod, --save-dev, --save-optional
     #[clap(flatten)]
     pub dependency_options: RemoveDependencyOptions,
+    /// Select only matching workspace projects (by package name or workspace-relative path).
+    #[clap(long = "filter")]
+    pub filter: Vec<String>,
+    /// Remove dependencies from every workspace project recursively (including workspace root).
+    #[clap(short = 'r', long)]
+    pub recursive: bool,
 }
 
 impl RemoveArgs {
     pub async fn run(self, mut state: State) -> miette::Result<()> {
-        let RemoveArgs { packages, dependency_options } = self;
+        let RemoveArgs { packages, dependency_options, filter, recursive } = self;
         if packages.is_empty() {
             miette::bail!("At least one dependency name should be specified for removal");
         }
@@ -68,50 +80,109 @@ impl RemoveArgs {
         } = &mut state;
 
         let groups = dependency_options.dependency_groups();
-        let mut missing = Vec::<String>::new();
-        let manifest_path = manifest.path().to_path_buf();
-        let mut manifest_json: Value = fs::read_to_string(&manifest_path)
-            .into_diagnostic()
-            .wrap_err("read package.json before removal")
-            .and_then(|content| {
-                serde_json::from_str(&content)
-                    .into_diagnostic()
-                    .wrap_err("parse package.json before removal")
-            })?;
-
-        for package_name in &packages {
-            let removed = remove_dependency_from_manifest_json(
-                &mut manifest_json,
-                package_name,
-                groups.iter().copied(),
-            )
-            .wrap_err_with(|| format!("remove {package_name} from package.json"))?;
-            if !removed {
-                missing.push(package_name.to_string());
-                continue;
+        if !filter.is_empty() || recursive {
+            let mut targets = BTreeMap::<String, PathBuf>::new();
+            if lockfile_dir.join("pnpm-workspace.yaml").is_file() {
+                let root_manifest = lockfile_dir.join("package.json");
+                if root_manifest.is_file() {
+                    targets.insert(".".to_string(), root_manifest);
+                }
+            }
+            for (name, info) in workspace_packages.iter() {
+                let importer_id = to_lockfile_importer_id(lockfile_dir, &info.root_dir);
+                let matches = if filter.is_empty() {
+                    true
+                } else {
+                    filter.iter().any(|selector| {
+                        let normalized = selector.trim_start_matches("./").replace('\\', "/");
+                        normalized == importer_id || normalized == name.as_str()
+                    })
+                };
+                if recursive || matches {
+                    targets.insert(importer_id, info.root_dir.join("package.json"));
+                }
+            }
+            if !filter.is_empty() {
+                targets.retain(|importer_id, manifest_path| {
+                    let normalized_path = importer_id.trim_start_matches("./").replace('\\', "/");
+                    filter.iter().any(|selector| {
+                        let normalized = selector.trim_start_matches("./").replace('\\', "/");
+                        normalized == normalized_path
+                            || normalized == *importer_id
+                            || (importer_id == "."
+                                && root_package_name(lockfile_dir.join("package.json").as_path())
+                                    .is_some_and(|name| normalized == name))
+                            || workspace_packages.iter().any(|(name, info)| {
+                                to_lockfile_importer_id(lockfile_dir, &info.root_dir)
+                                    == *importer_id
+                                    && normalized == name.as_str()
+                            })
+                            || (manifest_path == manifest.path() && normalized == ".")
+                    })
+                });
+            }
+            if targets.is_empty() {
+                return Ok(());
             }
 
-            let direct_dep_path = config.modules_dir.join(package_name);
-            let _ = remove_existing_path(&direct_dep_path);
+            let mut current_lockfile = lockfile.clone();
+            for (importer_id, manifest_path) in targets {
+                let mut target_manifest = PackageManifest::from_path(manifest_path.clone())
+                    .wrap_err_with(|| {
+                        format!("load workspace manifest: {}", manifest_path.display())
+                    })?;
+                let project_dir = target_manifest
+                    .path()
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| lockfile_dir.to_path_buf());
+                let target_config = config_for_project(config, &project_dir).leak();
+
+                let _removed_any = apply_remove_to_manifest(
+                    &packages,
+                    &groups,
+                    &mut target_manifest,
+                    false,
+                    target_config,
+                )?;
+
+                Install {
+                    tarball_mem_cache,
+                    resolved_packages,
+                    http_client,
+                    config: target_config,
+                    manifest: &target_manifest,
+                    lockfile: current_lockfile.as_ref(),
+                    lockfile_dir,
+                    lockfile_importer_id: &importer_id,
+                    workspace_packages,
+                    dependency_groups: [
+                        DependencyGroup::Prod,
+                        DependencyGroup::Dev,
+                        DependencyGroup::Optional,
+                    ],
+                    frozen_lockfile: false,
+                    lockfile_only: false,
+                    force: false,
+                    prefer_offline: false,
+                    offline: false,
+                }
+                .run()
+                .await
+                .wrap_err("reinstall after removal")?;
+
+                current_lockfile = if config.lockfile {
+                    Lockfile::load_from_dir(lockfile_dir)
+                        .wrap_err("reload lockfile after workspace remove")?
+                } else {
+                    None
+                };
+            }
+
+            return Ok(());
         }
 
-        if !missing.is_empty() {
-            miette::bail!("Cannot remove missing dependency: {}", missing.join(", "));
-        }
-
-        fs::write(
-            &manifest_path,
-            format!(
-                "{}\n",
-                serde_json::to_string_pretty(&manifest_json)
-                    .into_diagnostic()
-                    .wrap_err("serialize package.json after removal")?
-            ),
-        )
-        .into_diagnostic()
-        .wrap_err("save package.json")?;
-        *manifest = PackageManifest::from_path(manifest_path)
-            .wrap_err("reload package.json after removal")?;
+        apply_remove_to_manifest(&packages, &groups, manifest, true, config)?;
 
         Install {
             tarball_mem_cache,
@@ -129,11 +200,99 @@ impl RemoveArgs {
                 DependencyGroup::Optional,
             ],
             frozen_lockfile: false,
+            lockfile_only: false,
+            force: false,
+            prefer_offline: false,
+            offline: false,
         }
         .run()
         .await
         .wrap_err("reinstall after removal")
     }
+}
+
+fn apply_remove_to_manifest(
+    packages: &[String],
+    groups: &[DependencyGroup],
+    manifest: &mut PackageManifest,
+    fail_when_missing: bool,
+    config: &Npmrc,
+) -> miette::Result<bool> {
+    let mut missing = Vec::<String>::new();
+    let mut removed_any = false;
+    let manifest_path = manifest.path().to_path_buf();
+    let mut manifest_json: Value = fs::read_to_string(&manifest_path)
+        .into_diagnostic()
+        .wrap_err("read package.json before removal")
+        .and_then(|content| {
+            serde_json::from_str(&content)
+                .into_diagnostic()
+                .wrap_err("parse package.json before removal")
+        })?;
+
+    for package_name in packages {
+        let removed = remove_dependency_from_manifest_json(
+            &mut manifest_json,
+            package_name,
+            groups.iter().copied(),
+        )
+        .wrap_err_with(|| format!("remove {package_name} from package.json"))?;
+        if !removed {
+            missing.push(package_name.to_string());
+            continue;
+        }
+
+        removed_any = true;
+        let direct_dep_path = config.modules_dir.join(package_name);
+        let _ = remove_existing_path(&direct_dep_path);
+    }
+
+    if fail_when_missing && !missing.is_empty() {
+        miette::bail!("Cannot remove missing dependency: {}", missing.join(", "));
+    }
+
+    fs::write(
+        &manifest_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&manifest_json)
+                .into_diagnostic()
+                .wrap_err("serialize package.json after removal")?
+        ),
+    )
+    .into_diagnostic()
+    .wrap_err("save package.json")?;
+    *manifest =
+        PackageManifest::from_path(manifest_path).wrap_err("reload package.json after removal")?;
+
+    Ok(removed_any)
+}
+
+fn config_for_project(config: &Npmrc, project_dir: &Path) -> Npmrc {
+    let mut next = config.clone();
+    next.modules_dir = project_dir.join("node_modules");
+    next.virtual_store_dir = next.modules_dir.join(".pnpm");
+    next
+}
+
+fn to_lockfile_importer_id(workspace_root: &Path, project_dir: &Path) -> String {
+    let Ok(relative) = project_dir.strip_prefix(workspace_root) else {
+        return ".".to_string();
+    };
+    if relative.as_os_str().is_empty() {
+        return ".".to_string();
+    }
+    relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn root_package_name(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let value = serde_json::from_str::<Value>(&content).ok()?;
+    value.get("name").and_then(Value::as_str).map(ToString::to_string)
 }
 
 fn remove_existing_path(path: &Path) -> miette::Result<()> {

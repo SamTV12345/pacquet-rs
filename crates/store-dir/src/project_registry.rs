@@ -28,7 +28,11 @@ impl StoreDir {
     ///
     /// pnpm keeps symlinks in `{store}/v10/projects/{hash}` that point to project roots.
     pub fn register_project(&self, project_dir: &Path) -> Result<(), RegisterProjectError> {
-        if self.root_dir().starts_with(project_dir) {
+        let normalized_store_root =
+            fs::canonicalize(self.root_dir()).unwrap_or_else(|_| self.root_dir().clone());
+        let normalized_project_dir =
+            fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+        if normalized_store_root.starts_with(&normalized_project_dir) {
             return Ok(());
         }
 
@@ -85,5 +89,22 @@ mod tests {
         let link_path = entries[0].path();
         assert_eq!(link_path.file_name().expect("file name").to_string_lossy().len(), 32);
         assert!(link_path.exists());
+    }
+
+    #[test]
+    fn register_project_handles_store_path_with_parent_segments() {
+        let dir = tempdir().expect("tempdir");
+        let project_dir = dir.path().join("workspace");
+        let store_dir_with_parent = project_dir.join("../store");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        let store = StoreDir::new(&store_dir_with_parent);
+
+        store.register_project(&project_dir).expect("register project");
+
+        let entries = fs::read_dir(dir.path().join("store").join("v10/projects"))
+            .expect("read projects dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect entries");
+        assert_eq!(entries.len(), 1);
     }
 }

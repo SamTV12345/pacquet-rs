@@ -78,6 +78,25 @@ pub fn default_store_dir() -> StoreDir {
     }
 }
 
+pub fn default_cache_dir() -> PathBuf {
+    if let Ok(xdg_cache_home) = env::var("XDG_CACHE_HOME") {
+        return PathBuf::from(xdg_cache_home).join("pnpm");
+    }
+
+    let home_dir = home::home_dir().expect("Home directory is not available");
+
+    #[cfg(windows)]
+    if cfg!(windows) {
+        return home_dir.join("AppData/Local/pnpm-cache");
+    }
+
+    match env::consts::OS {
+        "linux" => home_dir.join(".cache/pnpm"),
+        "macos" => home_dir.join("Library/Caches/pnpm"),
+        _ => panic!("unsupported operating system: {}", env::consts::OS),
+    }
+}
+
 pub fn default_modules_dir() -> PathBuf {
     // TODO: find directory with package.json
     env::current_dir().expect("current directory is unavailable").join("node_modules")

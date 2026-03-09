@@ -1,4 +1,7 @@
-use crate::{Install, ResolvedPackages, WorkspacePackages};
+use crate::{
+    Install, ResolvedPackages, WorkspacePackages, is_git_spec, is_tarball_spec,
+    resolve_package_version_from_git_spec, resolve_package_version_from_tarball_spec,
+};
 use derive_more::{Display, Error};
 use miette::Diagnostic;
 use pacquet_lockfile::Lockfile;
@@ -6,9 +9,9 @@ use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::PackageManifestError;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
-use pacquet_registry::{PackageTag, PackageVersion};
+use pacquet_registry::{Package, PackageTag, PackageVersion, RegistryError};
 use pacquet_tarball::MemCache;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// This subroutine does everything `pacquet add` is supposed to do.
 #[must_use]
@@ -27,8 +30,9 @@ where
     pub lockfile_importer_id: &'a str,
     pub workspace_packages: &'a WorkspacePackages,
     pub list_dependency_groups: ListDependencyGroups, // must be a function because it is called multiple times
-    pub package_name: &'a str, // TODO: 1. support version range, 2. multiple arguments, 3. name this `packages`
-    pub save_exact: bool,      // TODO: add `save-exact` to `.npmrc`, merge configs, and remove this
+    pub packages: &'a [String],
+    pub save_exact: bool, // TODO: add `save-exact` to `.npmrc`, merge configs, and remove this
+    pub workspace_only: bool,
 }
 
 /// Error type of [`Add`].
@@ -36,6 +40,18 @@ where
 pub enum AddError {
     #[display("Failed to add package to manifest: {_0}")]
     AddDependencyToManifest(#[error(source)] PackageManifestError),
+    #[display("Failed to resolve package from registry: {_0}")]
+    ResolvePackage(#[error(source)] RegistryError),
+    #[display("No version of {package} satisfies {spec}")]
+    NoMatchingVersion { package: String, spec: String },
+    #[display("Cannot resolve local dependency path: {path}")]
+    LocalDependencyPathNotFound { path: String },
+    #[display("Failed to load local dependency manifest at {_0}: {_1}")]
+    LoadLocalDependencyManifest(String, #[error(source)] PackageManifestError),
+    #[display("Local dependency manifest at {path} is missing a package name")]
+    LocalDependencyManifestNameMissing { path: String },
+    #[display("\"{package}\" not found in the workspace")]
+    WorkspacePackageNotFound { package: String },
     #[display("Failed to install dependencies: {_0}")]
     InstallDependencies(#[error(not(source))] String),
     #[display("Failed save the manifest file: {_0}")]
@@ -59,28 +75,36 @@ where
             lockfile_importer_id,
             workspace_packages,
             list_dependency_groups,
-            package_name,
+            packages,
             save_exact,
+            workspace_only,
             resolved_packages,
         } = self;
 
-        let auth_header =
-            config.auth_header_for_url(&format!("{}{}/latest", &config.registry, package_name));
-        let latest_version = PackageVersion::fetch_from_registry(
-            package_name,
-            PackageTag::Latest, // TODO: add support for specifying tags
-            http_client,
-            &config.registry,
-            auth_header.as_deref(),
-        )
-        .await
-        .expect("resolve latest tag"); // TODO: properly propagate this error
+        let mut package_specs = Vec::with_capacity(packages.len());
+        let project_dir =
+            manifest.path().parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        for package in packages {
+            package_specs.push(
+                resolve_package_spec(
+                    config,
+                    http_client,
+                    workspace_packages,
+                    &project_dir,
+                    package,
+                    save_exact,
+                    workspace_only,
+                )
+                .await?,
+            );
+        }
 
-        let version_range = latest_version.serialize(save_exact);
-        for dependency_group in list_dependency_groups() {
-            manifest
-                .add_dependency(package_name, &version_range, dependency_group)
-                .map_err(AddError::AddDependencyToManifest)?;
+        for (package_name, version_range) in package_specs {
+            for dependency_group in list_dependency_groups() {
+                manifest
+                    .add_dependency(&package_name, &version_range, dependency_group)
+                    .map_err(AddError::AddDependencyToManifest)?;
+            }
         }
 
         Install {
@@ -94,6 +118,10 @@ where
             workspace_packages,
             dependency_groups: list_dependency_groups(),
             frozen_lockfile: false,
+            lockfile_only: false,
+            force: false,
+            prefer_offline: false,
+            offline: false,
             resolved_packages,
         }
         .run()
@@ -103,5 +131,301 @@ where
         manifest.save().map_err(AddError::SaveManifest)?;
 
         Ok(())
+    }
+}
+
+async fn resolve_package_spec(
+    config: &Npmrc,
+    http_client: &ThrottledClient,
+    workspace_packages: &WorkspacePackages,
+    project_dir: &Path,
+    package: &str,
+    save_exact: bool,
+    workspace_only: bool,
+) -> Result<(String, String), AddError> {
+    if let Some((name, spec)) = resolve_local_path_spec(project_dir, package)? {
+        return Ok((name, spec));
+    }
+    if is_tarball_spec(package) {
+        let package_version =
+            resolve_package_version_from_tarball_spec(config, http_client, package)
+                .await
+                .map_err(AddError::InstallDependencies)?;
+        return Ok((package_version.name, package.to_string()));
+    }
+    if is_git_spec(package) {
+        let package_version = resolve_package_version_from_git_spec(config, http_client, package)
+            .await
+            .map_err(AddError::InstallDependencies)?;
+        return Ok((package_version.name, package.to_string()));
+    }
+    if let Some((alias_name, target_name, target_requested_spec)) = parse_npm_alias_spec(package) {
+        let resolved_spec = resolve_npm_alias_target_spec(
+            config,
+            http_client,
+            target_name,
+            target_requested_spec,
+            save_exact,
+        )
+        .await?;
+        return Ok((alias_name.to_string(), format!("npm:{target_name}@{resolved_spec}")));
+    }
+
+    let (package_name, requested_spec) = split_package_spec(package);
+
+    if workspace_only {
+        let Some(_) = workspace_packages.get(package_name) else {
+            return Err(AddError::WorkspacePackageNotFound { package: package_name.to_string() });
+        };
+        let workspace_spec = match requested_spec {
+            Some(spec) if spec.starts_with('~') => "workspace:~".to_string(),
+            Some(spec) if spec.starts_with('^') => "workspace:^".to_string(),
+            Some(spec) if spec.parse::<PackageTag>().is_ok() => "workspace:^".to_string(),
+            _ => "workspace:*".to_string(),
+        };
+        return Ok((package_name.to_string(), workspace_spec));
+    }
+
+    let version_range = match requested_spec {
+        None => {
+            let auth_header =
+                config.auth_header_for_url(&format!("{}{}/latest", &config.registry, package_name));
+            let latest_version = PackageVersion::fetch_from_registry(
+                package_name,
+                PackageTag::Latest,
+                http_client,
+                &config.registry,
+                auth_header.as_deref(),
+            )
+            .await
+            .map_err(AddError::ResolvePackage)?;
+            latest_version.serialize(save_exact)
+        }
+        Some(spec) if spec.parse::<PackageTag>().is_ok() => {
+            let auth_header = config
+                .auth_header_for_url(&format!("{}{}/{}", &config.registry, package_name, spec));
+            PackageVersion::fetch_from_registry(
+                package_name,
+                spec.parse::<PackageTag>().expect("checked above"),
+                http_client,
+                &config.registry,
+                auth_header.as_deref(),
+            )
+            .await
+            .map_err(AddError::ResolvePackage)?;
+            spec.to_string()
+        }
+        Some(spec) => {
+            let auth_header =
+                config.auth_header_for_url(&format!("{}{}", &config.registry, package_name));
+            let package = Package::fetch_from_registry(
+                package_name,
+                http_client,
+                &config.registry,
+                auth_header.as_deref(),
+            )
+            .await
+            .map_err(AddError::ResolvePackage)?;
+            if package.pinned_version(spec).is_none() {
+                return Err(AddError::NoMatchingVersion {
+                    package: package_name.to_string(),
+                    spec: spec.to_string(),
+                });
+            }
+            spec.to_string()
+        }
+    };
+
+    Ok((package_name.to_string(), version_range))
+}
+
+async fn resolve_npm_alias_target_spec(
+    config: &Npmrc,
+    http_client: &ThrottledClient,
+    target_name: &str,
+    requested_spec: Option<&str>,
+    save_exact: bool,
+) -> Result<String, AddError> {
+    let resolved = match requested_spec {
+        None => {
+            let auth_header =
+                config.auth_header_for_url(&format!("{}{}/latest", &config.registry, target_name));
+            let latest_version = PackageVersion::fetch_from_registry(
+                target_name,
+                PackageTag::Latest,
+                http_client,
+                &config.registry,
+                auth_header.as_deref(),
+            )
+            .await
+            .map_err(AddError::ResolvePackage)?;
+            latest_version.serialize(save_exact)
+        }
+        Some(spec) if spec.parse::<PackageTag>().is_ok() => {
+            let tag = spec.parse::<PackageTag>().expect("checked above");
+            let auth_header = config
+                .auth_header_for_url(&format!("{}{}/{}", &config.registry, target_name, spec));
+            let resolved_version = PackageVersion::fetch_from_registry(
+                target_name,
+                spec.parse::<PackageTag>().expect("checked above"),
+                http_client,
+                &config.registry,
+                auth_header.as_deref(),
+            )
+            .await
+            .map_err(AddError::ResolvePackage)?;
+            match tag {
+                PackageTag::Latest => resolved_version.serialize(save_exact),
+                PackageTag::Version(_) => spec.to_string(),
+            }
+        }
+        Some(spec) => {
+            let auth_header =
+                config.auth_header_for_url(&format!("{}{}", &config.registry, target_name));
+            let package = Package::fetch_from_registry(
+                target_name,
+                http_client,
+                &config.registry,
+                auth_header.as_deref(),
+            )
+            .await
+            .map_err(AddError::ResolvePackage)?;
+            if package.pinned_version(spec).is_none() {
+                return Err(AddError::NoMatchingVersion {
+                    package: target_name.to_string(),
+                    spec: spec.to_string(),
+                });
+            }
+            spec.to_string()
+        }
+    };
+    Ok(resolved)
+}
+
+fn resolve_local_path_spec(
+    project_dir: &Path,
+    package: &str,
+) -> Result<Option<(String, String)>, AddError> {
+    let path = Path::new(package);
+    let candidate = if path.is_absolute() { path.to_path_buf() } else { project_dir.join(path) };
+    if !candidate.exists() {
+        return Ok(None);
+    }
+
+    let manifest_path = candidate.join("package.json");
+    if !manifest_path.is_file() {
+        return Err(AddError::LocalDependencyPathNotFound { path: package.to_string() });
+    }
+    let manifest = PackageManifest::from_path(manifest_path.clone()).map_err(|error| {
+        AddError::LoadLocalDependencyManifest(manifest_path.display().to_string(), error)
+    })?;
+    let Some(name) = manifest.value().get("name").and_then(|value| value.as_str()) else {
+        return Err(AddError::LocalDependencyManifestNameMissing {
+            path: manifest_path.display().to_string(),
+        });
+    };
+
+    let spec = if path.is_absolute() {
+        format!("link:{}", candidate.to_string_lossy().replace('\\', "/"))
+    } else {
+        let separator = std::path::MAIN_SEPARATOR.to_string();
+        let normalized = package.replace(['/', '\\'], &separator);
+        format!("link:{normalized}")
+    };
+    Ok(Some((name.to_string(), spec)))
+}
+
+fn split_package_spec(package: &str) -> (&str, Option<&str>) {
+    let separator = if let Some(stripped) = package.strip_prefix('@') {
+        stripped.rfind('@').map(|index| index + 1)
+    } else {
+        package.rfind('@')
+    };
+
+    match separator {
+        Some(index) => {
+            let (name, spec) = package.split_at(index);
+            let spec = &spec[1..];
+            if spec.is_empty() { (package, None) } else { (name, Some(spec)) }
+        }
+        None => (package, None),
+    }
+}
+
+fn parse_npm_alias_spec(package: &str) -> Option<(&str, &str, Option<&str>)> {
+    let marker = package.find("@npm:")?;
+    if marker == 0 {
+        return None;
+    }
+    let alias_name = &package[..marker];
+    let target = &package[(marker + "@npm:".len())..];
+    let (target_name, requested_spec) = split_package_spec(target);
+    if alias_name.is_empty() || target_name.is_empty() {
+        return None;
+    }
+    Some((alias_name, target_name, requested_spec))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_npm_alias_spec, resolve_local_path_spec, split_package_spec};
+    use pretty_assertions::assert_eq;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn split_package_spec_keeps_plain_names() {
+        assert_eq!(split_package_spec("fastify"), ("fastify", None));
+        assert_eq!(split_package_spec("@scope/pkg"), ("@scope/pkg", None));
+    }
+
+    #[test]
+    fn split_package_spec_extracts_requested_spec() {
+        assert_eq!(split_package_spec("fastify@1.2.3"), ("fastify", Some("1.2.3")));
+        assert_eq!(split_package_spec("fastify@latest"), ("fastify", Some("latest")));
+        assert_eq!(split_package_spec("@scope/pkg@^1.0.0"), ("@scope/pkg", Some("^1.0.0")));
+    }
+
+    #[test]
+    fn parse_npm_alias_spec_extracts_alias_and_target() {
+        assert_eq!(
+            parse_npm_alias_spec("hello-alias@npm:is-number@7.0.0"),
+            Some(("hello-alias", "is-number", Some("7.0.0")))
+        );
+        assert_eq!(
+            parse_npm_alias_spec("hello-alias@npm:is-number"),
+            Some(("hello-alias", "is-number", None))
+        );
+        assert_eq!(
+            parse_npm_alias_spec("@scope/alias@npm:@scope/pkg@^1.0.0"),
+            Some(("@scope/alias", "@scope/pkg", Some("^1.0.0")))
+        );
+    }
+
+    #[test]
+    fn resolve_local_relative_path_spec() {
+        let root = tempdir().unwrap();
+        let app = root.path().join("app");
+        let lib = root.path().join("lib");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&lib).unwrap();
+        fs::write(
+            lib.join("package.json"),
+            serde_json::json!({
+                "name": "@repo/lib",
+                "version": "1.0.0"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let result = resolve_local_path_spec(&app, "../lib")
+            .expect("local path should resolve")
+            .expect("local path should be detected");
+        assert_eq!(result.0, "@repo/lib");
+        #[cfg(windows)]
+        assert_eq!(result.1, r"link:..\lib");
+        #[cfg(not(windows))]
+        assert_eq!(result.1, "link:../lib");
     }
 }

@@ -1738,10 +1738,13 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "ssri",
+ "tar",
  "tempfile",
  "tokio",
  "tracing",
  "walkdir",
+ "zune-inflate",
 ]
 
 [[package]]

@@ -1,14 +1,18 @@
 use crate::{
-    CreateCasFilesError, SymlinkPackageError, create_cas_files, progress_reporter, symlink_package,
+    CreateCasFilesError, SymlinkPackageError, create_cas_files,
+    fetch_package_from_registry_and_cache, fetch_package_with_metadata_cache, is_git_spec,
+    is_tarball_spec, progress_reporter, read_cached_package_from_config,
+    resolve_package_version_from_git_spec, resolve_package_version_from_tarball_spec,
+    symlink_package,
 };
 use derive_more::{Display, Error};
 use miette::Diagnostic;
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
-use pacquet_registry::{Package, PackageTag, PackageVersion, RegistryError};
+use pacquet_registry::{PackageTag, PackageVersion, RegistryError};
 use pacquet_store_dir::PackageFileInfo;
 use pacquet_tarball::{DownloadTarballToStore, MemCache, TarballError};
-use std::{collections::HashMap, path::Path, str::FromStr};
+use std::{collections::HashMap, path::Path};
 
 /// This subroutine executes the following and returns the package
 /// * Retrieves the package from the registry
@@ -26,12 +30,17 @@ pub struct InstallPackageFromRegistry<'a> {
     pub node_modules_dir: &'a Path,
     pub name: &'a str,
     pub version_range: &'a str,
+    pub prefer_offline: bool,
+    pub offline: bool,
+    pub force: bool,
 }
 
 /// Error type of [`InstallPackageFromRegistry`].
 #[derive(Debug, Display, Error, Diagnostic)]
 pub enum InstallPackageFromRegistryError {
     FetchFromRegistry(#[error(source)] RegistryError),
+    ResolveTarballSpec(#[error(not(source))] String),
+    ResolveGitSpec(#[error(not(source))] String),
     DownloadTarballToStore(#[error(source)] TarballError),
     CreateCasFiles(#[error(source)] CreateCasFilesError),
     SymlinkPackage(#[error(source)] SymlinkPackageError),
@@ -47,48 +56,107 @@ impl<'a> InstallPackageFromRegistry<'a> {
         }
     }
 
-    /// Execute the subroutine.
-    pub async fn run<Tag>(self) -> Result<PackageVersion, InstallPackageFromRegistryError>
-    where
-        Tag: FromStr + Into<PackageTag>,
-    {
-        let &InstallPackageFromRegistry { http_client, config, name, version_range, .. } = &self;
-        let (requested_name, requested_range) =
-            Self::parse_npm_alias(version_range).unwrap_or((name, version_range));
+    fn resolve_requested_version(
+        package: &pacquet_registry::Package,
+        requested_name: &str,
+        requested_range: &str,
+    ) -> Result<PackageVersion, InstallPackageFromRegistryError> {
+        if let Ok(version) = requested_range.parse::<node_semver::Version>() {
+            return package.versions.get(&version.to_string()).cloned().ok_or_else(|| {
+                InstallPackageFromRegistryError::FetchFromRegistry(
+                    RegistryError::MissingVersionRelease(
+                        version.to_string(),
+                        requested_name.to_string(),
+                    ),
+                )
+            });
+        }
 
-        Ok(if let Ok(tag) = requested_range.parse::<Tag>() {
-            let auth_header = config.auth_header_for_url(&format!(
-                "{}{requested_name}/{requested_range}",
-                &config.registry
-            ));
-            let package_version = PackageVersion::fetch_from_registry(
-                requested_name,
-                tag.into(),
-                http_client,
-                &config.registry,
-                auth_header.as_deref(),
+        if let Ok(tag) = requested_range.parse::<PackageTag>() {
+            return Ok(match tag {
+                PackageTag::Latest => package.latest().clone(),
+                PackageTag::Version(version) => {
+                    package.versions.get(&version.to_string()).cloned().ok_or_else(|| {
+                        InstallPackageFromRegistryError::FetchFromRegistry(
+                            RegistryError::MissingVersionRelease(
+                                version.to_string(),
+                                requested_name.to_string(),
+                            ),
+                        )
+                    })?
+                }
+            });
+        }
+
+        package.pinned_version(requested_range).cloned().ok_or_else(|| {
+            InstallPackageFromRegistryError::FetchFromRegistry(
+                RegistryError::MissingVersionRelease(
+                    requested_range.to_string(),
+                    requested_name.to_string(),
+                ),
             )
-            .await
-            .map_err(InstallPackageFromRegistryError::FetchFromRegistry)?;
+        })
+    }
+
+    /// Execute the subroutine.
+    pub async fn run(self) -> Result<PackageVersion, InstallPackageFromRegistryError> {
+        let &InstallPackageFromRegistry {
+            http_client,
+            config,
+            name,
+            version_range,
+            prefer_offline,
+            offline,
+            ..
+        } = &self;
+        if is_tarball_spec(version_range) {
+            let package_version =
+                resolve_package_version_from_tarball_spec(config, http_client, version_range)
+                    .await
+                    .map_err(InstallPackageFromRegistryError::ResolveTarballSpec)?;
             progress_reporter::resolved();
             self.install_package_version(&package_version, name).await?;
-            package_version
-        } else {
-            let auth_header =
-                config.auth_header_for_url(&format!("{}{requested_name}", &config.registry));
-            let package = Package::fetch_from_registry(
-                requested_name,
-                http_client,
-                &config.registry,
-                auth_header.as_deref(),
-            )
-            .await
-            .map_err(InstallPackageFromRegistryError::FetchFromRegistry)?;
-            let package_version = package.pinned_version(requested_range).unwrap(); // TODO: propagate error for when no version satisfies range
+            return Ok(package_version);
+        }
+        if is_git_spec(version_range) {
+            let package_version =
+                resolve_package_version_from_git_spec(config, http_client, version_range)
+                    .await
+                    .map_err(InstallPackageFromRegistryError::ResolveGitSpec)?;
             progress_reporter::resolved();
-            self.install_package_version(package_version, name).await?;
-            package_version.clone()
-        })
+            self.install_package_version(&package_version, name).await?;
+            return Ok(package_version);
+        }
+        let (requested_name, requested_range) =
+            Self::parse_npm_alias(version_range).unwrap_or((name, version_range));
+        let package = fetch_package_with_metadata_cache(
+            config,
+            http_client,
+            requested_name,
+            prefer_offline,
+            offline,
+        )
+        .await;
+
+        let maybe_cached = if prefer_offline && !offline {
+            read_cached_package_from_config(config, requested_name)
+        } else {
+            None
+        };
+        let mut package_version =
+            Self::resolve_requested_version(&package, requested_name, requested_range);
+        if package_version.is_err() && maybe_cached.is_some() {
+            let fresh = fetch_package_from_registry_and_cache(config, http_client, requested_name)
+                .await
+                .map_err(InstallPackageFromRegistryError::FetchFromRegistry)?;
+            package_version =
+                Self::resolve_requested_version(&fresh, requested_name, requested_range);
+        }
+
+        let package_version = package_version?;
+        progress_reporter::resolved();
+        self.install_package_version(&package_version, name).await?;
+        Ok(package_version)
     }
 
     async fn install_package_version(
@@ -101,6 +169,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
             http_client,
             config,
             node_modules_dir,
+            force,
             ..
         } = self;
 
@@ -114,20 +183,29 @@ impl<'a> InstallPackageFromRegistry<'a> {
         let symlink_path = node_modules_dir.join(symlink_name);
 
         // Fast warm-install check: this package is already imported to the virtual store.
-        if save_path.join("package.json").is_file() {
+        if force && save_path.exists() {
+            std::fs::remove_dir_all(&save_path).unwrap_or_else(|error| {
+                panic!(
+                    "remove existing virtual store package during --force should succeed: {error}"
+                )
+            });
+        }
+
+        if !force && save_path.join("package.json").is_file() {
             symlink_package(&save_path, &symlink_path)
                 .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
             progress_reporter::linked();
             return Ok(());
         }
 
-        if config
-            .store_dir
-            .read_index_file(
-                package_version.dist.integrity.as_ref().expect("has integrity field"),
-                &package_id,
-            )
-            .is_some_and(|index| package_is_already_imported(&save_path, &index.files))
+        if !force
+            && config
+                .store_dir
+                .read_index_file(
+                    package_version.dist.integrity.as_ref().expect("has integrity field"),
+                    &package_id,
+                )
+                .is_some_and(|index| package_is_already_imported(&save_path, &index.files))
         {
             symlink_package(&save_path, &symlink_path)
                 .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
@@ -148,6 +226,8 @@ impl<'a> InstallPackageFromRegistry<'a> {
             package_unpacked_size: package_version.dist.unpacked_size,
             auth_header: config.auth_header_for_url(package_version.as_tarball_url()),
             package_url: package_version.as_tarball_url(),
+            offline: self.offline,
+            force,
         }
         .run_with_mem_cache(tarball_mem_cache)
         .await
@@ -194,7 +274,6 @@ fn representative_file_name<'a>(file_names: impl Iterator<Item = &'a str>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use node_semver::Version;
     use pacquet_npmrc::Npmrc;
     use pacquet_store_dir::StoreDir;
     use pipe_trait::Pipe;
@@ -247,15 +326,24 @@ mod tests {
             name: "fast-querystring",
             version_range: "1.0.0",
             node_modules_dir: modules_dir.path(),
+            prefer_offline: false,
+            offline: false,
+            force: false,
         }
-        .run::<Version>()
+        .run()
         .await
         .unwrap();
 
         assert_eq!(package.name, "fast-querystring");
         assert_eq!(
             package.version,
-            Version { major: 1, minor: 0, patch: 0, build: vec![], pre_release: vec![] }
+            node_semver::Version {
+                major: 1,
+                minor: 0,
+                patch: 0,
+                build: vec![],
+                pre_release: vec![]
+            }
         );
 
         let virtual_store_path = virtual_store_dir

@@ -19,12 +19,15 @@ pub struct CreateVirtualStore<'a> {
     pub config: &'static Npmrc,
     pub packages: Option<&'a HashMap<DependencyPath, PackageSnapshot>>,
     pub resolved_packages: Option<&'a ResolvedPackages>,
+    pub offline: bool,
+    pub force: bool,
 }
 
 impl<'a> CreateVirtualStore<'a> {
     /// Execute the subroutine.
     pub async fn run(self) {
-        let CreateVirtualStore { http_client, config, packages, resolved_packages } = self;
+        let CreateVirtualStore { http_client, config, packages, resolved_packages, offline, force } =
+            self;
 
         let packages = if let Some(packages) = packages {
             packages
@@ -51,6 +54,8 @@ impl<'a> CreateVirtualStore<'a> {
                     config,
                     dependency_path,
                     package_snapshot,
+                    offline,
+                    force,
                 }
                 .run()
                 .await

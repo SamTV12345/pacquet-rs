@@ -86,6 +86,11 @@ pub enum TarballError {
     WriteTarballIndexFile(WriteIndexFileError),
 
     #[from(ignore)]
+    #[display("Failed to fetch {url} in offline mode because it is missing from local store cache")]
+    #[diagnostic(code(pacquet_tarball::offline_tarball_missing))]
+    OfflineTarballMissing { url: String },
+
+    #[from(ignore)]
     #[diagnostic(code(pacquet_tarball::task_join_error))]
     TaskJoin(tokio::task::JoinError),
 }
@@ -129,6 +134,8 @@ pub struct DownloadTarballToStore<'a> {
     pub package_unpacked_size: Option<usize>,
     pub auth_header: Option<String>,
     pub package_url: &'a str,
+    pub offline: bool,
+    pub force: bool,
 }
 
 impl<'a> DownloadTarballToStore<'a> {
@@ -262,11 +269,14 @@ impl<'a> DownloadTarballToStore<'a> {
             package_unpacked_size,
             ref auth_header,
             package_url,
+            offline,
+            force,
             ..
         } = self;
 
-        if let Some(cas_paths) =
-            Self::cas_paths_from_store_index(store_dir, package_integrity, package_id)
+        if !force
+            && let Some(cas_paths) =
+                Self::cas_paths_from_store_index(store_dir, package_integrity, package_id)
         {
             tracing::info!(
                 target: "pacquet::download",
@@ -274,6 +284,10 @@ impl<'a> DownloadTarballToStore<'a> {
                 "Reused package from store index cache"
             );
             return Ok(cas_paths);
+        }
+
+        if offline {
+            return Err(TarballError::OfflineTarballMissing { url: package_url.to_string() });
         }
 
         tracing::info!(target: "pacquet::download", ?package_url, "New cache");
@@ -462,7 +476,9 @@ mod tests {
             package_integrity: &integrity("sha512-dj7vjIn1Ar8sVXj2yAXiMNCJDmS9MQ9XMlIecX2dIzzhjSHCyKo4DdXjXMs7wKW2kj6yvVRSpuQjOZ3YLrh56w=="),
             package_unpacked_size: Some(16697),
             auth_header: None,
-            package_url: "https://registry.npmjs.org/@fastify/error/-/error-3.3.0.tgz"
+            package_url: "https://registry.npmjs.org/@fastify/error/-/error-3.3.0.tgz",
+            offline: false,
+            force: false,
         }
         .run_without_mem_cache()
         .await
@@ -504,6 +520,8 @@ mod tests {
             package_unpacked_size: Some(16697),
             auth_header: None,
             package_url: "https://registry.npmjs.org/@fastify/error/-/error-3.3.0.tgz",
+            offline: false,
+            force: false,
         }
         .run_without_mem_cache()
         .await
@@ -528,6 +546,8 @@ mod tests {
             package_unpacked_size: Some(16697),
             auth_header: None,
             package_url: "https://registry.npmjs.org/@fastify/error/-/error-3.3.0.tgz",
+            offline: false,
+            force: false,
         }
         .run_without_mem_cache()
         .await
@@ -541,6 +561,8 @@ mod tests {
             package_unpacked_size: Some(16697),
             auth_header: None,
             package_url: "http://127.0.0.1:1/this-url-should-never-be-called.tgz",
+            offline: false,
+            force: false,
         }
         .run_without_mem_cache()
         .await
@@ -578,6 +600,8 @@ mod tests {
             package_unpacked_size: None,
             auth_header: Some("Bearer tarball-secret".to_string()),
             package_url: &url,
+            offline: false,
+            force: false,
         }
         .run_without_mem_cache()
         .await

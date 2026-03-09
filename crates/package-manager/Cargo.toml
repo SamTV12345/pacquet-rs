@@ -33,7 +33,10 @@ reflink-copy    = { workspace = true }
 serde_json      = { workspace = true }
 serde_yaml      = { workspace = true }
 sha2            = { workspace = true }
+ssri            = { workspace = true }
+tar             = { workspace = true }
 tracing         = { workspace = true }
+zune-inflate    = { workspace = true }
 
 [dev-dependencies]
 pacquet-store-dir     = { workspace = true }

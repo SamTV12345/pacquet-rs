@@ -40,6 +40,7 @@ serde_yaml  = { workspace = true }
 serde_json  = { workspace = true }
 glob        = "0.3.3"
 shlex       = { workspace = true }
+tempfile    = { workspace = true }
 
 [dev-dependencies]
 pacquet-testing-utils = { workspace = true }
@@ -50,5 +51,4 @@ command-extra     = { workspace = true }
 insta             = { workspace = true }
 pretty_assertions = { workspace = true }
 serde_json        = { workspace = true }
-tempfile          = { workspace = true }
 walkdir           = { workspace = true }

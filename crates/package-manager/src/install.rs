@@ -1,7 +1,8 @@
 use crate::{
     InstallFrozenLockfile, InstallWithLockfile, InstallWithoutLockfile, ResolvedPackages,
     WorkspacePackages, collect_runtime_lockfile_config, get_outdated_lockfile_setting,
-    link_bins_for_manifest, progress_reporter, satisfies_package_manifest,
+    hoist_virtual_store_packages, link_bins_for_manifest, progress_reporter,
+    satisfies_package_manifest,
 };
 use pacquet_lockfile::{Lockfile, RootProjectSnapshot};
 use pacquet_network::ThrottledClient;
@@ -27,6 +28,10 @@ where
     pub workspace_packages: &'a WorkspacePackages,
     pub dependency_groups: DependencyGroupList,
     pub frozen_lockfile: bool,
+    pub lockfile_only: bool,
+    pub force: bool,
+    pub prefer_offline: bool,
+    pub offline: bool,
 }
 
 impl<'a, DependencyGroupList> Install<'a, DependencyGroupList>
@@ -47,11 +52,25 @@ where
             workspace_packages,
             dependency_groups,
             frozen_lockfile,
+            lockfile_only,
+            force,
+            prefer_offline,
+            offline,
         } = self;
+
+        if lockfile_only && !config.lockfile {
+            miette::bail!("Cannot generate a pnpm-lock.yaml because lockfile is set to false");
+        }
 
         let dependency_groups = dependency_groups.into_iter().collect::<Vec<_>>();
         let direct_dependencies = manifest.dependencies(dependency_groups.iter().copied()).count();
         progress_reporter::start(direct_dependencies, frozen_lockfile);
+        let project_dir = manifest
+            .path()
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| lockfile_dir.to_path_buf());
+        config.store_dir.register_project(&project_dir)?;
 
         let result = async {
         tracing::info!(target: "pacquet::install", "Start all");
@@ -65,6 +84,9 @@ where
                     config,
                     manifest,
                     dependency_groups: dependency_groups.clone(),
+                    force,
+                    prefer_offline,
+                    offline,
                 }
                 .run()
                 .await;
@@ -92,16 +114,20 @@ where
                 });
 
                 if lockfile_is_reusable {
-                    InstallFrozenLockfile {
-                        http_client,
-                        resolved_packages,
-                        config,
-                        project_snapshot: maybe_project_snapshot.expect("checked above"),
-                        packages: lockfile.packages.as_ref(),
-                        dependency_groups: dependency_groups.clone(),
+                    if !lockfile_only {
+                        InstallFrozenLockfile {
+                            http_client,
+                            resolved_packages,
+                            config,
+                            project_snapshot: maybe_project_snapshot.expect("checked above"),
+                            packages: lockfile.packages.as_ref(),
+                            dependency_groups: dependency_groups.clone(),
+                            offline,
+                            force,
+                        }
+                        .run()
+                        .await;
                     }
-                    .run()
-                    .await;
                 } else {
                     InstallWithLockfile {
                         tarball_mem_cache,
@@ -114,6 +140,10 @@ where
                         lockfile_importer_id,
                         workspace_packages,
                         dependency_groups: dependency_groups.clone(),
+                        lockfile_only,
+                        force,
+                        prefer_offline,
+                        offline,
                     }
                     .run()
                     .await;
@@ -131,6 +161,10 @@ where
                     lockfile_importer_id,
                     workspace_packages,
                     dependency_groups: dependency_groups.clone(),
+                    lockfile_only,
+                    force,
+                    prefer_offline,
+                    offline,
                 }
                 .run()
                 .await;
@@ -182,21 +216,28 @@ where
                     );
                 }
 
-                InstallFrozenLockfile {
-                    http_client,
-                    resolved_packages,
-                    config,
-                    project_snapshot,
-                    packages: packages.as_ref(),
-                    dependency_groups: dependency_groups.clone(),
+                if !lockfile_only {
+                    InstallFrozenLockfile {
+                        http_client,
+                        resolved_packages,
+                        config,
+                        project_snapshot,
+                        packages: packages.as_ref(),
+                        dependency_groups: dependency_groups.clone(),
+                        offline,
+                        force,
+                    }
+                    .run()
+                    .await;
                 }
-                .run()
-                .await;
             }
         }
 
         tracing::info!(target: "pacquet::install", "Complete all");
-        link_bins_for_manifest(config, manifest, dependency_groups.iter().copied())?;
+        if !lockfile_only {
+            hoist_virtual_store_packages(config)?;
+            link_bins_for_manifest(config, manifest, dependency_groups.iter().copied())?;
+        }
 
         Ok(())
         }
@@ -263,6 +304,10 @@ mod tests {
                         DependencyGroup::Optional,
                     ],
                     frozen_lockfile: false,
+                    lockfile_only: false,
+                    force: false,
+                    prefer_offline: false,
+                    offline: false,
                     resolved_packages: &Default::default(),
                 }
                 .run()

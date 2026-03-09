@@ -7,7 +7,7 @@ use pacquet_testing_utils::{
     bin::{AddMockedRegistry, CommandTempCwd},
     fs::{get_all_files, get_all_folders, is_symlink_or_junction},
 };
-use std::fs;
+use std::{fs, path::Path};
 
 #[cfg(not(target_os = "windows"))] // It causes ConnectionAborted on CI
 #[cfg(not(target_os = "macos"))] // It causes ConnectionReset on CI
@@ -27,6 +27,17 @@ fn installed_bin_path(workspace: &std::path::Path, name: &str) -> std::path::Pat
     {
         workspace.join("node_modules/.bin").join(name)
     }
+}
+
+fn metadata_cache_file(cache_dir: &Path, registry: &str, package_name: &str) -> std::path::PathBuf {
+    let trimmed = registry.trim_end_matches('/');
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let registry_namespace = without_scheme.replace(':', "+");
+    let encoded_name = package_name.replace('/', "%2f");
+    cache_dir.join("metadata-v1.3").join(registry_namespace).join(format!("{encoded_name}.json"))
 }
 
 #[test]
@@ -283,6 +294,417 @@ fn frozen_lockfile_should_fail_without_pnpm_lock_yaml() {
 }
 
 #[test]
+fn fix_lockfile_should_override_frozen_lockfile_when_lockfile_is_missing() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_args(["install", "--frozen-lockfile", "--fix-lockfile"]).assert().success();
+    assert!(workspace.join("pnpm-lock.yaml").exists());
+    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn should_accept_ignore_scripts_flag() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_args(["install", "--ignore-scripts"]).assert().success();
+
+    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+    assert!(workspace.join("pnpm-lock.yaml").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn should_create_lockfile_without_node_modules_with_lockfile_only() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_args(["install", "--lockfile-only"]).assert().success();
+
+    assert!(workspace.join("pnpm-lock.yaml").exists());
+    assert!(!workspace.join("node_modules").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn should_create_lockfile_without_node_modules_with_resolution_only() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_args(["install", "--resolution-only"]).assert().success();
+
+    assert!(workspace.join("pnpm-lock.yaml").exists());
+    assert!(!workspace.join("node_modules").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn lockfile_only_should_fail_when_lockfile_is_disabled() {
+    use std::io::Write;
+
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(workspace.join(".npmrc"))
+        .expect("open .npmrc")
+        .write_all(b"\nlockfile=false\n")
+        .expect("append lockfile=false");
+
+    pacquet.with_args(["install", "--lockfile-only"]).assert().failure();
+    assert!(!workspace.join("pnpm-lock.yaml").exists());
+    assert!(!workspace.join("node_modules").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn resolution_only_should_fail_when_lockfile_is_disabled() {
+    use std::io::Write;
+
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(workspace.join(".npmrc"))
+        .expect("open .npmrc")
+        .write_all(b"\nlockfile=false\n")
+        .expect("append lockfile=false");
+
+    pacquet.with_args(["install", "--resolution-only"]).assert().failure();
+    assert!(!workspace.join("pnpm-lock.yaml").exists());
+    assert!(!workspace.join("node_modules").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn should_accept_prefer_offline_flag() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_args(["install", "--prefer-offline"]).assert().success();
+    assert!(workspace.join("pnpm-lock.yaml").exists());
+    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn should_accept_reporter_flag() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_args(["install", "--reporter", "append-only"]).assert().success();
+    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn should_accept_use_store_server_flag() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_args(["install", "--use-store-server"]).assert().success();
+    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn shamefully_hoist_flag_should_create_hoisted_links() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_args(["install", "--shamefully-hoist"]).assert().success();
+    assert!(workspace.join("node_modules/.pnpm/node_modules").exists());
+    assert!(
+        workspace.join("node_modules/.pnpm/node_modules/@pnpm.e2e/hello-world-js-bin").exists()
+    );
+    assert!(
+        workspace
+            .join("node_modules/.pnpm/node_modules/@pnpm.e2e/hello-world-js-bin-parent")
+            .exists()
+    );
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn prefer_offline_should_fallback_to_online_when_cached_metadata_is_stale() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { cache_dir, mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    let cache_file = metadata_cache_file(
+        &cache_dir,
+        &mock_instance.url(),
+        "@pnpm.e2e/hello-world-js-bin-parent",
+    );
+    fs::create_dir_all(cache_file.parent().expect("metadata cache parent"))
+        .expect("create metadata cache parent");
+    fs::write(
+        &cache_file,
+        serde_json::json!({
+            "name": "@pnpm.e2e/hello-world-js-bin-parent",
+            "dist-tags": { "latest": "0.0.0" },
+            "versions": {}
+        })
+        .to_string(),
+    )
+    .expect("write stale metadata cache");
+
+    pacquet.with_args(["install", "--prefer-offline"]).assert().success();
+    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+    assert!(workspace.join("pnpm-lock.yaml").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn prefer_offline_should_use_metadata_cache_when_registry_is_unavailable() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+    let pacquet_bin = pacquet.get_program().to_os_string();
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    std::process::Command::new(&pacquet_bin)
+        .with_current_dir(&workspace)
+        .with_arg("install")
+        .assert()
+        .success();
+    fs::remove_dir_all(workspace.join("node_modules")).expect("remove node_modules");
+    fs::remove_file(workspace.join("pnpm-lock.yaml")).expect("remove lockfile");
+    drop(mock_instance);
+
+    std::process::Command::new(&pacquet_bin)
+        .with_current_dir(&workspace)
+        .with_args(["install", "--prefer-offline"])
+        .assert()
+        .success();
+    assert!(workspace.join("pnpm-lock.yaml").exists());
+    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn force_should_reinstall_and_repair_corrupted_virtual_store_package() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+    let pacquet_bin = pacquet.get_program().to_os_string();
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    std::process::Command::new(&pacquet_bin)
+        .with_current_dir(&workspace)
+        .with_arg("install")
+        .assert()
+        .success();
+
+    let package_file = workspace.join(
+        "node_modules/.pnpm/@pnpm.e2e+hello-world-js-bin-parent@1.0.0/node_modules/@pnpm.e2e/hello-world-js-bin-parent/package.json",
+    );
+    fs::write(&package_file, "{\"name\":\"corrupted\"}")
+        .expect("corrupt package.json in virtual store");
+
+    std::process::Command::new(&pacquet_bin)
+        .with_current_dir(&workspace)
+        .with_arg("install")
+        .assert()
+        .success();
+    let after_normal =
+        fs::read_to_string(&package_file).expect("read package file after normal install");
+    assert!(after_normal.contains("corrupted"));
+
+    std::process::Command::new(&pacquet_bin)
+        .with_current_dir(&workspace)
+        .with_args(["install", "--force"])
+        .assert()
+        .success();
+    let after_force =
+        fs::read_to_string(&package_file).expect("read package file after force install");
+    assert!(!after_force.contains("corrupted"));
+    assert!(after_force.contains("\"name\""));
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn offline_should_fail_without_lockfile() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet.with_args(["install", "--offline"]).assert().failure();
+    assert!(!workspace.join("node_modules").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn offline_should_install_without_lockfile_when_cache_and_store_are_primed() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+    let pacquet_bin = pacquet.get_program().to_os_string();
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    std::process::Command::new(&pacquet_bin)
+        .with_current_dir(&workspace)
+        .with_arg("install")
+        .assert()
+        .success();
+    fs::remove_dir_all(workspace.join("node_modules")).expect("remove node_modules");
+    fs::remove_file(workspace.join("pnpm-lock.yaml")).expect("remove lockfile");
+    drop(mock_instance);
+
+    std::process::Command::new(&pacquet_bin)
+        .with_current_dir(&workspace)
+        .with_args(["install", "--offline"])
+        .assert()
+        .success();
+    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
 fn workspace_install_from_subproject_should_write_shared_lockfile() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
@@ -322,6 +744,203 @@ fn workspace_install_from_subproject_should_write_shared_lockfile() {
     let lockfile_content = fs::read_to_string(root_lockfile).expect("read lockfile");
     assert!(lockfile_content.contains("importers:"));
     assert!(lockfile_content.contains("packages/app:"));
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn workspace_root_flag_should_install_workspace_root_manifest_from_subproject() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let app_dir = workspace.join("packages/app");
+    fs::create_dir_all(&app_dir).expect("create workspace project");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "workspace-root",
+            "version": "1.0.0",
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write workspace root manifest");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "-w", "install"]).assert().success();
+
+    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+    assert!(workspace.join("pnpm-lock.yaml").exists());
+    assert!(!app_dir.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn workspace_recursive_install_from_subproject_should_install_all_projects() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { store_dir, cache_dir, mock_instance, .. } = npmrc_info;
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "workspace-root",
+            "version": "1.0.0",
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write root package.json");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin": "1.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package.json");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.0.0",
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write lib package.json");
+    fs::write(
+        app_dir.join(".npmrc"),
+        format!(
+            "registry={}\nstore-dir={}\ncache-dir={}\n",
+            mock_instance.url(),
+            store_dir.display(),
+            cache_dir.display()
+        ),
+    )
+    .expect("write .npmrc for subproject");
+
+    pacquet
+        .with_args(["-C", app_dir.to_str().unwrap(), "install", "--recursive"])
+        .assert()
+        .success();
+
+    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+    assert!(app_dir.join("node_modules/@pnpm.e2e/hello-world-js-bin").exists());
+    assert!(lib_dir.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+
+    let lockfile_content =
+        fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
+    assert!(lockfile_content.contains("importers:"));
+    assert!(lockfile_content.contains(".:"));
+    assert!(lockfile_content.contains("packages/app:"));
+    assert!(lockfile_content.contains("packages/lib:"));
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn workspace_filter_should_install_only_selected_workspace_project() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "workspace-root",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write root package.json");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package.json");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.0.0",
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin": "1.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write lib package.json");
+
+    pacquet.with_args(["install", "--filter", "@repo/app"]).assert().success();
+
+    assert!(app_dir.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent").exists());
+    assert!(!lib_dir.join("node_modules/@pnpm.e2e/hello-world-js-bin").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn workspace_filter_should_fail_when_no_projects_match() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    fs::create_dir_all(workspace.join("packages/app")).expect("create app dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "workspace-root",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write root package.json");
+
+    pacquet.with_args(["install", "--filter", "@repo/missing"]).assert().failure();
 
     drop((root, mock_instance)); // cleanup
 }

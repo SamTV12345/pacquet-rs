@@ -9,6 +9,7 @@ pub mod store;
 pub mod why;
 
 use crate::State;
+use crate::state::find_workspace_root;
 use add::AddArgs;
 use ci::CiArgs;
 use clap::{Parser, Subcommand};
@@ -37,6 +38,10 @@ pub struct CliArgs {
     /// Set working directory.
     #[clap(short = 'C', long, default_value = ".")]
     pub dir: PathBuf,
+
+    /// Run the command from the workspace root.
+    #[clap(short = 'w', long)]
+    pub workspace_root: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -73,12 +78,15 @@ pub enum CliCommand {
 impl CliArgs {
     /// Execute the command
     pub async fn run(self) -> miette::Result<()> {
-        let CliArgs { command, dir } = self;
-        let dir = if dir.is_absolute() {
-            dir
-        } else {
-            std_env::current_dir().into_diagnostic().wrap_err("get current directory")?.join(dir)
-        };
+        let CliArgs { command, dir, workspace_root } = self;
+        let current_dir =
+            std_env::current_dir().into_diagnostic().wrap_err("get current directory")?;
+        let mut dir = if dir.is_absolute() { dir } else { current_dir.join(dir) };
+        if workspace_root {
+            dir = find_workspace_root(&dir).ok_or_else(|| {
+                miette::miette!("could not find pnpm-workspace.yaml from {}", dir.display())
+            })?;
+        }
 
         std_env::set_current_dir(&dir)
             .into_diagnostic()
@@ -93,7 +101,10 @@ impl CliArgs {
             CliCommand::Init => {
                 PackageManifest::init(&manifest_path()).wrap_err("initialize package.json")?;
             }
-            CliCommand::Add(args) => args.run(state()?).await?,
+            CliCommand::Add(mut args) => {
+                args.invoked_with_workspace_root = workspace_root;
+                args.run(state()?).await?
+            }
             CliCommand::Install(args) => args.run(state()?).await?,
             CliCommand::Ci(args) => args.run(state()?).await?,
             CliCommand::Env(args) => args.run().await?,
@@ -103,7 +114,7 @@ impl CliArgs {
             CliCommand::Test => run_test(manifest_path(), npmrc())?,
             CliCommand::Run(args) => args.run(manifest_path(), npmrc())?,
             CliCommand::Start => run_start(manifest_path(), npmrc())?,
-            CliCommand::Store(command) => command.run(|| npmrc())?,
+            CliCommand::Store(command) => command.run(|| npmrc()).await?,
         }
 
         Ok(())

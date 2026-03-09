@@ -436,6 +436,19 @@ fn run_filter_prod_should_ignore_dev_dependencies_for_graph_traversal() {
 }
 
 #[test]
+fn run_direct_filter_prod_should_ignore_dev_dependencies_for_graph_traversal() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    setup_workspace_filter_fixture(&workspace, "root-mark", true);
+
+    pacquet.with_args(["run", "--filter-prod", "app...", "mark"]).assert().success();
+
+    assert!(has_mark(&workspace.join("packages/app")));
+    assert!(!has_mark(&workspace.join("packages/lib")));
+    assert!(!has_mark(&workspace.join("packages/util")));
+    drop(root);
+}
+
+#[test]
 fn run_filter_exclude_selector_should_remove_matches() {
     let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
     setup_workspace_filter_fixture(
@@ -462,6 +475,18 @@ fn run_filter_fail_if_no_match_should_fail() {
     );
 
     pacquet.with_args(["run", "mark"]).assert().failure();
+    drop(root);
+}
+
+#[test]
+fn run_direct_fail_if_no_match_should_fail() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    setup_workspace_filter_fixture(&workspace, "root-mark", false);
+
+    pacquet
+        .with_args(["run", "--filter", "does-not-exist", "--fail-if-no-match", "mark"])
+        .assert()
+        .failure();
     drop(root);
 }
 
@@ -517,6 +542,115 @@ fn run_recursive_workspace_concurrency_flag_should_be_supported() {
     assert!(has_mark(&workspace.join("packages/app")));
     assert!(has_mark(&workspace.join("packages/lib")));
     assert!(has_mark(&workspace.join("packages/util")));
+    drop(root);
+}
+
+#[test]
+fn run_recursive_flag_should_target_workspace_packages_and_exclude_root() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "private": true,
+            "scripts": {
+                "mark": "root-mark"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write root package.json");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "scripts": { "mark": "app-mark" }
+        })
+        .to_string(),
+    )
+    .expect("write app package.json");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "lib",
+            "version": "1.0.0",
+            "scripts": { "mark": "lib-mark" }
+        })
+        .to_string(),
+    )
+    .expect("write lib package.json");
+    write_bin_append_line_script(&workspace, "root-mark", "root");
+    write_bin_append_line_script(&workspace, "app-mark", "app");
+    write_bin_append_line_script(&workspace, "lib-mark", "lib");
+
+    pacquet.with_args(["run", "-r", "mark"]).assert().success();
+
+    assert!(!workspace.join("run-order.txt").exists());
+    assert!(has_mark(&app_dir));
+    assert!(has_mark(&lib_dir));
+    drop(root);
+}
+
+#[test]
+fn run_recursive_flag_from_subproject_should_still_target_workspace_packages() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "private": true,
+            "scripts": {
+                "mark": "root-mark"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write root package.json");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "scripts": { "mark": "app-mark" }
+        })
+        .to_string(),
+    )
+    .expect("write app package.json");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "lib",
+            "version": "1.0.0",
+            "scripts": { "mark": "lib-mark" }
+        })
+        .to_string(),
+    )
+    .expect("write lib package.json");
+    write_bin_append_line_script(&workspace, "root-mark", "root");
+    write_bin_append_line_script(&workspace, "app-mark", "app");
+    write_bin_append_line_script(&workspace, "lib-mark", "lib");
+
+    pacquet
+        .with_args(["-C", app_dir.to_str().unwrap(), "run", "--recursive", "mark"])
+        .assert()
+        .success();
+
+    assert!(!workspace.join("run-order.txt").exists());
+    assert!(has_mark(&app_dir));
+    assert!(has_mark(&lib_dir));
     drop(root);
 }
 
@@ -623,6 +757,105 @@ fn run_parallel_reporter_hide_prefix_should_hide_prefixes() {
 }
 
 #[test]
+fn run_direct_parallel_flags_should_prefix_output_by_default() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "private": true
+        })
+        .to_string(),
+    )
+    .expect("write root package.json");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "scripts": { "mark": "app-echo" }
+        })
+        .to_string(),
+    )
+    .expect("write app package.json");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "lib",
+            "version": "1.0.0",
+            "scripts": { "mark": "lib-echo" }
+        })
+        .to_string(),
+    )
+    .expect("write lib package.json");
+    write_bin_echo_script(&workspace, "app-echo", "app-out");
+    write_bin_echo_script(&workspace, "lib-echo", "lib-out");
+
+    let assert = pacquet.with_args(["run", "--recursive", "--parallel", "mark"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(stdout.contains("app mark: app-out"));
+    assert!(stdout.contains("lib mark: lib-out"));
+    drop(root);
+}
+
+#[test]
+fn run_direct_parallel_reporter_hide_prefix_should_hide_prefixes() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "private": true
+        })
+        .to_string(),
+    )
+    .expect("write root package.json");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "scripts": { "mark": "app-echo" }
+        })
+        .to_string(),
+    )
+    .expect("write app package.json");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "lib",
+            "version": "1.0.0",
+            "scripts": { "mark": "lib-echo" }
+        })
+        .to_string(),
+    )
+    .expect("write lib package.json");
+    write_bin_echo_script(&workspace, "app-echo", "app-out");
+    write_bin_echo_script(&workspace, "lib-echo", "lib-out");
+
+    let assert = pacquet
+        .with_args(["run", "--recursive", "--parallel", "--reporter-hide-prefix", "mark"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(stdout.contains("app-out"));
+    assert!(stdout.contains("lib-out"));
+    assert!(!stdout.contains("app mark:"));
+    assert!(!stdout.contains("lib mark:"));
+    drop(root);
+}
+
+#[test]
 fn run_should_route_nested_pnpm_invocations_to_pacquet() {
     let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
     fs::write(
@@ -707,5 +940,178 @@ fn run_report_summary_should_write_pnpm_exec_summary_json() {
             .and_then(|status| status.as_str()),
         Some("passed")
     );
+    drop(root);
+}
+
+#[test]
+fn run_direct_report_summary_should_write_pnpm_exec_summary_json() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    setup_workspace_filter_fixture(&workspace, "root-mark", false);
+
+    pacquet.with_args(["run", "--recursive", "--report-summary", "mark"]).assert().success();
+
+    let summary_path = workspace.join("pnpm-exec-summary.json");
+    assert!(summary_path.exists());
+    let summary = fs::read_to_string(summary_path).expect("read summary");
+    let summary: serde_json::Value = serde_json::from_str(&summary).expect("parse summary");
+    assert_eq!(
+        summary
+            .get("executionStatus")
+            .and_then(|status| status.get("packages/app"))
+            .and_then(|entry| entry.get("status"))
+            .and_then(|status| status.as_str()),
+        Some("passed")
+    );
+    drop(root);
+}
+
+#[test]
+fn run_direct_resume_from_should_start_from_selected_package() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    setup_workspace_filter_fixture(&workspace, "root-mark", false);
+
+    pacquet
+        .with_args(["run", "--recursive", "--no-sort", "--resume-from", "lib", "mark"])
+        .assert()
+        .success();
+
+    assert!(!has_mark(&workspace.join("packages/app")));
+    assert!(has_mark(&workspace.join("packages/lib")));
+    assert!(has_mark(&workspace.join("packages/util")));
+    drop(root);
+}
+
+#[test]
+fn run_direct_workspace_concurrency_should_be_supported() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    setup_workspace_filter_fixture(&workspace, "root-mark", false);
+
+    pacquet
+        .with_args(["run", "--recursive", "--workspace-concurrency", "1", "mark"])
+        .assert()
+        .success();
+
+    assert!(has_mark(&workspace.join("packages/app")));
+    assert!(has_mark(&workspace.join("packages/lib")));
+    assert!(has_mark(&workspace.join("packages/util")));
+    drop(root);
+}
+
+#[test]
+fn run_direct_sequential_should_be_supported() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    setup_workspace_filter_fixture(&workspace, "root-mark", false);
+
+    pacquet.with_args(["run", "--recursive", "--sequential", "mark"]).assert().success();
+
+    assert!(has_mark(&workspace.join("packages/app")));
+    assert!(has_mark(&workspace.join("packages/lib")));
+    assert!(has_mark(&workspace.join("packages/util")));
+    drop(root);
+}
+
+#[test]
+fn run_direct_reverse_should_be_supported() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    setup_workspace_filter_fixture(&workspace, "root-mark", false);
+
+    pacquet.with_args(["run", "--recursive", "--reverse", "mark"]).assert().success();
+
+    assert!(has_mark(&workspace.join("packages/app")));
+    assert!(has_mark(&workspace.join("packages/lib")));
+    assert!(has_mark(&workspace.join("packages/util")));
+    drop(root);
+}
+
+#[test]
+fn run_direct_stream_flag_should_be_accepted() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    setup_workspace_filter_fixture(&workspace, "root-mark", false);
+
+    pacquet.with_args(["run", "--recursive", "--stream", "mark"]).assert().success();
+
+    assert!(has_mark(&workspace.join("packages/app")));
+    assert!(has_mark(&workspace.join("packages/lib")));
+    assert!(has_mark(&workspace.join("packages/util")));
+    drop(root);
+}
+
+#[test]
+fn run_direct_no_bail_should_continue_after_failure() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    let fail_dir = workspace.join("packages/a-fail");
+    let pass_dir = workspace.join("packages/z-pass");
+    fs::create_dir_all(&fail_dir).expect("create fail dir");
+    fs::create_dir_all(&pass_dir).expect("create pass dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(workspace.join("package.json"), serde_json::json!({ "private": true }).to_string())
+        .expect("write root package.json");
+    fs::write(
+        fail_dir.join("package.json"),
+        serde_json::json!({
+            "name": "a-fail",
+            "version": "1.0.0",
+            "scripts": { "mark": "fail-mark" }
+        })
+        .to_string(),
+    )
+    .expect("write fail package.json");
+    fs::write(
+        pass_dir.join("package.json"),
+        serde_json::json!({
+            "name": "z-pass",
+            "version": "1.0.0",
+            "scripts": { "mark": "pass-mark" }
+        })
+        .to_string(),
+    )
+    .expect("write pass package.json");
+    write_bin_failure_script(&workspace, "fail-mark");
+    write_bin_append_line_script(&workspace, "pass-mark", "pass");
+
+    pacquet.with_args(["run", "--recursive", "--no-sort", "--no-bail", "mark"]).assert().success();
+
+    assert!(has_mark(&pass_dir));
+    drop(root);
+}
+
+#[test]
+fn run_direct_bail_should_stop_on_failure() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    let fail_dir = workspace.join("packages/a-fail");
+    let pass_dir = workspace.join("packages/z-pass");
+    fs::create_dir_all(&fail_dir).expect("create fail dir");
+    fs::create_dir_all(&pass_dir).expect("create pass dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(workspace.join("package.json"), serde_json::json!({ "private": true }).to_string())
+        .expect("write root package.json");
+    fs::write(
+        fail_dir.join("package.json"),
+        serde_json::json!({
+            "name": "a-fail",
+            "version": "1.0.0",
+            "scripts": { "mark": "fail-mark" }
+        })
+        .to_string(),
+    )
+    .expect("write fail package.json");
+    fs::write(
+        pass_dir.join("package.json"),
+        serde_json::json!({
+            "name": "z-pass",
+            "version": "1.0.0",
+            "scripts": { "mark": "pass-mark" }
+        })
+        .to_string(),
+    )
+    .expect("write pass package.json");
+    write_bin_failure_script(&workspace, "fail-mark");
+    write_bin_append_line_script(&workspace, "pass-mark", "pass");
+
+    pacquet.with_args(["run", "--recursive", "--no-sort", "--bail", "mark"]).assert().failure();
+
+    assert!(!has_mark(&pass_dir));
     drop(root);
 }

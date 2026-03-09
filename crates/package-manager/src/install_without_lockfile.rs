@@ -2,7 +2,6 @@ use crate::InstallPackageFromRegistry;
 use async_recursion::async_recursion;
 use dashmap::DashSet;
 use futures_util::future;
-use node_semver::Version;
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
@@ -34,6 +33,9 @@ pub struct InstallWithoutLockfile<'a, DependencyGroupList> {
     pub config: &'static Npmrc,
     pub manifest: &'a PackageManifest,
     pub dependency_groups: DependencyGroupList,
+    pub force: bool,
+    pub prefer_offline: bool,
+    pub offline: bool,
 }
 
 impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
@@ -49,6 +51,9 @@ impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
             manifest,
             dependency_groups,
             resolved_packages,
+            force,
+            prefer_offline,
+            offline,
         } = self;
 
         let _: Vec<()> = manifest
@@ -73,8 +78,11 @@ impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
                     node_modules_dir: &config.modules_dir,
                     name,
                     version_range,
+                    prefer_offline,
+                    offline,
+                    force,
                 }
-                .run::<Version>()
+                .run()
                 .await
                 .unwrap();
 
@@ -85,6 +93,9 @@ impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
                     manifest,
                     dependency_groups: (),
                     resolved_packages,
+                    force,
+                    prefer_offline,
+                    offline,
                 }
                 .install_dependencies_from_registry(&dependency)
                 .await;
@@ -103,6 +114,9 @@ impl<'a> InstallWithoutLockfile<'a, ()> {
             http_client,
             config,
             resolved_packages,
+            force,
+            prefer_offline,
+            offline,
             ..
         } = self;
 
@@ -130,8 +144,11 @@ impl<'a> InstallWithoutLockfile<'a, ()> {
                     node_modules_dir: &node_modules_path,
                     name,
                     version_range,
+                    prefer_offline: *prefer_offline,
+                    offline: *offline,
+                    force: *force,
                 }
-                .run::<Version>()
+                .run()
                 .await
                 .unwrap(); // TODO: proper error propagation
                 self.install_dependencies_from_registry(&dependency).await;

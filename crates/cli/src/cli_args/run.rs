@@ -32,12 +32,180 @@ pub struct RunArgs {
     /// Avoid exiting with a non-zero exit code when the script is undefined.
     #[clap(long)]
     pub if_present: bool,
+
+    /// Run the script in every workspace package.
+    #[clap(short = 'r', long)]
+    pub recursive: bool,
+
+    /// Select only matching workspace projects.
+    #[clap(long = "filter")]
+    pub filter: Vec<String>,
+
+    /// Select workspace projects with production-only dependency traversal semantics.
+    #[clap(long = "filter-prod")]
+    pub filter_prod: Vec<String>,
+
+    /// Fail when no workspace projects match the provided filters.
+    #[clap(long = "fail-if-no-match")]
+    pub fail_if_no_match: bool,
+
+    /// Run scripts in parallel for selected workspace projects.
+    #[clap(long)]
+    pub parallel: bool,
+
+    /// Hide per-package output prefixes when running multiple projects.
+    #[clap(long = "reporter-hide-prefix")]
+    pub reporter_hide_prefix: bool,
+
+    /// Explicitly keep per-package output prefixes.
+    #[clap(long = "no-reporter-hide-prefix")]
+    pub no_reporter_hide_prefix: bool,
+
+    /// Group and print project output after script completion.
+    #[clap(long = "aggregate-output")]
+    pub aggregate_output: bool,
+
+    /// Run workspace projects in reverse order.
+    #[clap(long = "reverse")]
+    pub reverse: bool,
+
+    /// Limit concurrent workspace script executions.
+    #[clap(long = "workspace-concurrency")]
+    pub workspace_concurrency: Option<usize>,
+
+    /// Run workspace scripts sequentially.
+    #[clap(long = "sequential")]
+    pub sequential: bool,
+
+    /// Stream output continuously (accepted for compatibility).
+    #[clap(long = "stream")]
+    pub stream: bool,
+
+    /// Continue executing remaining workspace scripts even when one fails.
+    #[clap(long = "no-bail")]
+    pub no_bail: bool,
+
+    /// Stop on first workspace script failure.
+    #[clap(long = "bail")]
+    pub bail: bool,
+
+    /// Sort selected workspace projects topologically before execution.
+    #[clap(long = "sort")]
+    pub sort: bool,
+
+    /// Keep workspace project discovery order without topological sorting.
+    #[clap(long = "no-sort")]
+    pub no_sort: bool,
+
+    /// Resume execution from the specified package when running recursively.
+    #[clap(long = "resume-from")]
+    pub resume_from: Option<String>,
+
+    /// Write `pnpm-exec-summary.json` for workspace run execution.
+    #[clap(long = "report-summary")]
+    pub report_summary: bool,
 }
 
 impl RunArgs {
     /// Execute the subcommand.
     pub fn run(self, manifest_path: PathBuf, config: &Npmrc) -> miette::Result<()> {
-        run_named_script(manifest_path, &self.command, &self.args, self.if_present, false, config)
+        let RunArgs {
+            command,
+            args,
+            if_present,
+            recursive,
+            filter,
+            filter_prod,
+            fail_if_no_match,
+            parallel,
+            reporter_hide_prefix,
+            no_reporter_hide_prefix,
+            aggregate_output,
+            reverse,
+            workspace_concurrency,
+            sequential,
+            stream,
+            no_bail,
+            bail,
+            sort,
+            no_sort,
+            resume_from,
+            report_summary,
+        } = self;
+        let reporter_hide_prefix = if reporter_hide_prefix {
+            Some(true)
+        } else if no_reporter_hide_prefix {
+            Some(false)
+        } else {
+            None
+        };
+        let sort = if sort {
+            Some(true)
+        } else if no_sort {
+            Some(false)
+        } else {
+            None
+        };
+        let workspace_concurrency = if sequential { Some(1) } else { workspace_concurrency };
+        let no_bail = no_bail;
+
+        if !recursive
+            && filter.is_empty()
+            && filter_prod.is_empty()
+            && !fail_if_no_match
+            && !parallel
+            && reporter_hide_prefix.is_none()
+            && !aggregate_output
+            && !reverse
+            && workspace_concurrency.is_none()
+            && !sequential
+            && !stream
+            && !no_bail
+            && !bail
+            && sort.is_none()
+            && resume_from.is_none()
+            && !report_summary
+        {
+            return run_named_script(manifest_path, &command, &args, if_present, false, config);
+        }
+
+        let package_dir =
+            manifest_path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        execute_embedded_pnpm_run(
+            EmbeddedPnpmRun {
+                dir: None,
+                recursive,
+                workspace_root: false,
+                parallel,
+                workspace_concurrency,
+                reverse,
+                sort,
+                resume_from,
+                report_summary,
+                reporter_hide_prefix,
+                aggregate_output,
+                use_stderr: false,
+                filters: filter
+                    .into_iter()
+                    .map(|selector| FilterSelector { selector, prod_only: false })
+                    .chain(
+                        filter_prod
+                            .into_iter()
+                            .map(|selector| FilterSelector { selector, prod_only: true }),
+                    )
+                    .collect(),
+                fail_if_no_match,
+                changed_files_ignore_patterns: Vec::new(),
+                test_patterns: Vec::new(),
+                no_bail,
+                if_present,
+                command,
+                args,
+            },
+            &package_dir,
+            &[],
+            config,
+        )
     }
 }
 

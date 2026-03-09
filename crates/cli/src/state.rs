@@ -186,7 +186,7 @@ fn workspace_pattern_matches(pattern: &str, path: &str) -> bool {
     Pattern::new(pattern).map(|pattern| pattern.matches(path)).unwrap_or(false)
 }
 
-fn find_workspace_root(start_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn find_workspace_root(start_dir: &Path) -> Option<PathBuf> {
     let mut dir = start_dir.to_path_buf();
     loop {
         if dir.join("pnpm-workspace.yaml").is_file() {

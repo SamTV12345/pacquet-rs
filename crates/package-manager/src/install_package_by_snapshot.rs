@@ -19,6 +19,8 @@ pub struct InstallPackageBySnapshot<'a> {
     pub config: &'static Npmrc,
     pub dependency_path: &'a DependencyPath,
     pub package_snapshot: &'a PackageSnapshot,
+    pub offline: bool,
+    pub force: bool,
 }
 
 /// Error type of [`InstallPackageBySnapshot`].
@@ -31,8 +33,14 @@ pub enum InstallPackageBySnapshotError {
 impl<'a> InstallPackageBySnapshot<'a> {
     /// Execute the subroutine.
     pub async fn run(self) -> Result<bool, InstallPackageBySnapshotError> {
-        let InstallPackageBySnapshot { http_client, config, dependency_path, package_snapshot } =
-            self;
+        let InstallPackageBySnapshot {
+            http_client,
+            config,
+            dependency_path,
+            package_snapshot,
+            offline,
+            force,
+        } = self;
         let PackageSnapshot { resolution, .. } = package_snapshot;
         let DependencyPath { custom_registry, package_specifier } = dependency_path;
 
@@ -70,18 +78,27 @@ impl<'a> InstallPackageBySnapshot<'a> {
             .join("node_modules")
             .join(package_specifier.name.to_string());
 
+        if force && save_path.exists() {
+            std::fs::remove_dir_all(&save_path).unwrap_or_else(|error| {
+                panic!(
+                    "remove existing virtual store package during --force should succeed: {error}"
+                )
+            });
+        }
+
         // Fast warm-install check: if package.json already exists in the virtual store package
         // directory, the package contents are present and can be reused.
-        if save_path.join("package.json").is_file() {
+        if !force && save_path.join("package.json").is_file() {
             return Ok(false);
         }
 
         // pnpm skips import work when package contents are already present in virtual store.
         // Keep the check cheap by probing a representative file from the store index.
-        if config
-            .store_dir
-            .read_index_file(integrity, &package_id)
-            .is_some_and(|index| package_is_already_imported(&save_path, &index.files))
+        if !force
+            && config
+                .store_dir
+                .read_index_file(integrity, &package_id)
+                .is_some_and(|index| package_is_already_imported(&save_path, &index.files))
         {
             return Ok(false);
         }
@@ -94,6 +111,8 @@ impl<'a> InstallPackageBySnapshot<'a> {
             package_unpacked_size: None,
             auth_header: config.auth_header_for_url(&tarball_url),
             package_url: &tarball_url,
+            offline,
+            force,
         }
         .run_without_mem_cache()
         .await

@@ -21,5 +21,8 @@
   },
   "files": [
     "bin/pacquet"
-  ]
+  ],
+  "dependencies": {
+    "is-number": "7.0.0"
+  }
 }

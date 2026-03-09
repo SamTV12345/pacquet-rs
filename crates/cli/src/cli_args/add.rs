@@ -1,9 +1,12 @@
 use crate::State;
 use clap::Args;
 use miette::Context;
+use pacquet_lockfile::Lockfile;
+use pacquet_npmrc::Npmrc;
 use pacquet_package_manager::Add;
-use pacquet_package_manifest::DependencyGroup;
-use std::path::PathBuf;
+use pacquet_package_manifest::{DependencyGroup, PackageManifest};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Args)]
 pub struct AddDependencyOptions {
@@ -65,8 +68,9 @@ impl AddDependencyOptions {
 
 #[derive(Debug, Args)]
 pub struct AddArgs {
-    /// Name of the package
-    pub package_name: String, // TODO: 1. support version range, 2. multiple arguments, 3. name this `packages`
+    /// One or more package specs
+    #[arg(required = true)]
+    pub packages: Vec<String>,
     /// --save-prod, --save-dev, --save-optional, --save-peer
     #[clap(flatten)]
     pub dependency_options: AddDependencyOptions,
@@ -74,16 +78,41 @@ pub struct AddArgs {
     /// the default semver range operator.
     #[clap(short = 'E', long = "save-exact")]
     pub save_exact: bool,
+    /// Only adds packages that are already present in the workspace.
+    #[clap(long = "workspace")]
+    pub workspace: bool,
+    /// Select only matching workspace projects (by package name or workspace-relative path).
+    #[clap(long = "filter")]
+    pub filter: Vec<String>,
+    /// Add dependencies to every workspace project recursively (excluding workspace root).
+    #[clap(short = 'r', long)]
+    pub recursive: bool,
     /// The directory with links to the store (default is node_modules/.pacquet).
     /// All direct and indirect dependencies of the project are linked into this directory
     #[clap(long = "virtual-store-dir", default_value = "node_modules/.pacquet")]
     pub virtual_store_dir: Option<PathBuf>, // TODO: make use of this
+    /// Add dependencies to the workspace root package even when this is not explicitly requested.
+    #[clap(long = "ignore-workspace-root-check")]
+    pub ignore_workspace_root_check: bool,
+    #[arg(skip)]
+    pub invoked_with_workspace_root: bool,
 }
 
 impl AddArgs {
     /// Execute the subcommand.
     pub async fn run(self, mut state: State) -> miette::Result<()> {
         // TODO: if a package already exists in another dependency group, don't remove the existing entry.
+        let AddArgs {
+            packages,
+            dependency_options,
+            save_exact,
+            workspace,
+            filter,
+            recursive,
+            virtual_store_dir: _virtual_store_dir,
+            ignore_workspace_root_check,
+            invoked_with_workspace_root,
+        } = self;
 
         let State {
             tarball_mem_cache,
@@ -97,6 +126,91 @@ impl AddArgs {
             resolved_packages,
         } = &mut state;
 
+        if !filter.is_empty() || recursive {
+            let mut targets = BTreeMap::<String, PathBuf>::new();
+            for (name, info) in workspace_packages.iter() {
+                let importer_id = to_lockfile_importer_id(lockfile_dir, &info.root_dir);
+                if recursive && importer_id == "." {
+                    continue;
+                }
+                let matches = if filter.is_empty() {
+                    true
+                } else {
+                    filter.iter().any(|selector| {
+                        let normalized = selector.trim_start_matches("./").replace('\\', "/");
+                        normalized == importer_id || normalized == name.as_str()
+                    })
+                };
+                if matches {
+                    targets.insert(importer_id, info.root_dir.join("package.json"));
+                }
+            }
+            if targets.is_empty() {
+                if recursive {
+                    miette::bail!(
+                        "No workspace projects found for --recursive. Ensure pnpm-workspace.yaml includes package patterns."
+                    );
+                }
+                miette::bail!(
+                    "No workspace projects matched --filter selectors: {}",
+                    filter.join(", ")
+                );
+            }
+
+            let mut current_lockfile = lockfile.clone();
+            for (importer_id, manifest_path) in targets {
+                let mut target_manifest = PackageManifest::from_path(manifest_path.clone())
+                    .wrap_err_with(|| {
+                        format!("load workspace manifest: {}", manifest_path.display())
+                    })?;
+                let project_dir = target_manifest
+                    .path()
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| lockfile_dir.to_path_buf());
+                let target_config = config_for_project(config, &project_dir).leak();
+
+                Add {
+                    tarball_mem_cache,
+                    http_client,
+                    config: target_config,
+                    manifest: &mut target_manifest,
+                    lockfile: current_lockfile.as_ref(),
+                    lockfile_dir,
+                    lockfile_importer_id: &importer_id,
+                    workspace_packages,
+                    list_dependency_groups: || dependency_options.dependency_groups(),
+                    packages: &packages,
+                    save_exact,
+                    workspace_only: workspace,
+                    resolved_packages,
+                }
+                .run()
+                .await
+                .wrap_err("adding a new package")?;
+
+                current_lockfile = if config.lockfile {
+                    Lockfile::load_from_dir(lockfile_dir)
+                        .wrap_err("reload lockfile after filtered workspace add")?
+                } else {
+                    None
+                };
+            }
+
+            return Ok(());
+        }
+
+        let is_workspace_root_manifest =
+            lockfile_importer_id == "." && lockfile_dir.join("pnpm-workspace.yaml").is_file();
+        if is_workspace_root_manifest
+            && !ignore_workspace_root_check
+            && !invoked_with_workspace_root
+        {
+            miette::bail!(
+                "Running this command at the workspace root may be unintended. Use -w to target the workspace root explicitly, or pass --ignore-workspace-root-check."
+            );
+        }
+
         Add {
             tarball_mem_cache,
             http_client,
@@ -106,15 +220,37 @@ impl AddArgs {
             lockfile_dir,
             lockfile_importer_id,
             workspace_packages,
-            list_dependency_groups: || self.dependency_options.dependency_groups(),
-            package_name: &self.package_name,
-            save_exact: self.save_exact,
+            list_dependency_groups: || dependency_options.dependency_groups(),
+            packages: &packages,
+            save_exact,
+            workspace_only: workspace,
             resolved_packages,
         }
         .run()
         .await
         .wrap_err("adding a new package")
     }
+}
+
+fn config_for_project(config: &Npmrc, project_dir: &Path) -> Npmrc {
+    let mut next = config.clone();
+    next.modules_dir = project_dir.join("node_modules");
+    next.virtual_store_dir = next.modules_dir.join(".pnpm");
+    next
+}
+
+fn to_lockfile_importer_id(workspace_root: &Path, project_dir: &Path) -> String {
+    let Ok(relative) = project_dir.strip_prefix(workspace_root) else {
+        return ".".to_string();
+    };
+    if relative.as_os_str().is_empty() {
+        return ".".to_string();
+    }
+    relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[cfg(test)]

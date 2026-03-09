@@ -44,6 +44,8 @@ fn bench_tarball(c: &mut Criterion, server: &mut ServerGuard, fixtures_folder: &
                 package_unpacked_size: Some(16697),
                 auth_header: None,
                 package_url: url,
+                offline: false,
+                force: false,
             }
             .run_without_mem_cache()
             .await

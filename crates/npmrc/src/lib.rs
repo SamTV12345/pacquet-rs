@@ -10,10 +10,11 @@ use std::{collections::HashMap, fs, path::PathBuf, process::Command};
 use url::Url;
 
 use crate::custom_deserializer::{
-    bool_true, default_hoist_pattern, default_modules_cache_max_age, default_modules_dir,
-    default_peers_suffix_max_length, default_public_hoist_pattern, default_registry,
-    default_store_dir, default_virtual_store_dir, deserialize_bool, deserialize_pathbuf,
-    deserialize_registry, deserialize_store_dir, deserialize_u16, deserialize_u64,
+    bool_true, default_cache_dir, default_hoist_pattern, default_modules_cache_max_age,
+    default_modules_dir, default_peers_suffix_max_length, default_public_hoist_pattern,
+    default_registry, default_store_dir, default_virtual_store_dir, deserialize_bool,
+    deserialize_pathbuf, deserialize_registry, deserialize_store_dir, deserialize_u16,
+    deserialize_u64,
 };
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -87,6 +88,10 @@ pub struct Npmrc {
     /// The location where all the packages are saved on the disk.
     #[serde(default = "default_store_dir", deserialize_with = "deserialize_store_dir")]
     pub store_dir: StoreDir,
+
+    /// Directory where package metadata cache is stored.
+    #[serde(default = "default_cache_dir", deserialize_with = "deserialize_pathbuf")]
+    pub cache_dir: PathBuf,
 
     /// The directory in which dependencies will be installed (instead of node_modules).
     #[serde(default = "default_modules_dir", deserialize_with = "deserialize_pathbuf")]
