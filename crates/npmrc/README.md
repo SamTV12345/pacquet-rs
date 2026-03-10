@@ -29,7 +29,7 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 | ✅    | prefer_frozen_lockfile       |       |
 | ✅    | lockfile_include_tarball_url |       |
 | ✅    | exclude_links_from_lockfile  | excludes external `link:` specs from importer snapshot while keeping `workspace:` links |
-| ~    | inject_workspace_packages    | workspace protocol dependencies are materialized instead of symlinked during install |
+| ~    | inject_workspace_packages    | workspace protocol dependencies are materialized instead of symlinked during install; `dependenciesMeta.<dep>.injected=true` is honored for workspace deps |
 
 # Registry & Authentication Settings
 

@@ -106,7 +106,8 @@ where
                 if !lockfile_only {
                     let symlink_path = config.modules_dir.join(name);
                     let materialize_as_symlink =
-                        !config.inject_workspace_packages && config.symlink;
+                        !should_inject_workspace_dependency(manifest, name, version_range, config)
+                            && config.symlink;
                     link_package(
                         materialize_as_symlink,
                         &workspace_package.root_dir,
@@ -448,7 +449,7 @@ where
             dependencies,
             optional_dependencies,
             dev_dependencies,
-            dependencies_meta: None,
+            dependencies_meta: project_dependencies_meta(manifest),
             publish_directory: None,
         }
     }
@@ -645,6 +646,38 @@ fn resolve_link_dependency(version_range: &str) -> Option<ResolvedPackage> {
             link_target.replace('\\', "/")
         )),
     })
+}
+
+fn should_inject_workspace_dependency(
+    manifest: &PackageManifest,
+    dependency_name: &str,
+    specifier: &str,
+    config: &Npmrc,
+) -> bool {
+    if !specifier.starts_with("workspace:") {
+        return false;
+    }
+    config.inject_workspace_packages
+        || dependency_meta_injected_json(manifest.value().get("dependenciesMeta"), dependency_name)
+}
+
+fn project_dependencies_meta(manifest: &PackageManifest) -> Option<serde_yaml::Value> {
+    let value = manifest.value().get("dependenciesMeta")?;
+    if value.as_object().is_some_and(|object| object.is_empty()) {
+        return None;
+    }
+    serde_yaml::to_value(value).ok()
+}
+
+fn dependency_meta_injected_json(
+    dependencies_meta: Option<&serde_json::Value>,
+    dependency_name: &str,
+) -> bool {
+    dependencies_meta
+        .and_then(|value| value.get(dependency_name))
+        .and_then(|value| value.get("injected"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn normalize_local_dependency_path(project_dir: &Path, target: &str) -> PathBuf {
@@ -1166,6 +1199,42 @@ mod tests {
         let specifiers = snapshot.specifiers.expect("specifiers map");
         assert!(deps.contains_key(&"workspace-pkg".parse().expect("pkg name")));
         assert_eq!(specifiers.get("workspace-pkg"), Some(&"workspace:*".to_string()));
+    }
+
+    #[test]
+    fn build_project_snapshot_preserves_dependencies_meta() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = load_manifest_from_json(
+            dir.path(),
+            serde_json::json!({
+                "name": "app",
+                "version": "1.0.0",
+                "dependencies": {
+                    "workspace-pkg": "workspace:*"
+                },
+                "dependenciesMeta": {
+                    "workspace-pkg": {
+                        "injected": true
+                    }
+                }
+            }),
+        );
+        let resolved = HashMap::from([(
+            ("workspace-pkg".to_string(), "workspace:*".to_string()),
+            ResolvedPackage {
+                version: ResolvedDependencyVersion::Link("link:../workspace-pkg".to_string()),
+            },
+        )]);
+
+        let snapshot = InstallWithLockfile::<'_, [DependencyGroup; 1]>::build_project_snapshot(
+            &manifest,
+            [DependencyGroup::Prod],
+            &resolved,
+            false,
+        );
+
+        let dependencies_meta = snapshot.dependencies_meta.expect("dependenciesMeta");
+        assert_eq!(dependencies_meta["workspace-pkg"]["injected"], serde_yaml::Value::Bool(true));
     }
 
     fn dummy_snapshot_with_dependencies(

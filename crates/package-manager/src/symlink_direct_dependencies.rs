@@ -3,6 +3,7 @@ use pacquet_lockfile::{PkgName, PkgNameVerPeer, ProjectSnapshot, ResolvedDepende
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::DependencyGroup;
 use rayon::prelude::*;
+use serde_yaml::Value as YamlValue;
 
 /// This subroutine creates symbolic links in the `node_modules` directory for
 /// the direct dependencies. The targets of the link are the virtual directories.
@@ -73,9 +74,12 @@ where
 
                 let result = match &spec.version {
                     ResolvedDependencyVersion::Link(_) => {
-                        if spec.specifier.starts_with("workspace:")
-                            && config.inject_workspace_packages
-                        {
+                        if should_inject_workspace_dependency(
+                            project_snapshot,
+                            &name_str,
+                            &spec.specifier,
+                            config,
+                        ) {
                             link_package(false, &symlink_target, &dependency_path)
                         } else {
                             if !config.symlink {
@@ -91,4 +95,30 @@ where
                 });
             });
     }
+}
+
+fn should_inject_workspace_dependency(
+    project_snapshot: &ProjectSnapshot,
+    dependency_name: &str,
+    specifier: &str,
+    config: &Npmrc,
+) -> bool {
+    if !specifier.starts_with("workspace:") {
+        return false;
+    }
+    config.inject_workspace_packages
+        || project_snapshot_dependency_meta_injected(project_snapshot, dependency_name)
+}
+
+fn project_snapshot_dependency_meta_injected(
+    project_snapshot: &ProjectSnapshot,
+    dependency_name: &str,
+) -> bool {
+    project_snapshot
+        .dependencies_meta
+        .as_ref()
+        .and_then(|value| value.get(dependency_name))
+        .and_then(|value| value.get("injected"))
+        .and_then(YamlValue::as_bool)
+        .unwrap_or(false)
 }

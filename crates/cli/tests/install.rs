@@ -1589,6 +1589,116 @@ fn workspace_protocol_dependency_should_inject_local_package_when_enabled() {
 }
 
 #[test]
+fn workspace_protocol_dependency_should_inject_local_package_when_dependencies_meta_requests_it() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app package dir");
+    fs::create_dir_all(&lib_dir).expect("create lib package dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.2.3",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write lib package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'lib';\n").expect("write lib entrypoint");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "workspace:*"
+            },
+            "dependenciesMeta": {
+                "@repo/lib": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let injected_dep = app_dir.join("node_modules/@repo/lib");
+    assert!(injected_dep.exists());
+    let metadata = fs::symlink_metadata(&injected_dep).expect("read injected dependency metadata");
+    assert!(!metadata.file_type().is_symlink());
+
+    let lockfile_content =
+        fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
+    assert!(lockfile_content.contains("dependenciesMeta:"));
+    assert!(lockfile_content.contains("injected: true"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn frozen_workspace_injected_dependency_should_still_materialize_from_lockfile() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app package dir");
+    fs::create_dir_all(&lib_dir).expect("create lib package dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.2.3",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write lib package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'lib';\n").expect("write lib entrypoint");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "workspace:*"
+            },
+            "dependenciesMeta": {
+                "@repo/lib": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+    fs::remove_dir_all(app_dir.join("node_modules")).expect("remove node_modules");
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install", "--frozen-lockfile"])
+        .assert()
+        .success();
+
+    let injected_dep = app_dir.join("node_modules/@repo/lib");
+    assert!(injected_dep.exists());
+    let metadata = fs::symlink_metadata(&injected_dep).expect("read injected dependency metadata");
+    assert!(!metadata.file_type().is_symlink());
+    assert!(injected_dep.join("package.json").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
 fn link_protocol_dependency_should_link_local_package() {
     let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
 
