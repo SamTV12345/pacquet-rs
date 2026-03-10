@@ -96,14 +96,14 @@ where
 
                 let result = match &spec.version {
                     ResolvedDependencyVersion::Link(link) => {
-                        if should_inject_workspace_dependency(
+                        let should_materialize_local_copy = should_inject_workspace_dependency(
                             project_snapshot,
                             &name_str,
                             &spec.specifier,
                             config,
-                        ) {
-                            link_package(false, &symlink_target, &dependency_path)
-                        } else if link.starts_with("file:") || spec.specifier.starts_with("file:") {
+                        ) || link.starts_with("file:")
+                            || spec.specifier.starts_with("file:");
+                        if should_materialize_local_copy {
                             if materialize_virtual_store_tree {
                                 materialize_virtual_store_package(&symlink_target, &dependency_path)
                             } else {

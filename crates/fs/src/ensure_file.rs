@@ -17,9 +17,9 @@ fn to_windows_extended_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
 
-    let raw = path.as_os_str().to_string_lossy();
+    let raw = path.as_os_str().to_string_lossy().replace('/', "\\");
     if raw.starts_with(r"\\?\") {
-        return path.to_path_buf();
+        return PathBuf::from(raw);
     }
     if let Some(stripped) = raw.strip_prefix(r"\\") {
         return PathBuf::from(format!(r"\\?\UNC\{stripped}"));
@@ -93,4 +93,37 @@ pub fn ensure_file(
         .map_err(|error| EnsureFileError::CreateFile { file_path: file_path.to_path_buf(), error })?
         .write_all(content)
         .map_err(|error| EnsureFileError::WriteFile { file_path: file_path.to_path_buf(), error })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[cfg(windows)]
+    #[test]
+    fn to_windows_extended_path_normalizes_forward_slashes() {
+        let path = Path::new(r"C:\Users\runneradmin\AppData/Local/pnpm/store\v10\files\db");
+        let path = PathBuf::from(path.to_string_lossy().replace('\\', "/"));
+
+        let received = to_windows_extended_path(&path);
+
+        assert_eq!(
+            received,
+            PathBuf::from(r"\\?\C:\Users\runneradmin\AppData\Local\pnpm\store\v10\files\db")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ensure_file_creates_mixed_separator_path() {
+        let dir = tempdir().expect("create tempdir");
+        let nested =
+            dir.path().join("a").join("b").join("file.txt").to_string_lossy().replace('\\', "/");
+        let nested = PathBuf::from(nested);
+
+        ensure_file(&nested, b"hello", None).expect("write file");
+
+        assert_eq!(std::fs::read(&nested).expect("read file"), b"hello");
+    }
 }

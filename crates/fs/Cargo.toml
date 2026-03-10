@@ -16,3 +16,6 @@ miette      = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 junction = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

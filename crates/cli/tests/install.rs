@@ -1713,6 +1713,9 @@ fn workspace_protocol_dependency_should_inject_local_package_when_dependencies_m
         fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
     assert!(lockfile_content.contains("dependenciesMeta:"));
     assert!(lockfile_content.contains("injected: true"));
+    assert!(lockfile_content.contains("version: file:packages/lib"));
+    assert!(lockfile_content.contains("'@repo/lib@file:packages/lib':"));
+    assert!(lockfile_content.contains("directory: packages/lib"));
 
     drop(root); // cleanup
 }
@@ -1769,6 +1772,197 @@ fn frozen_workspace_injected_dependency_should_still_materialize_from_lockfile()
     let metadata = fs::symlink_metadata(&injected_dep).expect("read injected dependency metadata");
     assert!(!metadata.file_type().is_symlink());
     assert!(injected_dep.join("package.json").exists());
+
+    let lockfile_content =
+        fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
+    assert!(lockfile_content.contains("version: file:packages/lib"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn workspace_injected_dependency_should_write_peer_suffixed_local_snapshot() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app package dir");
+    fs::create_dir_all(&lib_dir).expect("create lib package dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.2.3",
+            "main": "index.js",
+            "peerDependencies": {
+                "is-number": "^7.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write lib package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'lib';\n").expect("write lib entrypoint");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "workspace:*"
+            },
+            "devDependencies": {
+                "is-number": "7.0.0"
+            },
+            "dependenciesMeta": {
+                "@repo/lib": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let injected_dep = app_dir.join("node_modules/@repo/lib");
+    assert!(injected_dep.exists());
+    assert!(injected_dep.join("node_modules/is-number").exists());
+
+    let lockfile_content =
+        fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
+    assert!(lockfile_content.contains("version: file:packages/lib(is-number@7.0.0)"));
+    assert!(lockfile_content.contains("'@repo/lib@file:packages/lib(is-number@7.0.0)':"));
+    assert!(lockfile_content.contains("peerDependencies:"));
+    assert!(lockfile_content.contains("is-number: ^7.0.0"));
+
+    drop(mock_instance);
+    drop(root); // cleanup
+}
+
+#[test]
+fn workspace_injected_dependency_should_refresh_on_reinstall_by_default() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app package dir");
+    fs::create_dir_all(&lib_dir).expect("create lib package dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.2.3",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write lib package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'v1';\n").expect("write lib entrypoint");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "workspace:*"
+            },
+            "dependenciesMeta": {
+                "@repo/lib": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+    fs::write(lib_dir.join("index.js"), "module.exports = 'v2';\n").expect("update lib entrypoint");
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(app_dir.join("node_modules/@repo/lib/index.js"))
+            .expect("read injected dependency file"),
+        "module.exports = 'v2';\n"
+    );
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn disable_relink_local_dir_deps_should_keep_existing_workspace_injected_dependency_contents() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app package dir");
+    fs::create_dir_all(&lib_dir).expect("create lib package dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(app_dir.join(".npmrc"), "disable-relink-local-dir-deps=true\n")
+        .expect("write app npmrc");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.2.3",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write lib package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'v1';\n").expect("write lib entrypoint");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "workspace:*"
+            },
+            "dependenciesMeta": {
+                "@repo/lib": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+    fs::write(lib_dir.join("index.js"), "module.exports = 'v2';\n").expect("update lib entrypoint");
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(app_dir.join("node_modules/@repo/lib/index.js"))
+            .expect("read injected dependency file"),
+        "module.exports = 'v1';\n"
+    );
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install", "--frozen-lockfile"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(app_dir.join("node_modules/@repo/lib/index.js"))
+            .expect("read injected dependency file"),
+        "module.exports = 'v1';\n"
+    );
 
     drop(root); // cleanup
 }

@@ -122,27 +122,49 @@ where
             if let Some(workspace_package) =
                 resolve_workspace_dependency(workspace_packages, name, version_range)
             {
-                if !lockfile_only {
-                    let symlink_path = config.modules_dir.join(name);
-                    let materialize_as_symlink =
-                        !should_inject_workspace_dependency(manifest, name, version_range, config)
-                            && config.symlink;
-                    link_package(
-                        materialize_as_symlink,
-                        &workspace_package.root_dir,
-                        &symlink_path,
-                    )
-                    .expect("symlink workspace package");
-                }
+                let resolved_package =
+                    if should_inject_workspace_dependency(manifest, name, version_range, config) {
+                        let normalized_ref = normalized_local_file_reference(
+                            lockfile_dir,
+                            &workspace_package.root_dir,
+                        )
+                        .replace('\\', "/");
+                        Self::snapshot_local_directory_package(
+                            resolved_packages,
+                            http_client,
+                            config,
+                            &package_snapshots,
+                            &workspace_root_peer_overrides,
+                            manifest.path(),
+                            lockfile_dir,
+                            name,
+                            &workspace_package.root_dir,
+                            &normalized_ref,
+                            prefer_offline,
+                            offline,
+                        )
+                        .await
+                    } else {
+                        if !lockfile_only {
+                            let symlink_path = config.modules_dir.join(name);
+                            link_package(
+                                config.symlink,
+                                &workspace_package.root_dir,
+                                &symlink_path,
+                            )
+                            .expect("symlink workspace package");
+                        }
 
-                let project_dir = manifest.path().parent().unwrap_or_else(|| Path::new("."));
-                let relative = to_relative_path(project_dir, &workspace_package.root_dir);
-                let resolved_package = ResolvedPackage {
-                    version: ResolvedDependencyVersion::Link(format!(
-                        "link:{}",
-                        relative.replace('\\', "/")
-                    )),
-                };
+                        let project_dir =
+                            manifest.path().parent().unwrap_or_else(|| Path::new("."));
+                        let relative = to_relative_path(project_dir, &workspace_package.root_dir);
+                        ResolvedPackage {
+                            version: ResolvedDependencyVersion::Link(format!(
+                                "link:{}",
+                                relative.replace('\\', "/")
+                            )),
+                        }
+                    };
                 resolved_direct_dependencies.insert(key, resolved_package);
                 continue;
             }
