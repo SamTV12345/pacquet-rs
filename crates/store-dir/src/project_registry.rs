@@ -3,7 +3,10 @@ use derive_more::{Display, Error};
 use miette::Diagnostic;
 use pacquet_fs::symlink_dir;
 use sha2::{Digest, Sha256};
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Component, Path, PathBuf},
+};
 
 /// Error type of [`StoreDir::register_project`].
 #[derive(Debug, Display, Error, Diagnostic)]
@@ -28,10 +31,8 @@ impl StoreDir {
     ///
     /// pnpm keeps symlinks in `{store}/v10/projects/{hash}` that point to project roots.
     pub fn register_project(&self, project_dir: &Path) -> Result<(), RegisterProjectError> {
-        let normalized_store_root =
-            fs::canonicalize(self.root_dir()).unwrap_or_else(|_| self.root_dir().clone());
-        let normalized_project_dir =
-            fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+        let normalized_store_root = normalize_path(self.root_dir());
+        let normalized_project_dir = normalize_path(project_dir);
         if normalized_store_root.starts_with(&normalized_project_dir) {
             return Ok(());
         }
@@ -44,20 +45,40 @@ impl StoreDir {
             }
         })?;
 
-        let hash = create_short_hash(project_dir);
+        let hash = create_short_hash(&normalized_project_dir);
         let link_path = registry_dir.join(hash);
         if link_path.exists() {
             return Ok(());
         }
 
-        symlink_dir(project_dir, &link_path).map_err(|error| {
+        symlink_dir(&normalized_project_dir, &link_path).map_err(|error| {
             RegisterProjectError::CreateRegistryLink {
                 link: link_path.display().to_string(),
-                target: project_dir.display().to_string(),
+                target: normalized_project_dir.display().to_string(),
                 error,
             }
         })
     }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
 }
 
 fn create_short_hash(project_dir: &Path) -> String {
