@@ -196,6 +196,11 @@ pub struct Npmrc {
     #[serde(default, deserialize_with = "deserialize_bool")]
     pub inject_workspace_packages: bool,
 
+    /// When enabled, local directory dependencies are not refreshed on reinstall if they are
+    /// already present in node_modules.
+    #[serde(default, deserialize_with = "deserialize_bool")]
+    pub disable_relink_local_dir_deps: bool,
+
     /// Maximum length of peer suffixes persisted to the lockfile.
     #[serde(default = "default_peers_suffix_max_length", deserialize_with = "deserialize_u16")]
     pub peers_suffix_max_length: u16,
@@ -704,6 +709,7 @@ mod tests {
         assert!(value.prefer_frozen_lockfile);
         assert!(!value.exclude_links_from_lockfile);
         assert!(!value.inject_workspace_packages);
+        assert!(!value.disable_relink_local_dir_deps);
         assert_eq!(value.peers_suffix_max_length, 1000);
         assert!(value.symlink);
         assert!(value.hoist);
@@ -743,11 +749,12 @@ mod tests {
     #[test]
     pub fn parse_lockfile_related_settings() {
         let value: Npmrc = serde_ini::from_str(
-            "exclude-links-from-lockfile=true\ninject-workspace-packages=true\npeers-suffix-max-length=77",
+            "exclude-links-from-lockfile=true\ninject-workspace-packages=true\ndisable-relink-local-dir-deps=true\npeers-suffix-max-length=77",
         )
         .unwrap();
         assert!(value.exclude_links_from_lockfile);
         assert!(value.inject_workspace_packages);
+        assert!(value.disable_relink_local_dir_deps);
         assert_eq!(value.peers_suffix_max_length, 77);
     }
 

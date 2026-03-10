@@ -298,7 +298,7 @@ mod tests {
         config.store_dir = StoreDir::new(store_dir);
         config.modules_dir = modules_dir.to_path_buf();
         config.node_linker = Default::default();
-        config.symlink = false;
+        config.symlink = true;
         config.virtual_store_dir = virtual_store_dir.to_path_buf();
         config.package_import_method = Default::default();
         config.modules_cache_max_age = 0;

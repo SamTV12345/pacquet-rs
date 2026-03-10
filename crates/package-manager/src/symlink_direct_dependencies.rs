@@ -89,7 +89,7 @@ where
                                 &spec.specifier,
                                 config,
                             )
-                );
+                ) && !config.disable_relink_local_dir_deps;
                 if dependency_path.exists() && !should_refresh_existing {
                     return;
                 }

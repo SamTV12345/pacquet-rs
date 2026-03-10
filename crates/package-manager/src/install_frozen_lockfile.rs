@@ -174,7 +174,8 @@ fn importer_dependencies_ready(
     let should_expect_direct_links =
         config.symlink || matches!(config.node_linker, NodeLinker::Hoisted);
     if !direct_dependencies.iter().all(|(alias, spec)| {
-        if matches!(&spec.version, ResolvedDependencyVersion::Link(link) if link.starts_with("file:"))
+        if !config.disable_relink_local_dir_deps
+            && matches!(&spec.version, ResolvedDependencyVersion::Link(link) if link.starts_with("file:"))
         {
             return false;
         }

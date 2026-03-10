@@ -1971,6 +1971,59 @@ fn reinstall_should_refresh_file_protocol_dependency_contents() {
 }
 
 #[test]
+fn disable_relink_local_dir_deps_should_keep_existing_file_dependency_contents() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let lib_dir = workspace.join("src");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create src dir");
+    fs::write(app_dir.join(".npmrc"), "disable-relink-local-dir-deps=true\n")
+        .expect("write app npmrc");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.0.0",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write file package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'v1';\n").expect("write source file");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "file:../src"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    fs::write(lib_dir.join("new.js"), "module.exports = 'new';\n").expect("write new source file");
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install"])
+        .assert()
+        .success();
+    assert!(!app_dir.join("node_modules/@repo/lib/new.js").exists());
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install", "--frozen-lockfile"])
+        .assert()
+        .success();
+    assert!(!app_dir.join("node_modules/@repo/lib/new.js").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
 fn file_protocol_dependency_should_write_directory_snapshot_and_install_nested_local_dependency() {
     let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
 
