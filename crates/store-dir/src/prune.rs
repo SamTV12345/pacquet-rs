@@ -167,12 +167,6 @@ fn scan_project_virtual_store(project_root: &Path) -> Result<HashSet<String>, Pr
             let Ok(entry) = entry else {
                 continue;
             };
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_dir() {
-                continue;
-            }
             let node_modules = entry.path().join("node_modules");
             if !node_modules.is_dir() {
                 continue;
@@ -194,10 +188,7 @@ fn scan_node_modules_dir(node_modules_dir: &Path) -> Result<HashSet<String>, Pru
             continue;
         };
         let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
+        if !path.is_dir() {
             continue;
         }
 
@@ -210,7 +201,7 @@ fn scan_node_modules_dir(node_modules_dir: &Path) -> Result<HashSet<String>, Pru
                     continue;
                 };
                 let scope_path = scope_entry.path();
-                if scope_entry.file_type().ok().is_some_and(|file_type| file_type.is_dir()) {
+                if scope_path.is_dir() {
                     maybe_read_package_id(&scope_path)?.into_iter().for_each(|id| {
                         package_ids.insert(id);
                     });
@@ -274,6 +265,7 @@ fn remove_empty_parent_dirs(path: &Path, stop_dir: &Path) -> Result<(), PruneErr
 mod tests {
     use super::*;
     use crate::PackageFileInfo;
+    use pacquet_fs::symlink_dir;
     use ssri::{Algorithm, IntegrityOpts};
     use tempfile::tempdir;
 
@@ -386,5 +378,35 @@ mod tests {
         assert_eq!(remaining, vec!["@pnpm.e2e/hello-world-js-bin@1.0.0".to_string()]);
         assert!(kept_cas_path.is_file());
         assert!(!pruned_cas_path.exists());
+    }
+
+    #[test]
+    fn scan_project_virtual_store_follows_symlink_entries() {
+        let dir = tempdir().expect("tempdir");
+        let project = dir.path().join("project");
+        let target = dir.path().join("target-entry");
+        let target_pkg_dir = target.join("node_modules/@pnpm.e2e/hello-world-js-bin");
+        fs::create_dir_all(&target_pkg_dir).expect("create target package dir");
+        fs::write(
+            target_pkg_dir.join("package.json"),
+            serde_json::json!({
+                "name": "@pnpm.e2e/hello-world-js-bin",
+                "version": "1.0.0"
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+
+        let virtual_store_entry =
+            project.join("node_modules/.pnpm/@pnpm.e2e+hello-world-js-bin@1.0.0");
+        fs::create_dir_all(virtual_store_entry.parent().expect("virtual store parent"))
+            .expect("create virtual store parent");
+        symlink_dir(&target, &virtual_store_entry).expect("create virtual store symlink");
+
+        let mut package_ids =
+            scan_project_virtual_store(&project).expect("scan project virtual store");
+        let mut package_ids_vec = package_ids.drain().collect::<Vec<_>>();
+        package_ids_vec.sort();
+        assert_eq!(package_ids_vec, vec!["@pnpm.e2e/hello-world-js-bin@1.0.0".to_string()]);
     }
 }
