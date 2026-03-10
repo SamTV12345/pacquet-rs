@@ -2037,6 +2037,131 @@ fn file_protocol_dependency_should_write_directory_snapshot_and_install_nested_l
 }
 
 #[test]
+fn file_protocol_injected_dependency_should_write_peer_suffixed_local_snapshot() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let app_dir = workspace.join("app");
+    let lib_dir = workspace.join("src");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create src dir");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "local-peer",
+            "version": "1.0.0",
+            "main": "index.js",
+            "peerDependencies": {
+                "is-number": "^7.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write local peer package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'local-peer';\n")
+        .expect("write local peer entrypoint");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "local-peer": "file:../src"
+            },
+            "devDependencies": {
+                "is-number": "7.0.0"
+            },
+            "dependenciesMeta": {
+                "local-peer": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let materialized_dep = app_dir.join("node_modules/local-peer");
+    assert!(materialized_dep.exists());
+    assert!(materialized_dep.join("node_modules/is-number").exists());
+
+    let lockfile_content =
+        fs::read_to_string(app_dir.join("pnpm-lock.yaml")).expect("read app lockfile");
+    assert!(lockfile_content.contains("version: file:../src(is-number@7.0.0)"));
+    assert!(lockfile_content.contains("local-peer@file:../src(is-number@7.0.0):"));
+    assert!(lockfile_content.contains("peerDependencies:"));
+    assert!(lockfile_content.contains("is-number: ^7.0.0"));
+
+    drop(mock_instance);
+    drop(root); // cleanup
+}
+
+#[test]
+fn frozen_file_protocol_injected_dependency_should_materialize_peer_variant_from_lockfile() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let app_dir = workspace.join("app");
+    let lib_dir = workspace.join("src");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create src dir");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "local-peer",
+            "version": "1.0.0",
+            "main": "index.js",
+            "peerDependencies": {
+                "is-number": "^7.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write local peer package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'local-peer';\n")
+        .expect("write local peer entrypoint");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "local-peer": "file:../src"
+            },
+            "devDependencies": {
+                "is-number": "7.0.0"
+            },
+            "dependenciesMeta": {
+                "local-peer": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+    fs::remove_dir_all(app_dir.join("node_modules")).expect("remove node_modules");
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install", "--frozen-lockfile"])
+        .assert()
+        .success();
+
+    let materialized_dep = app_dir.join("node_modules/local-peer");
+    assert!(materialized_dep.exists());
+    assert!(materialized_dep.join("node_modules/is-number").exists());
+
+    drop(mock_instance);
+    drop(root); // cleanup
+}
+
+#[test]
 fn npm_alias_dependency_should_install_under_alias_name() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();

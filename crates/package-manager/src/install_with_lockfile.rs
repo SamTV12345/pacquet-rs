@@ -19,7 +19,7 @@ use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_registry::{PackageTag, PackageVersion};
 use pacquet_tarball::MemCache;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -106,6 +106,7 @@ where
                     config,
                     &package_snapshots,
                     &workspace_root_peer_overrides,
+                    manifest.path(),
                     lockfile_dir,
                     name,
                     &local_dep_path,
@@ -446,6 +447,7 @@ where
         config: &'static Npmrc,
         package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
         workspace_root_peer_overrides: &HashMap<String, String>,
+        current_manifest_path: &Path,
         lockfile_dir: &Path,
         dependency_name: &str,
         local_dep_path: &Path,
@@ -459,14 +461,56 @@ where
             .and_then(|manifest| manifest.value().get("name"))
             .and_then(|value| value.as_str())
             .unwrap_or(dependency_name);
+        let peer_dependencies = local_manifest
+            .as_ref()
+            .and_then(|manifest| json_string_map(manifest.value().get("peerDependencies")));
+        let mut resolved_local_peers = BTreeMap::<String, ResolvedDependencyVersion>::new();
+        let mut snapshot_dependencies = HashMap::new();
+
+        if let Some(peer_dependencies) = peer_dependencies.as_ref() {
+            for (peer_name, peer_range) in peer_dependencies {
+                let resolved_range = apply_workspace_root_peer_override(
+                    config,
+                    workspace_root_peer_overrides,
+                    Some(peer_dependencies),
+                    peer_name,
+                    peer_range,
+                );
+                let Some(resolved_peer) = Self::resolve_local_peer_dependency(
+                    resolved_packages,
+                    http_client,
+                    config,
+                    package_snapshots,
+                    workspace_root_peer_overrides,
+                    current_manifest_path,
+                    lockfile_dir,
+                    peer_name,
+                    &resolved_range,
+                    prefer_offline,
+                    offline,
+                )
+                .await
+                else {
+                    continue;
+                };
+
+                resolved_local_peers.insert(peer_name.clone(), resolved_peer.version.clone());
+                snapshot_dependencies.insert(
+                    Self::parse_pkg_name(peer_name),
+                    resolved_version_to_snapshot_dependency(peer_name, &resolved_peer.version),
+                );
+            }
+        }
+
+        let normalized_ref_with_peers =
+            append_peer_suffix_to_local_reference(normalized_ref, &resolved_local_peers);
         let dependency_path = DependencyPath::local_file(
             Self::parse_pkg_name(package_name),
-            normalized_ref.to_string(),
+            normalized_ref_with_peers.clone(),
         );
         let virtual_store_name = dependency_path.to_virtual_store_name();
 
         if resolved_packages.insert(virtual_store_name) {
-            let mut snapshot_dependencies = HashMap::new();
             if let Some(local_manifest) = &local_manifest {
                 for (child_name, child_version_range) in
                     local_manifest.dependencies([DependencyGroup::Prod, DependencyGroup::Optional])
@@ -491,6 +535,7 @@ where
                             config,
                             package_snapshots,
                             workspace_root_peer_overrides,
+                            local_manifest.path(),
                             lockfile_dir,
                             child_name,
                             &local_child_path,
@@ -527,17 +572,10 @@ where
                     .await;
                     snapshot_dependencies.insert(
                         Self::parse_pkg_name(child_name),
-                        match resolved_dependency.version {
-                            ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
-                                PackageSnapshotDependency::PkgVerPeer(ver_peer)
-                            }
-                            ResolvedDependencyVersion::PkgNameVerPeer(name_ver_peer) => {
-                                PackageSnapshotDependency::PkgNameVerPeer(name_ver_peer)
-                            }
-                            ResolvedDependencyVersion::Link(link) => {
-                                PackageSnapshotDependency::Link(link)
-                            }
-                        },
+                        resolved_version_to_snapshot_dependency(
+                            child_name,
+                            &resolved_dependency.version,
+                        ),
                     );
                 }
             }
@@ -563,7 +601,7 @@ where
                     prepare: None,
                     requires_build: None,
                     bundled_dependencies: None,
-                    peer_dependencies: None,
+                    peer_dependencies,
                     peer_dependencies_meta: None,
                     dependencies: (!snapshot_dependencies.is_empty())
                         .then_some(snapshot_dependencies),
@@ -575,7 +613,85 @@ where
             );
         }
 
-        ResolvedPackage { version: ResolvedDependencyVersion::Link(normalized_ref.to_string()) }
+        ResolvedPackage {
+            version: ResolvedDependencyVersion::Link(normalized_ref_with_peers.to_string()),
+        }
+    }
+
+    #[async_recursion]
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_local_peer_dependency(
+        resolved_packages: &ResolvedPackages,
+        http_client: &ThrottledClient,
+        config: &'static Npmrc,
+        package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
+        workspace_root_peer_overrides: &HashMap<String, String>,
+        current_manifest_path: &Path,
+        lockfile_dir: &Path,
+        name: &str,
+        version_range: &str,
+        prefer_offline: bool,
+        offline: bool,
+    ) -> Option<ResolvedPackage> {
+        let available_specs = read_dependency_specs(current_manifest_path);
+        let requested_range =
+            available_specs.get(name).map(String::as_str).unwrap_or(version_range);
+
+        if let Some((_, local_dep_path, should_symlink)) =
+            resolve_local_dependency(current_manifest_path, requested_range)
+        {
+            let protocol = if should_symlink { "link:" } else { "file:" };
+            let normalized_ref = format!(
+                "{protocol}{}",
+                to_relative_path(
+                    current_manifest_path.parent().unwrap_or_else(|| Path::new(".")),
+                    &local_dep_path
+                )
+                .replace('\\', "/")
+            );
+            if should_symlink {
+                return Some(ResolvedPackage {
+                    version: ResolvedDependencyVersion::Link(normalized_ref),
+                });
+            }
+
+            return Some(
+                Self::snapshot_local_directory_package(
+                    resolved_packages,
+                    http_client,
+                    config,
+                    package_snapshots,
+                    workspace_root_peer_overrides,
+                    current_manifest_path,
+                    lockfile_dir,
+                    name,
+                    &local_dep_path,
+                    &normalized_ref,
+                    prefer_offline,
+                    offline,
+                )
+                .await,
+            );
+        }
+
+        if available_specs.contains_key(name) || config.auto_install_peers {
+            return Some(
+                Self::resolve_and_snapshot_package(
+                    resolved_packages,
+                    http_client,
+                    config,
+                    package_snapshots,
+                    workspace_root_peer_overrides,
+                    name,
+                    requested_range,
+                    prefer_offline,
+                    offline,
+                )
+                .await,
+            );
+        }
+
+        None
     }
 
     fn build_project_snapshot(
@@ -886,6 +1002,61 @@ fn dependency_meta_injected_json(
         .and_then(|value| value.get("injected"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
+}
+
+fn json_string_map(value: Option<&serde_json::Value>) -> Option<HashMap<String, String>> {
+    let object = value?.as_object()?;
+    let map = object
+        .iter()
+        .filter_map(|(name, value)| {
+            value.as_str().map(|value| (name.to_string(), value.to_string()))
+        })
+        .collect::<HashMap<_, _>>();
+    (!map.is_empty()).then_some(map)
+}
+
+fn resolved_version_to_snapshot_dependency(
+    dependency_name: &str,
+    resolved_version: &ResolvedDependencyVersion,
+) -> PackageSnapshotDependency {
+    match resolved_version {
+        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
+            PackageSnapshotDependency::PkgVerPeer(ver_peer.clone())
+        }
+        ResolvedDependencyVersion::PkgNameVerPeer(name_ver_peer) => {
+            PackageSnapshotDependency::PkgNameVerPeer(name_ver_peer.clone())
+        }
+        ResolvedDependencyVersion::Link(link) => {
+            let _ = dependency_name;
+            PackageSnapshotDependency::Link(link.clone())
+        }
+    }
+}
+
+fn append_peer_suffix_to_local_reference(
+    reference: &str,
+    resolved_peers: &BTreeMap<String, ResolvedDependencyVersion>,
+) -> String {
+    if resolved_peers.is_empty() {
+        return reference.to_string();
+    }
+
+    let mut suffixed = reference.to_string();
+    for (peer_name, peer_version) in resolved_peers {
+        let peer_repr = match peer_version {
+            ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
+                format!("{peer_name}@{ver_peer}")
+            }
+            ResolvedDependencyVersion::PkgNameVerPeer(name_ver_peer) => {
+                format!("{}@{}", name_ver_peer.name, name_ver_peer.suffix)
+            }
+            ResolvedDependencyVersion::Link(link) => format!("{peer_name}@{link}"),
+        };
+        suffixed.push('(');
+        suffixed.push_str(&peer_repr);
+        suffixed.push(')');
+    }
+    suffixed
 }
 
 fn normalize_local_dependency_path(project_dir: &Path, target: &str) -> PathBuf {
@@ -1457,6 +1628,25 @@ mod tests {
     }
 
     #[test]
+    fn append_peer_suffix_to_local_reference_appends_sorted_resolved_peers() {
+        let resolved_peers = BTreeMap::from([
+            (
+                "is-even".to_string(),
+                ResolvedDependencyVersion::PkgVerPeer("1.0.0".parse().expect("version")),
+            ),
+            (
+                "is-number".to_string(),
+                ResolvedDependencyVersion::PkgVerPeer("7.0.0".parse().expect("version")),
+            ),
+        ]);
+
+        assert_eq!(
+            append_peer_suffix_to_local_reference("file:../src", &resolved_peers),
+            "file:../src(is-even@1.0.0)(is-number@7.0.0)"
+        );
+    }
+
+    #[test]
     fn expected_registry_tarball_uses_scoped_registry_from_config() {
         let dir = tempdir().expect("tempdir");
         fs::write(
@@ -1566,7 +1756,12 @@ mod tests {
             ResolvedDependencySpec {
                 specifier: "^1.0.0".to_string(),
                 version: ResolvedDependencyVersion::PkgVerPeer(
-                    current_path.package_specifier.suffix.clone(),
+                    current_path
+                        .package_specifier
+                        .registry_specifier()
+                        .expect("registry specifier")
+                        .suffix
+                        .clone(),
                 ),
             },
         );
@@ -1582,7 +1777,15 @@ mod tests {
         let ResolvedDependencyVersion::PkgVerPeer(ver_peer) = &resolved.version else {
             panic!("expected pkgverpeer");
         };
-        assert_eq!(ver_peer.to_string(), better_path.package_specifier.suffix.to_string());
+        assert_eq!(
+            ver_peer.to_string(),
+            better_path
+                .package_specifier
+                .registry_specifier()
+                .expect("registry specifier")
+                .suffix
+                .to_string()
+        );
     }
 
     #[test]
@@ -1603,7 +1806,12 @@ mod tests {
             ResolvedDependencySpec {
                 specifier: "^1.0.0".to_string(),
                 version: ResolvedDependencyVersion::PkgVerPeer(
-                    current_path.package_specifier.suffix.clone(),
+                    current_path
+                        .package_specifier
+                        .registry_specifier()
+                        .expect("registry specifier")
+                        .suffix
+                        .clone(),
                 ),
             },
         );
@@ -1619,6 +1827,14 @@ mod tests {
         let ResolvedDependencyVersion::PkgVerPeer(ver_peer) = &resolved.version else {
             panic!("expected pkgverpeer");
         };
-        assert_eq!(ver_peer.to_string(), current_path.package_specifier.suffix.to_string());
+        assert_eq!(
+            ver_peer.to_string(),
+            current_path
+                .package_specifier
+                .registry_specifier()
+                .expect("registry specifier")
+                .suffix
+                .to_string()
+        );
     }
 }

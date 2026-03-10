@@ -474,6 +474,7 @@ mod tests {
         let received = direct_dependency_virtual_store_location(
             &alias,
             &ResolvedDependencyVersion::PkgNameVerPeer(target.clone()),
+            None,
         )
         .expect("resolved location");
         assert_eq!(received.0, "@scope/dep");
@@ -487,6 +488,7 @@ mod tests {
         let received = direct_dependency_virtual_store_location(
             &alias,
             &ResolvedDependencyVersion::Link("link:../dep".to_string()),
+            None,
         );
         assert!(received.is_none());
     }
@@ -498,6 +500,7 @@ mod tests {
         let received = direct_dependency_virtual_store_location(
             &alias,
             &ResolvedDependencyVersion::PkgVerPeer(version.clone()),
+            None,
         )
         .expect("resolved location");
         assert_eq!(received.0, "dep");
@@ -551,7 +554,12 @@ mod tests {
             ResolvedDependencySpec {
                 specifier: "^1.0.0".to_string(),
                 version: ResolvedDependencyVersion::PkgVerPeer(
-                    current_path.package_specifier.suffix.clone(),
+                    current_path
+                        .package_specifier
+                        .registry_specifier()
+                        .expect("registry specifier")
+                        .suffix
+                        .clone(),
                 ),
             },
         );
@@ -567,7 +575,15 @@ mod tests {
         let ResolvedDependencyVersion::PkgVerPeer(ver_peer) = &resolved.version else {
             panic!("expected pkgverpeer");
         };
-        assert_eq!(ver_peer.to_string(), better_path.package_specifier.suffix.to_string());
+        assert_eq!(
+            ver_peer.to_string(),
+            better_path
+                .package_specifier
+                .registry_specifier()
+                .expect("registry specifier")
+                .suffix
+                .to_string()
+        );
     }
 
     #[test]
@@ -588,7 +604,12 @@ mod tests {
             ResolvedDependencySpec {
                 specifier: "^1.0.0".to_string(),
                 version: ResolvedDependencyVersion::PkgVerPeer(
-                    current_path.package_specifier.suffix.clone(),
+                    current_path
+                        .package_specifier
+                        .registry_specifier()
+                        .expect("registry specifier")
+                        .suffix
+                        .clone(),
                 ),
             },
         );
@@ -604,6 +625,14 @@ mod tests {
         let ResolvedDependencyVersion::PkgVerPeer(ver_peer) = &resolved.version else {
             panic!("expected pkgverpeer");
         };
-        assert_eq!(ver_peer.to_string(), current_path.package_specifier.suffix.to_string());
+        assert_eq!(
+            ver_peer.to_string(),
+            current_path
+                .package_specifier
+                .registry_specifier()
+                .expect("registry specifier")
+                .suffix
+                .to_string()
+        );
     }
 }
