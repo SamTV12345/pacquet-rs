@@ -179,10 +179,8 @@ fn store_prune_should_remove_only_unreferenced_packages() {
     assert!(before_ids.contains(&"@pnpm.e2e/hello-world-js-bin@1.0.0".to_string()));
     assert!(before_ids.contains(&"@pnpm/xyz@1.0.0".to_string()));
     let projects_dir = store_dir.join("v10/projects");
-    if projects_dir.is_dir() {
-        let project_registry_entries =
-            fs::read_dir(&projects_dir).expect("read store project registry").count();
-        assert!(project_registry_entries >= 1);
+    if projects_dir.exists() {
+        fs::remove_dir_all(&projects_dir).expect("remove store project registry");
     }
     assert!(workspace.join("node_modules/.pnpm").is_dir());
 

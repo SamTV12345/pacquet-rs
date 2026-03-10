@@ -105,7 +105,15 @@ impl StoreCommand {
                 }
             }
             StoreCommand::Prune => {
-                config().store_dir.prune().wrap_err("pruning store")?;
+                let config = config();
+                let project_dir = std::env::current_dir()
+                    .into_diagnostic()
+                    .wrap_err("resolve current directory for store prune")?;
+                config
+                    .store_dir
+                    .register_project(&project_dir)
+                    .wrap_err("register current project for store prune")?;
+                config.store_dir.prune().wrap_err("pruning store")?;
             }
             StoreCommand::Path => {
                 println!("{}", config().store_dir.display());
