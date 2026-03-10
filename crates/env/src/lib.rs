@@ -3,7 +3,8 @@ use flate2::read::GzDecoder;
 use miette::Diagnostic;
 use node_semver::{Range, Version};
 use pacquet_fs::symlink_dir;
-use pacquet_network::ThrottledClient;
+use pacquet_network::{RegistryTlsConfig, ThrottledClient};
+use pacquet_npmrc::Npmrc;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -69,6 +70,10 @@ impl EnvManager {
     pub fn from_system() -> Result<Self, EnvError> {
         let bin_dir =
             std::env::current_exe().ok().and_then(|path| path.parent().map(Path::to_path_buf));
+        let npmrc =
+            Npmrc::current(std::env::current_dir, home::home_dir, Npmrc::new).map_err(|error| {
+                EnvError::Message { message: format!("Could not load .npmrc: {error}") }
+            })?;
         let home_dir = std::env::var_os("PNPM_HOME")
             .or_else(|| std::env::var_os("PACQUET_HOME"))
             .map(PathBuf::from)
@@ -81,12 +86,7 @@ impl EnvManager {
             std::env::current_dir().ok(),
             home::home_dir().map(|path| path.join(".npmrc")),
         );
-        Ok(Self {
-            home_dir,
-            bin_dir,
-            raw_config,
-            http_client: ThrottledClient::new_from_cpu_count(),
-        })
+        Ok(Self { home_dir, bin_dir, raw_config, http_client: new_http_client(&npmrc) })
     }
 
     pub async fn add_versions(
@@ -470,6 +470,7 @@ fn version_cmp(left: &str, right: &str) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pacquet_npmrc::RegistrySslConfig;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -528,6 +529,38 @@ mod tests {
         assert_eq!(normalized_arch_for_node("darwin", "arm64", "16.0.0"), "arm64");
         assert_eq!(normalized_arch_for_node("linux", "arm", "20.11.0"), "armv7l");
         assert_eq!(normalized_arch_for_node("win32", "x86", "20.11.0"), "x86");
+    }
+
+    #[test]
+    fn new_http_client_uses_npmrc_network_settings() {
+        let mut config = Npmrc::new();
+        config.network_concurrency = 3;
+        config.fetch_timeout = 1_234;
+        config.strict_ssl = false;
+        config.ca =
+            vec!["-----BEGIN CERTIFICATE-----\nZm9v\n-----END CERTIFICATE-----".to_string()];
+        config.https_proxy = Some("http://secure-proxy.example".to_string());
+        config.http_proxy = Some("http://plain-proxy.example".to_string());
+        config.no_proxy = Some("localhost,127.0.0.1".to_string());
+        config.ssl_configs.insert(
+            "//nodejs.org/download/release/".to_string(),
+            RegistrySslConfig {
+                ca: Some("ca".to_string()),
+                cert: Some("cert".to_string()),
+                key: Some("key".to_string()),
+            },
+        );
+
+        let client = new_http_client(&config);
+
+        assert_eq!(client.concurrency_limit(), 3);
+        assert_eq!(client.request_timeout_ms(), Some(1_234));
+        assert!(!client.strict_ssl());
+        assert_eq!(client.ca_cert_count(), 1);
+        assert_eq!(client.registry_tls_config_count(), 1);
+        assert_eq!(client.https_proxy(), Some("http://secure-proxy.example"));
+        assert_eq!(client.http_proxy(), Some("http://plain-proxy.example"));
+        assert_eq!(client.no_proxy(), Some("localhost,127.0.0.1"));
     }
 }
 
@@ -680,6 +713,36 @@ fn get_node_mirror(raw_config: &HashMap<String, String>, release_channel: &str) 
         .cloned()
         .unwrap_or_else(|| format!("https://nodejs.org/download/{release_channel}/"));
     if mirror.ends_with('/') { mirror } else { format!("{mirror}/") }
+}
+
+fn network_tls_configs(config: &Npmrc) -> HashMap<String, RegistryTlsConfig> {
+    config
+        .ssl_configs
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                RegistryTlsConfig {
+                    ca: value.ca.clone(),
+                    cert: value.cert.clone(),
+                    key: value.key.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn new_http_client(config: &Npmrc) -> ThrottledClient {
+    ThrottledClient::new_with_tls_options(
+        config.network_concurrency as usize,
+        Some(config.fetch_timeout),
+        config.strict_ssl,
+        config.ca.clone(),
+        network_tls_configs(config),
+        config.https_proxy.clone(),
+        config.http_proxy.clone(),
+        config.no_proxy.clone(),
+    )
 }
 
 impl EnvManager {
@@ -897,7 +960,7 @@ impl EnvManager {
         let url_string = url.to_string();
         let response = self
             .http_client
-            .run_with_permit(|client| client.get(url).send())
+            .run_with_permit_for_url(url, |client| client.get(url).send())
             .await
             .map_err(|error| EnvError::Message {
                 message: format!("Could not fetch {}: {error}", url_string),
@@ -915,7 +978,7 @@ impl EnvManager {
         let url_string = url.to_string();
         let response = self
             .http_client
-            .run_with_permit(|client| client.get(url).send())
+            .run_with_permit_for_url(url, |client| client.get(url).send())
             .await
             .map_err(|error| EnvError::Message {
                 message: format!("Could not fetch {}: {error}", url_string),

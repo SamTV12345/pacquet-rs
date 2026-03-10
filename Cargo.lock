@@ -1593,6 +1593,7 @@ dependencies = [
  "node-semver",
  "pacquet-fs",
  "pacquet-network",
+ "pacquet-npmrc",
  "pretty_assertions",
  "serde",
  "serde_json",

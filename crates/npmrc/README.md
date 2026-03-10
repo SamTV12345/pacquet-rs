@@ -46,10 +46,10 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 | ✅    | network_concurrency | limits concurrent HTTP requests |
 | ✅    | fetch_timeout       | request timeout (milliseconds) |
 | ✅    | strict_ssl          | controls TLS certificate validation |
-| ~    | proxy / https_proxy | pnpm-style proxy derivation is parsed from `.npmrc` and wired into the HTTP client |
-| ~    | no_proxy / noproxy  | pnpm-style `noproxy` normalization and bypass list wiring are in place |
-| ~    | cafile / ca         | PEM CA bundle is read from `.npmrc` and wired into the HTTP client |
-| ~    | `<URL>:ca/cert/key` | inline per-registry TLS config is parsed and selected by request URL |
+| ~    | proxy / https_proxy | pnpm-style proxy derivation is parsed from `.npmrc` and wired into install/store/env HTTP clients |
+| ~    | no_proxy / noproxy  | pnpm-style `noproxy` normalization and bypass list wiring are in place across install/store/env HTTP clients |
+| ~    | cafile / ca         | PEM CA bundle is read from `.npmrc` and wired into install/store/env HTTP clients |
+| ~    | `<URL>:ca/cert/key` | inline per-registry TLS config is parsed and selected by request URL across install/store/env HTTP clients |
 
 # Peer Dependency Settings
 
