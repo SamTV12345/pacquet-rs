@@ -18,6 +18,7 @@ pub struct CreateVirtualStore<'a> {
     pub http_client: &'a ThrottledClient,
     pub config: &'static Npmrc,
     pub packages: Option<&'a HashMap<DependencyPath, PackageSnapshot>>,
+    pub lockfile_dir: &'a std::path::Path,
     pub resolved_packages: Option<&'a ResolvedPackages>,
     pub offline: bool,
     pub force: bool,
@@ -26,8 +27,15 @@ pub struct CreateVirtualStore<'a> {
 impl<'a> CreateVirtualStore<'a> {
     /// Execute the subroutine.
     pub async fn run(self) {
-        let CreateVirtualStore { http_client, config, packages, resolved_packages, offline, force } =
-            self;
+        let CreateVirtualStore {
+            http_client,
+            config,
+            packages,
+            lockfile_dir,
+            resolved_packages,
+            offline,
+            force,
+        } = self;
 
         let packages = if let Some(packages) = packages {
             packages
@@ -54,6 +62,7 @@ impl<'a> CreateVirtualStore<'a> {
                     config,
                     dependency_path,
                     package_snapshot,
+                    lockfile_dir,
                     offline,
                     force,
                 }
@@ -188,7 +197,10 @@ fn select_hoisted_packages(
 ) -> BTreeMap<String, PkgNameVerPeer> {
     let mut selected = BTreeMap::<String, PkgNameVerPeer>::new();
     for dependency_path in packages.keys() {
-        let package_specifier = dependency_path.package_specifier.clone();
+        let Some(package_specifier) = dependency_path.package_specifier.registry_specifier() else {
+            continue;
+        };
+        let package_specifier = package_specifier.clone();
         let package_name = package_specifier.name.to_string();
         if !matches_patterns(&package_name, hoist_patterns) {
             continue;

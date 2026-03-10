@@ -3,7 +3,7 @@ use flate2::read::GzDecoder;
 use miette::Diagnostic;
 use node_semver::{Range, Version};
 use pacquet_fs::symlink_dir;
-use pacquet_network::{RegistryTlsConfig, ThrottledClient};
+use pacquet_network::{RegistryTlsConfig, ThrottledClient, ThrottledClientOptions};
 use pacquet_npmrc::Npmrc;
 use serde::Deserialize;
 use serde_json::Value;
@@ -733,15 +733,17 @@ fn network_tls_configs(config: &Npmrc) -> HashMap<String, RegistryTlsConfig> {
 }
 
 fn new_http_client(config: &Npmrc) -> ThrottledClient {
-    ThrottledClient::new_with_tls_options(
+    ThrottledClient::new_with_options(
         config.network_concurrency as usize,
-        Some(config.fetch_timeout),
-        config.strict_ssl,
-        config.ca.clone(),
-        network_tls_configs(config),
-        config.https_proxy.clone(),
-        config.http_proxy.clone(),
-        config.no_proxy.clone(),
+        ThrottledClientOptions {
+            request_timeout_ms: Some(config.fetch_timeout),
+            strict_ssl: config.strict_ssl,
+            ca_certs: config.ca.clone(),
+            registry_tls_configs: network_tls_configs(config),
+            https_proxy: config.https_proxy.clone(),
+            http_proxy: config.http_proxy.clone(),
+            no_proxy: config.no_proxy.clone(),
+        },
     )
 }
 

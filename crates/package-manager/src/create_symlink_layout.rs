@@ -23,9 +23,13 @@ pub fn create_symlink_layout(
                 (package_specifier.to_virtual_store_name(), package_specifier.name.to_string())
             }
             PackageSnapshotDependency::DependencyPath(dependency_path) => (
-                dependency_path.package_specifier.to_virtual_store_name(),
-                dependency_path.package_specifier.name.to_string(),
+                dependency_path.to_virtual_store_name(),
+                dependency_path.package_name().to_string(),
             ),
+            PackageSnapshotDependency::Link(link) => {
+                let virtual_store_name = local_file_virtual_store_name(alias, link);
+                (virtual_store_name, alias.to_string())
+            }
         };
         let alias_str = alias.to_string();
         let symlink_target =
@@ -51,6 +55,14 @@ pub fn create_symlink_layout(
         };
         symlink_result.unwrap_or_else(|error| panic!("symlink pkg should succeed: {error}"));
     }
+}
+
+fn local_file_virtual_store_name(alias: &PkgName, link: &str) -> String {
+    if link.starts_with("file:") {
+        return pacquet_lockfile::DependencyPath::local_file(alias.clone(), link.to_string())
+            .to_virtual_store_name();
+    }
+    link.to_string()
 }
 
 fn path_points_to_target(target: &Path, link: &Path) -> bool {

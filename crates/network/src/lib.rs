@@ -16,6 +16,17 @@ pub struct RegistryTlsConfig {
     pub key: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThrottledClientOptions {
+    pub request_timeout_ms: Option<u64>,
+    pub strict_ssl: bool,
+    pub ca_certs: Vec<String>,
+    pub registry_tls_configs: HashMap<String, RegistryTlsConfig>,
+    pub https_proxy: Option<String>,
+    pub http_proxy: Option<String>,
+    pub no_proxy: Option<String>,
+}
+
 /// Wrapper around [`Client`] with concurrent request limit enforced by the [`Semaphore`] mechanism.
 #[derive(Debug)]
 pub struct ThrottledClient {
@@ -75,38 +86,20 @@ impl ThrottledClient {
 
     /// Construct a new throttled client with a fixed permit count.
     pub fn new_with_limit(permits: usize) -> Self {
-        Self::new_with_options(permits, None, true)
+        Self::new_with_options(permits, ThrottledClientOptions::default())
     }
 
-    /// Construct a new throttled client with a fixed permit count and optional request timeout.
-    pub fn new_with_options(
-        permits: usize,
-        request_timeout_ms: Option<u64>,
-        strict_ssl: bool,
-    ) -> Self {
-        Self::new_with_tls_options(
-            permits,
+    /// Construct a new throttled client with custom options.
+    pub fn new_with_options(permits: usize, options: ThrottledClientOptions) -> Self {
+        let ThrottledClientOptions {
             request_timeout_ms,
             strict_ssl,
-            Vec::new(),
-            HashMap::new(),
-            None,
-            None,
-            None,
-        )
-    }
-
-    /// Construct a new throttled client with TLS materials from `.npmrc`.
-    pub fn new_with_tls_options(
-        permits: usize,
-        request_timeout_ms: Option<u64>,
-        strict_ssl: bool,
-        ca_certs: Vec<String>,
-        registry_tls_configs: HashMap<String, RegistryTlsConfig>,
-        https_proxy: Option<String>,
-        http_proxy: Option<String>,
-        no_proxy: Option<String>,
-    ) -> Self {
+            ca_certs,
+            registry_tls_configs,
+            https_proxy,
+            http_proxy,
+            no_proxy,
+        } = options;
         let permits = permits.max(1);
         let semaphore = permits.pipe(Semaphore::new);
         let client = Arc::new(build_client(

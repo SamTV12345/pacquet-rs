@@ -1,4 +1,4 @@
-use crate::{CreateVirtualDirBySnapshot, CreateVirtualDirError, progress_reporter};
+use crate::{CreateVirtualDirBySnapshot, CreateVirtualDirError, link_package, progress_reporter};
 use derive_more::{Display, Error};
 use miette::Diagnostic;
 use pacquet_lockfile::{DependencyPath, LockfileResolution, PackageSnapshot, PkgNameVerPeer};
@@ -9,7 +9,7 @@ use pacquet_tarball::{DownloadTarballToStore, TarballError};
 use pipe_trait::Pipe;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// This subroutine downloads a package tarball, extracts it, installs it to a virtual dir,
 /// then creates the symlink layout for the package.
@@ -19,6 +19,7 @@ pub struct InstallPackageBySnapshot<'a> {
     pub config: &'static Npmrc,
     pub dependency_path: &'a DependencyPath,
     pub package_snapshot: &'a PackageSnapshot,
+    pub lockfile_dir: &'a Path,
     pub offline: bool,
     pub force: bool,
 }
@@ -28,6 +29,8 @@ pub struct InstallPackageBySnapshot<'a> {
 pub enum InstallPackageBySnapshotError {
     DownloadTarball(TarballError),
     CreateVirtualDir(CreateVirtualDirError),
+    #[display("{_0}")]
+    CopyLocalDir(#[error(not(source))] String),
 }
 
 impl<'a> InstallPackageBySnapshot<'a> {
@@ -38,35 +41,73 @@ impl<'a> InstallPackageBySnapshot<'a> {
             config,
             dependency_path,
             package_snapshot,
+            lockfile_dir,
             offline,
             force,
         } = self;
         let PackageSnapshot { resolution, .. } = package_snapshot;
         let DependencyPath { custom_registry, package_specifier } = dependency_path;
 
+        let save_path = config
+            .virtual_store_dir
+            .join(package_specifier.to_virtual_store_name())
+            .join("node_modules")
+            .join(package_specifier.name().to_string());
+
+        let directory_source = match resolution {
+            LockfileResolution::Directory(directory_resolution) => {
+                Some(resolve_directory_source(lockfile_dir, &directory_resolution.directory))
+            }
+            _ => None,
+        };
+
         let (tarball_url, integrity) = match resolution {
             LockfileResolution::Tarball(tarball_resolution) => {
+                let registry_specifier =
+                    package_specifier.registry_specifier().unwrap_or_else(|| {
+                        panic!("registry/tarball snapshot requires registry package specifier")
+                    });
                 let integrity = tarball_resolution.integrity.as_ref().unwrap_or_else(|| {
                     // TODO: how to handle the absent of integrity field?
                     panic!("Current implementation requires integrity, but {dependency_path} doesn't have it");
                 });
+                let _ = registry_specifier;
                 (tarball_resolution.tarball.as_str().pipe(Cow::Borrowed), integrity)
             }
             LockfileResolution::Registry(registry_resolution) => {
+                let registry_specifier =
+                    package_specifier.registry_specifier().unwrap_or_else(|| {
+                        panic!("registry/tarball snapshot requires registry package specifier")
+                    });
                 let registry = registry_for_dependency_path(
                     config,
                     custom_registry.as_deref(),
-                    &package_specifier.name.to_string(),
+                    &package_specifier.name().to_string(),
                 );
                 let registry = registry.strip_suffix('/').unwrap_or(&registry);
-                let PkgNameVerPeer { name, suffix: ver_peer } = package_specifier;
+                let PkgNameVerPeer { name, suffix: ver_peer } = registry_specifier;
                 let version = ver_peer.version();
                 let bare_name = name.bare.as_str();
                 let tarball_url = format!("{registry}/{name}/-/{bare_name}-{version}.tgz");
                 let integrity = &registry_resolution.integrity;
                 (Cow::Owned(tarball_url), integrity)
             }
-            LockfileResolution::Directory(_) | LockfileResolution::Git(_) => {
+            LockfileResolution::Directory(_) => {
+                let source = directory_source.as_ref().expect("directory source");
+                if save_path.exists() {
+                    std::fs::remove_dir_all(&save_path).unwrap_or_else(|error| {
+                        panic!(
+                            "remove existing local virtual store package should succeed: {error}"
+                        )
+                    });
+                }
+                link_package(false, source, &save_path).map_err(|error| {
+                    InstallPackageBySnapshotError::CopyLocalDir(error.to_string())
+                })?;
+                progress_reporter::linked();
+                return Ok(true);
+            }
+            LockfileResolution::Git(_) => {
                 panic!(
                     "Only TarballResolution and RegistryResolution is supported at the moment, but {dependency_path} requires {resolution:?}"
                 );
@@ -74,13 +115,11 @@ impl<'a> InstallPackageBySnapshot<'a> {
         };
 
         // TODO: skip when already exists in store?
+        let registry_specifier = package_specifier.registry_specifier().unwrap_or_else(|| {
+            panic!("registry/tarball snapshot requires registry package specifier")
+        });
         let package_id =
-            format!("{}@{}", package_specifier.name, package_specifier.suffix.version());
-        let save_path = config
-            .virtual_store_dir
-            .join(package_specifier.to_virtual_store_name())
-            .join("node_modules")
-            .join(package_specifier.name.to_string());
+            format!("{}@{}", registry_specifier.name, registry_specifier.suffix.version());
 
         if force && save_path.exists() {
             std::fs::remove_dir_all(&save_path).unwrap_or_else(|error| {
@@ -162,6 +201,14 @@ fn package_is_already_imported(
         return false;
     };
     save_path.join(file_name).exists()
+}
+
+fn resolve_directory_source(lockfile_dir: &Path, directory: &str) -> PathBuf {
+    let candidate = Path::new(directory);
+    if candidate.is_absolute() {
+        return candidate.to_path_buf();
+    }
+    lockfile_dir.join(candidate)
 }
 
 fn representative_file_name<'a>(file_names: impl Iterator<Item = &'a str>) -> Option<&'a str> {

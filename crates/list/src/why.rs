@@ -167,12 +167,24 @@ pub fn render_why(opts: WhyOptions<'_>, report_as: WhyReportAs) -> miette::Resul
     for (dep_path, snapshot) in packages {
         let package_key = package_key(dep_path);
         let package_name =
-            snapshot.name.clone().unwrap_or_else(|| dep_path.package_specifier.name.to_string());
-        let full_version = dep_path.package_specifier.suffix.to_string();
-        let version = snapshot
-            .version
-            .clone()
-            .unwrap_or_else(|| dep_path.package_specifier.suffix.version().to_string());
+            snapshot.name.clone().unwrap_or_else(|| dep_path.package_name().to_string());
+        let (full_version, version) = dep_path
+            .package_specifier
+            .registry_specifier()
+            .map(|specifier| {
+                (
+                    specifier.suffix.to_string(),
+                    snapshot
+                        .version
+                        .clone()
+                        .unwrap_or_else(|| specifier.suffix.version().to_string()),
+                )
+            })
+            .unwrap_or_else(|| {
+                let full_version = dep_path.local_file_reference().unwrap_or_default().to_string();
+                let version = snapshot.version.clone().unwrap_or_else(|| full_version.clone());
+                (full_version, version)
+            });
 
         package_lookups.insert(
             package_name.clone(),
@@ -849,6 +861,13 @@ fn resolve_snapshot_dependency(
         ),
         PackageSnapshotDependency::DependencyPath(dependency_path) => {
             Some(package_key(dependency_path))
+        }
+        PackageSnapshotDependency::Link(link) => {
+            if link.starts_with("file:") {
+                Some(package_key(&DependencyPath::local_file(alias.parse().ok()?, link.clone())))
+            } else {
+                None
+            }
         }
     }
 }

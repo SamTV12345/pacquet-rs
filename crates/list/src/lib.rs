@@ -73,6 +73,7 @@ impl From<PackageSnapshotDependency> for SnapshotDependencyRef {
             PackageSnapshotDependency::DependencyPath(value) => {
                 SnapshotDependencyRef::DependencyPath(value)
             }
+            PackageSnapshotDependency::Link(value) => SnapshotDependencyRef::Raw(value),
         }
     }
 }
@@ -573,8 +574,17 @@ fn dependency_view_from_snapshot(
             }
         }
         SnapshotDependencyRef::DependencyPath(dependency_path) => {
-            let from = dependency_path.package_specifier.name.to_string();
-            let full_version = dependency_path.package_specifier.suffix.to_string();
+            let from = dependency_path.package_name().to_string();
+            let full_version = dependency_path
+                .local_file_reference()
+                .map(ToString::to_string)
+                .or_else(|| {
+                    dependency_path
+                        .package_specifier
+                        .registry_specifier()
+                        .map(|specifier| specifier.suffix.to_string())
+                })
+                .unwrap_or_default();
             let path = package_path_in_virtual_store(modules_dir, &from, &full_version)
                 .unwrap_or_else(|| package_path_direct(modules_dir, &from));
             DependencyView {
@@ -582,9 +592,10 @@ fn dependency_view_from_snapshot(
                 version: full_version.clone(),
                 lookup_name: Some(from),
                 lookup_full_version: Some(full_version),
-                lookup_version_without_peers: Some(
-                    dependency_path.package_specifier.suffix.version().to_string(),
-                ),
+                lookup_version_without_peers: dependency_path
+                    .package_specifier
+                    .registry_specifier()
+                    .map(|specifier| specifier.suffix.version().to_string()),
                 path,
             }
         }
@@ -649,14 +660,20 @@ fn find_package_snapshot<'a>(
         packages
             .iter()
             .find(|(dep_path, _)| {
-                dep_path.package_specifier.name.to_string() == package_name
-                    && dep_path.package_specifier.suffix.to_string() == full_version
+                dep_path.package_name().to_string() == package_name
+                    && dep_path
+                        .package_specifier
+                        .registry_specifier()
+                        .is_some_and(|specifier| specifier.suffix.to_string() == full_version)
             })
             .or_else(|| {
                 packages.iter().find(|(dep_path, _)| {
-                    dep_path.package_specifier.name.to_string() == package_name
-                        && dep_path.package_specifier.suffix.version().to_string()
-                            == version_without_peers
+                    dep_path.package_name().to_string() == package_name
+                        && dep_path.package_specifier.registry_specifier().is_some_and(
+                            |specifier| {
+                                specifier.suffix.version().to_string() == version_without_peers
+                            },
+                        )
                 })
             })
             .map(|(_, snapshot)| snapshot)

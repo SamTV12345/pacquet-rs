@@ -305,12 +305,15 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), SymlinkPa
         let file_type = entry.file_type().map_err(|error| {
             SymlinkPackageError::ReadSourceEntryType { path: from.clone(), error }
         })?;
-        if file_type.is_dir() {
-            copy_dir_recursive(&from, &to)?;
+        let canonical_from =
+            if file_type.is_symlink() { fs::canonicalize(&from).ok() } else { None };
+        if file_type.is_dir() || canonical_from.as_ref().is_some_and(|target| target.is_dir()) {
+            copy_dir_recursive(canonical_from.as_deref().unwrap_or(&from), &to)?;
             continue;
         }
-        fs::copy(&from, &to).map_err(|error| SymlinkPackageError::CopyFile {
-            from: from.clone(),
+        let copy_from = canonical_from.as_deref().unwrap_or(&from);
+        fs::copy(copy_from, &to).map_err(|error| SymlinkPackageError::CopyFile {
+            from: copy_from.to_path_buf(),
             to: to.clone(),
             error,
         })?;

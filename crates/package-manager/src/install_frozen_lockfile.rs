@@ -29,6 +29,7 @@ where
     pub config: &'static Npmrc,
     pub project_snapshot: &'a ProjectSnapshot,
     pub packages: Option<&'a HashMap<DependencyPath, PackageSnapshot>>,
+    pub lockfile_dir: &'a std::path::Path,
     pub dependency_groups: DependencyGroupList,
     pub offline: bool,
     pub force: bool,
@@ -46,6 +47,7 @@ where
             config,
             project_snapshot,
             packages,
+            lockfile_dir,
             dependency_groups,
             offline,
             force,
@@ -66,6 +68,7 @@ where
                 http_client,
                 config,
                 packages,
+                lockfile_dir,
                 resolved_packages: Some(resolved_packages),
                 offline,
                 force,
@@ -79,6 +82,7 @@ where
         SymlinkDirectDependencies {
             config,
             project_snapshot: &deduped_project_snapshot,
+            packages,
             dependency_groups,
         }
         .run();
@@ -129,12 +133,12 @@ fn resolved_dependency_to_path(
     resolved_version: &ResolvedDependencyVersion,
 ) -> Option<DependencyPath> {
     match resolved_version {
-        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => Some(DependencyPath {
-            custom_registry: None,
-            package_specifier: PkgNameVerPeer::new(alias.clone(), ver_peer.clone()),
-        }),
+        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => Some(DependencyPath::registry(
+            None,
+            PkgNameVerPeer::new(alias.clone(), ver_peer.clone()),
+        )),
         ResolvedDependencyVersion::PkgNameVerPeer(specifier) => {
-            Some(DependencyPath { custom_registry: None, package_specifier: specifier.clone() })
+            Some(DependencyPath::registry(None, specifier.clone()))
         }
         ResolvedDependencyVersion::Link(_) => None,
     }
@@ -144,7 +148,10 @@ fn resolved_path_to_version(
     alias: &PkgName,
     dependency_path: &DependencyPath,
 ) -> ResolvedDependencyVersion {
-    let specifier = &dependency_path.package_specifier;
+    let specifier = dependency_path
+        .package_specifier
+        .registry_specifier()
+        .unwrap_or_else(|| panic!("resolved path to version only supports registry dependencies"));
     if &specifier.name == alias {
         ResolvedDependencyVersion::PkgVerPeer(specifier.suffix.clone())
     } else {
@@ -167,6 +174,10 @@ fn importer_dependencies_ready(
     let should_expect_direct_links =
         config.symlink || matches!(config.node_linker, NodeLinker::Hoisted);
     if !direct_dependencies.iter().all(|(alias, spec)| {
+        if matches!(&spec.version, ResolvedDependencyVersion::Link(link) if link.starts_with("file:"))
+        {
+            return false;
+        }
         let is_link_dependency = matches!(spec.version, ResolvedDependencyVersion::Link(_));
         if should_expect_direct_links && !is_link_dependency {
             let direct_link = config.modules_dir.join(alias.to_string());
@@ -174,7 +185,7 @@ fn importer_dependencies_ready(
                 return false;
             }
         }
-        direct_dependency_virtual_store_location(alias, &spec.version).is_none_or(
+        direct_dependency_virtual_store_location(alias, &spec.version, packages).is_none_or(
             |(_, virtual_store_name, package_name)| {
                 let package_in_virtual_store = config
                     .virtual_store_dir
@@ -209,8 +220,8 @@ fn importer_dependencies_ready(
             continue;
         }
 
-        let virtual_store_name = resolved_dependency_path.package_specifier.to_virtual_store_name();
-        let package_name = resolved_dependency_path.package_specifier.name.to_string();
+        let virtual_store_name = resolved_dependency_path.to_virtual_store_name();
+        let package_name = resolved_dependency_path.package_name().to_string();
         let package_in_virtual_store = config
             .virtual_store_dir
             .join(&virtual_store_name)
@@ -252,14 +263,20 @@ fn dependency_path_from_snapshot_dependency(
     dependency_spec: &PackageSnapshotDependency,
 ) -> DependencyPath {
     match dependency_spec {
-        PackageSnapshotDependency::PkgVerPeer(ver_peer) => DependencyPath {
-            custom_registry: None,
-            package_specifier: PkgNameVerPeer::new(alias.clone(), ver_peer.clone()),
-        },
+        PackageSnapshotDependency::PkgVerPeer(ver_peer) => {
+            DependencyPath::registry(None, PkgNameVerPeer::new(alias.clone(), ver_peer.clone()))
+        }
         PackageSnapshotDependency::PkgNameVerPeer(package_specifier) => {
-            DependencyPath { custom_registry: None, package_specifier: package_specifier.clone() }
+            DependencyPath::registry(None, package_specifier.clone())
         }
         PackageSnapshotDependency::DependencyPath(path) => path.clone(),
+        PackageSnapshotDependency::Link(link) => {
+            if link.starts_with("file:") {
+                DependencyPath::local_file(alias.clone(), link.clone())
+            } else {
+                panic!("link: dependencies are not supported in package snapshots")
+            }
+        }
     }
 }
 
@@ -309,9 +326,17 @@ fn resolve_package_snapshot_deduped<'a>(
 }
 
 fn same_base_package(left: &DependencyPath, right: &DependencyPath) -> bool {
-    left.custom_registry == right.custom_registry
-        && left.package_specifier.name == right.package_specifier.name
-        && left.package_specifier.suffix.version() == right.package_specifier.suffix.version()
+    match (
+        left.package_specifier.registry_specifier(),
+        right.package_specifier.registry_specifier(),
+    ) {
+        (Some(left_specifier), Some(right_specifier)) => {
+            left.custom_registry == right.custom_registry
+                && left_specifier.name == right_specifier.name
+                && left_specifier.suffix.version() == right_specifier.suffix.version()
+        }
+        _ => left == right,
+    }
 }
 
 fn dependency_score(snapshot: &PackageSnapshot) -> usize {
@@ -356,14 +381,18 @@ fn direct_dependency_path(
     packages: &HashMap<DependencyPath, PackageSnapshot>,
 ) -> Option<DependencyPath> {
     let dependency_path = match resolved_version {
-        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => DependencyPath {
-            custom_registry: None,
-            package_specifier: PkgNameVerPeer::new(alias.clone(), ver_peer.clone()),
-        },
-        ResolvedDependencyVersion::PkgNameVerPeer(specifier) => {
-            DependencyPath { custom_registry: None, package_specifier: specifier.clone() }
+        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
+            DependencyPath::registry(None, PkgNameVerPeer::new(alias.clone(), ver_peer.clone()))
         }
-        ResolvedDependencyVersion::Link(_) => return None,
+        ResolvedDependencyVersion::PkgNameVerPeer(specifier) => {
+            DependencyPath::registry(None, specifier.clone())
+        }
+        ResolvedDependencyVersion::Link(link) => {
+            if !link.starts_with("file:") {
+                return None;
+            }
+            DependencyPath::local_file(alias.clone(), link.clone())
+        }
     };
     resolve_package_snapshot(packages, &dependency_path).map(|(resolved_path, _)| resolved_path)
 }
@@ -371,6 +400,7 @@ fn direct_dependency_path(
 fn direct_dependency_virtual_store_location(
     alias: &PkgName,
     resolved_version: &ResolvedDependencyVersion,
+    packages: Option<&HashMap<DependencyPath, PackageSnapshot>>,
 ) -> Option<(String, String, String)> {
     match resolved_version {
         ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
@@ -380,7 +410,19 @@ fn direct_dependency_virtual_store_location(
         ResolvedDependencyVersion::PkgNameVerPeer(specifier) => {
             Some((alias.to_string(), specifier.to_virtual_store_name(), specifier.name.to_string()))
         }
-        ResolvedDependencyVersion::Link(_) => None,
+        ResolvedDependencyVersion::Link(link) => packages.and_then(|packages| {
+            if !link.starts_with("file:") {
+                return None;
+            }
+            let dependency_path = DependencyPath::local_file(alias.clone(), link.clone());
+            resolve_package_snapshot(packages, &dependency_path).map(|(resolved_path, _)| {
+                (
+                    alias.to_string(),
+                    resolved_path.to_virtual_store_name(),
+                    resolved_path.package_name().to_string(),
+                )
+            })
+        }),
     }
 }
 

@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
 use miette::{Context, IntoDiagnostic};
-use pacquet_network::{RegistryTlsConfig, ThrottledClient};
+use pacquet_network::{RegistryTlsConfig, ThrottledClient, ThrottledClientOptions};
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manager::InstallPackageFromRegistry;
 use pacquet_store_dir::PackageFilesIndex;
@@ -97,15 +97,17 @@ impl StoreCommand {
                 temp_config.virtual_store_dir = temp_config.modules_dir.join(".pnpm");
                 temp_config.lockfile = false;
                 let temp_config = temp_config.leak();
-                let http_client = ThrottledClient::new_with_tls_options(
+                let http_client = ThrottledClient::new_with_options(
                     config.network_concurrency as usize,
-                    Some(config.fetch_timeout),
-                    config.strict_ssl,
-                    config.ca.clone(),
-                    network_tls_configs(config),
-                    config.https_proxy.clone(),
-                    config.http_proxy.clone(),
-                    config.no_proxy.clone(),
+                    ThrottledClientOptions {
+                        request_timeout_ms: Some(config.fetch_timeout),
+                        strict_ssl: config.strict_ssl,
+                        ca_certs: config.ca.clone(),
+                        registry_tls_configs: network_tls_configs(config),
+                        https_proxy: config.https_proxy.clone(),
+                        http_proxy: config.http_proxy.clone(),
+                        no_proxy: config.no_proxy.clone(),
+                    },
                 );
                 let tarball_mem_cache = MemCache::new();
 

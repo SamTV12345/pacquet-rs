@@ -205,7 +205,8 @@ fn convert_v9_to_lockfile(v9: LockfileV9File) -> Result<Lockfile, LockfileFileEr
             .get(&package_id)
             .cloned()
             .or_else(|| {
-                let suffix = &dep_path.package_specifier.suffix;
+                let specifier = dep_path.package_specifier.registry_specifier()?;
+                let suffix = &specifier.suffix;
                 if suffix.peer().is_empty() {
                     return None;
                 }
@@ -213,9 +214,8 @@ fn convert_v9_to_lockfile(v9: LockfileV9File) -> Result<Lockfile, LockfileFileEr
                     suffix.version().to_string().parse().expect("valid semver without peer suffix");
                 let no_peer_dep_path = DependencyPath {
                     custom_registry: dep_path.custom_registry.clone(),
-                    package_specifier: PkgNameVerPeer::new(
-                        dep_path.package_specifier.name.clone(),
-                        no_peer_suffix,
+                    package_specifier: crate::dependency_path::DependencyPathSpecifier::Registry(
+                        PkgNameVerPeer::new(specifier.name.clone(), no_peer_suffix),
                     ),
                 };
                 let no_peer_package_id = v9_key_from_dependency_path(&no_peer_dep_path);

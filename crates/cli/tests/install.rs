@@ -1864,6 +1864,9 @@ fn file_protocol_dependency_should_materialize_local_package() {
         fs::read_to_string(app_dir.join("pnpm-lock.yaml")).expect("read app lockfile");
     assert!(lockfile_content.contains("specifier: file:../src"));
     assert!(lockfile_content.contains("version: file:../src"));
+    assert!(lockfile_content.contains("'@repo/lib@file:../src':"));
+    assert!(lockfile_content.contains("type: directory"));
+    assert!(lockfile_content.contains("directory: ../src"));
 
     drop(root); // cleanup
 }
@@ -1963,6 +1966,72 @@ fn reinstall_should_refresh_file_protocol_dependency_contents() {
         fs::read_to_string(materialized_dep.join("index.js")).expect("read installed file"),
         "module.exports = 'v2';\n"
     );
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn file_protocol_dependency_should_write_directory_snapshot_and_install_nested_local_dependency() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let project_1_dir = workspace.join("project-1");
+    let project_2_dir = workspace.join("project-2");
+    let project_3_dir = project_2_dir.join("project-3");
+    fs::create_dir_all(&project_1_dir).expect("create project-1 dir");
+    fs::create_dir_all(&project_3_dir).expect("create project-3 dir");
+
+    fs::write(
+        project_1_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-1",
+            "version": "1.0.0",
+            "dependencies": {
+                "project-2": "file:../project-2"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-1 manifest");
+    fs::write(
+        project_2_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-2",
+            "version": "1.0.0",
+            "dependencies": {
+                "project-3": "file:./project-3"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-2 manifest");
+    fs::write(project_2_dir.join("index.js"), "module.exports = 'project-2';\n")
+        .expect("write project-2 file");
+    fs::write(
+        project_3_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-3",
+            "version": "1.0.0",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write project-3 manifest");
+    fs::write(project_3_dir.join("index.js"), "module.exports = 'project-3';\n")
+        .expect("write project-3 file");
+
+    pacquet.with_args(["-C", project_1_dir.to_str().unwrap(), "install"]).assert().success();
+
+    assert!(project_1_dir.join("node_modules/project-2").exists());
+    assert!(project_1_dir.join("node_modules/project-2/node_modules/project-3").exists());
+
+    let lockfile_content =
+        fs::read_to_string(project_1_dir.join("pnpm-lock.yaml")).expect("read lockfile");
+    assert!(lockfile_content.contains("project-2@file:../project-2:"));
+    assert!(lockfile_content.contains("project-3@file:../project-2/project-3:"));
+    assert!(lockfile_content.contains("directory: ../project-2"));
+    assert!(lockfile_content.contains("directory: ../project-2/project-3"));
+    assert!(lockfile_content.contains("project-3:"));
+    assert!(lockfile_content.contains("file:../project-2/project-3"));
 
     drop(root); // cleanup
 }

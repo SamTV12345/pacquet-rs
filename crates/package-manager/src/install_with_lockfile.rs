@@ -8,10 +8,10 @@ use crate::{
 use async_recursion::async_recursion;
 use dashmap::DashMap;
 use pacquet_lockfile::{
-    ComVer, DependencyPath, Lockfile, LockfileResolution, MultiProjectSnapshot, PackageSnapshot,
-    PackageSnapshotDependency, PkgName, PkgNameVerPeer, PkgVerPeer, ProjectSnapshot,
-    RegistryResolution, ResolvedDependencyMap, ResolvedDependencySpec, ResolvedDependencyVersion,
-    RootProjectSnapshot, TarballResolution,
+    ComVer, DependencyPath, DirectoryResolution, Lockfile, LockfileResolution,
+    MultiProjectSnapshot, PackageSnapshot, PackageSnapshotDependency, PkgName, PkgNameVerPeer,
+    PkgVerPeer, ProjectSnapshot, RegistryResolution, ResolvedDependencyMap, ResolvedDependencySpec,
+    ResolvedDependencyVersion, RootProjectSnapshot, TarballResolution,
 };
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
@@ -88,11 +88,32 @@ where
             if let Some((resolved_package, local_dep_path, should_symlink)) =
                 resolve_local_dependency(manifest.path(), version_range)
             {
-                if !lockfile_only {
-                    let dependency_path = config.modules_dir.join(name);
-                    link_package(should_symlink, &local_dep_path, &dependency_path)
-                        .expect("install local dependency");
+                if should_symlink {
+                    if !lockfile_only {
+                        let dependency_path = config.modules_dir.join(name);
+                        link_package(true, &local_dep_path, &dependency_path)
+                            .expect("install local dependency");
+                    }
+                    resolved_direct_dependencies.insert(key, resolved_package);
+                    continue;
                 }
+
+                let normalized_ref = normalized_local_file_reference(lockfile_dir, &local_dep_path)
+                    .replace('\\', "/");
+                let resolved_package = Self::snapshot_local_directory_package(
+                    resolved_packages,
+                    http_client,
+                    config,
+                    &package_snapshots,
+                    &workspace_root_peer_overrides,
+                    lockfile_dir,
+                    name,
+                    &local_dep_path,
+                    &normalized_ref,
+                    prefer_offline,
+                    offline,
+                )
+                .await;
                 resolved_direct_dependencies.insert(key, resolved_package);
                 continue;
             }
@@ -198,7 +219,31 @@ where
             packages: (!packages.is_empty()).then_some(packages),
         };
 
+        let project_snapshot_for_importer = match &lockfile.project_snapshot {
+            RootProjectSnapshot::Single(snapshot) => snapshot.clone(),
+            RootProjectSnapshot::Multi(snapshot) => {
+                snapshot.importers.get(lockfile_importer_id).cloned().unwrap_or_default()
+            }
+        };
+
         lockfile.save_to_dir(lockfile_dir).expect("save lockfile");
+
+        if !lockfile_only {
+            let relinked_packages = ResolvedPackages::new();
+            crate::InstallFrozenLockfile {
+                http_client,
+                resolved_packages: &relinked_packages,
+                config,
+                project_snapshot: &project_snapshot_for_importer,
+                packages: lockfile.packages.as_ref(),
+                lockfile_dir,
+                dependency_groups,
+                offline,
+                force,
+            }
+            .run()
+            .await;
+        }
     }
 
     #[async_recursion]
@@ -393,6 +438,146 @@ where
         ResolvedPackage { version: resolved_version }
     }
 
+    #[async_recursion]
+    #[allow(clippy::too_many_arguments)]
+    async fn snapshot_local_directory_package(
+        resolved_packages: &ResolvedPackages,
+        http_client: &ThrottledClient,
+        config: &'static Npmrc,
+        package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
+        workspace_root_peer_overrides: &HashMap<String, String>,
+        lockfile_dir: &Path,
+        dependency_name: &str,
+        local_dep_path: &Path,
+        normalized_ref: &str,
+        prefer_offline: bool,
+        offline: bool,
+    ) -> ResolvedPackage {
+        let local_manifest = PackageManifest::from_path(local_dep_path.join("package.json")).ok();
+        let package_name = local_manifest
+            .as_ref()
+            .and_then(|manifest| manifest.value().get("name"))
+            .and_then(|value| value.as_str())
+            .unwrap_or(dependency_name);
+        let dependency_path = DependencyPath::local_file(
+            Self::parse_pkg_name(package_name),
+            normalized_ref.to_string(),
+        );
+        let virtual_store_name = dependency_path.to_virtual_store_name();
+
+        if resolved_packages.insert(virtual_store_name) {
+            let mut snapshot_dependencies = HashMap::new();
+            if let Some(local_manifest) = &local_manifest {
+                for (child_name, child_version_range) in
+                    local_manifest.dependencies([DependencyGroup::Prod, DependencyGroup::Optional])
+                {
+                    if let Some((resolved_local, local_child_path, should_symlink)) =
+                        resolve_local_dependency(local_manifest.path(), child_version_range)
+                    {
+                        if should_symlink {
+                            snapshot_dependencies.insert(
+                                Self::parse_pkg_name(child_name),
+                                PackageSnapshotDependency::Link(resolved_local.version.to_string()),
+                            );
+                            continue;
+                        }
+
+                        let normalized_child_ref =
+                            normalized_local_file_reference(lockfile_dir, &local_child_path)
+                                .replace('\\', "/");
+                        let resolved_local = Self::snapshot_local_directory_package(
+                            resolved_packages,
+                            http_client,
+                            config,
+                            package_snapshots,
+                            workspace_root_peer_overrides,
+                            lockfile_dir,
+                            child_name,
+                            &local_child_path,
+                            &normalized_child_ref,
+                            prefer_offline,
+                            offline,
+                        )
+                        .await;
+                        snapshot_dependencies.insert(
+                            Self::parse_pkg_name(child_name),
+                            PackageSnapshotDependency::Link(resolved_local.version.to_string()),
+                        );
+                        continue;
+                    }
+
+                    let resolved_range = apply_workspace_root_peer_override(
+                        config,
+                        workspace_root_peer_overrides,
+                        None,
+                        child_name,
+                        child_version_range,
+                    );
+                    let resolved_dependency = Self::resolve_and_snapshot_package(
+                        resolved_packages,
+                        http_client,
+                        config,
+                        package_snapshots,
+                        workspace_root_peer_overrides,
+                        child_name,
+                        &resolved_range,
+                        prefer_offline,
+                        offline,
+                    )
+                    .await;
+                    snapshot_dependencies.insert(
+                        Self::parse_pkg_name(child_name),
+                        match resolved_dependency.version {
+                            ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
+                                PackageSnapshotDependency::PkgVerPeer(ver_peer)
+                            }
+                            ResolvedDependencyVersion::PkgNameVerPeer(name_ver_peer) => {
+                                PackageSnapshotDependency::PkgNameVerPeer(name_ver_peer)
+                            }
+                            ResolvedDependencyVersion::Link(link) => {
+                                PackageSnapshotDependency::Link(link)
+                            }
+                        },
+                    );
+                }
+            }
+
+            package_snapshots.insert(
+                dependency_path,
+                PackageSnapshot {
+                    resolution: LockfileResolution::Directory(DirectoryResolution {
+                        directory: normalized_ref
+                            .strip_prefix("file:")
+                            .unwrap_or(normalized_ref)
+                            .to_string(),
+                    }),
+                    id: None,
+                    name: None,
+                    version: None,
+                    engines: None,
+                    cpu: None,
+                    os: None,
+                    libc: None,
+                    deprecated: None,
+                    has_bin: None,
+                    prepare: None,
+                    requires_build: None,
+                    bundled_dependencies: None,
+                    peer_dependencies: None,
+                    peer_dependencies_meta: None,
+                    dependencies: (!snapshot_dependencies.is_empty())
+                        .then_some(snapshot_dependencies),
+                    optional_dependencies: None,
+                    transitive_peer_dependencies: None,
+                    dev: None,
+                    optional: None,
+                },
+            );
+        }
+
+        ResolvedPackage { version: ResolvedDependencyVersion::Link(normalized_ref.to_string()) }
+    }
+
     fn build_project_snapshot(
         manifest: &PackageManifest,
         dependency_groups: impl IntoIterator<Item = DependencyGroup>,
@@ -456,7 +641,7 @@ where
             Self::parse_pkg_name(package_version.name.as_str()),
             Self::to_pkg_ver_peer(package_version),
         );
-        DependencyPath { custom_registry: None, package_specifier }
+        DependencyPath::registry(None, package_specifier)
     }
 
     fn to_pkg_ver_peer(package_version: &PackageVersion) -> PkgVerPeer {
@@ -636,6 +821,17 @@ fn to_relative_path(from: &Path, to: &Path) -> String {
     }
 
     if relative_parts.is_empty() { ".".to_string() } else { relative_parts.join("/") }
+}
+
+fn normalized_local_file_reference(lockfile_dir: &Path, local_dep_path: &Path) -> String {
+    format!(
+        "file:{}",
+        if local_dep_path.is_absolute() {
+            to_relative_path(lockfile_dir, local_dep_path)
+        } else {
+            local_dep_path.to_string_lossy().replace('\\', "/")
+        }
+    )
 }
 
 fn resolve_local_dependency(
@@ -875,12 +1071,12 @@ fn resolved_dependency_to_path(
     resolved_version: &ResolvedDependencyVersion,
 ) -> Option<DependencyPath> {
     match resolved_version {
-        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => Some(DependencyPath {
-            custom_registry: None,
-            package_specifier: PkgNameVerPeer::new(alias.clone(), ver_peer.clone()),
-        }),
+        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => Some(DependencyPath::registry(
+            None,
+            PkgNameVerPeer::new(alias.clone(), ver_peer.clone()),
+        )),
         ResolvedDependencyVersion::PkgNameVerPeer(specifier) => {
-            Some(DependencyPath { custom_registry: None, package_specifier: specifier.clone() })
+            Some(DependencyPath::registry(None, specifier.clone()))
         }
         ResolvedDependencyVersion::Link(_) => None,
     }
@@ -890,7 +1086,10 @@ fn resolved_path_to_version(
     alias: &PkgName,
     dependency_path: &DependencyPath,
 ) -> ResolvedDependencyVersion {
-    let specifier = &dependency_path.package_specifier;
+    let specifier = dependency_path
+        .package_specifier
+        .registry_specifier()
+        .unwrap_or_else(|| panic!("resolved path to version only supports registry dependencies"));
     if &specifier.name == alias {
         ResolvedDependencyVersion::PkgVerPeer(specifier.suffix.clone())
     } else {
@@ -944,9 +1143,17 @@ fn resolve_package_snapshot_deduped<'a>(
 }
 
 fn same_base_package(left: &DependencyPath, right: &DependencyPath) -> bool {
-    left.custom_registry == right.custom_registry
-        && left.package_specifier.name == right.package_specifier.name
-        && left.package_specifier.suffix.version() == right.package_specifier.suffix.version()
+    match (
+        left.package_specifier.registry_specifier(),
+        right.package_specifier.registry_specifier(),
+    ) {
+        (Some(left_specifier), Some(right_specifier)) => {
+            left.custom_registry == right.custom_registry
+                && left_specifier.name == right_specifier.name
+                && left_specifier.suffix.version() == right_specifier.suffix.version()
+        }
+        _ => left == right,
+    }
 }
 
 fn dependency_score(snapshot: &PackageSnapshot) -> usize {

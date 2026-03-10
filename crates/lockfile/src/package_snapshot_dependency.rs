@@ -9,6 +9,7 @@ pub enum PackageSnapshotDependency {
     PkgVerPeer(PkgVerPeer),
     DependencyPath(DependencyPath),
     PkgNameVerPeer(PkgNameVerPeer),
+    Link(String),
 }
 
 #[cfg(test)]
@@ -39,6 +40,8 @@ mod tests {
         case!("string-width@4.2.3" => PkgNameVerPeer);
         case!("'@scope/pkg@1.2.3'" => PkgNameVerPeer);
         case!("debug@4.4.3(supports-color@8.1.1)" => PkgNameVerPeer);
+        case!("file:../local-pkg" => Link);
+        case!("link:../local-pkg" => Link);
         case!("/react-json-view@1.21.3(@types/react@17.0.49)(react-dom@17.0.2)(react@17.0.2)" => DependencyPath);
         case!("/react-json-view@1.21.3(react@17.0.2)" => DependencyPath);
         case!("/react-json-view@1.21.3-rc.0(react@17.0.2)" => DependencyPath);
@@ -76,6 +79,8 @@ mod tests {
         case("string-width@4.2.3");
         case("'@scope/pkg@1.2.3'");
         case("debug@4.4.3(supports-color@8.1.1)");
+        case("file:../local-pkg");
+        case("link:../local-pkg");
         case("/react-json-view@1.21.3(@types/react@17.0.49)(react-dom@17.0.2)(react@17.0.2)");
         case("/react-json-view@1.21.3(react@17.0.2)");
         case("/react-json-view@1.21.3-rc.0(react@17.0.2)");

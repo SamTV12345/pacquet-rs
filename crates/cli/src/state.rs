@@ -2,7 +2,7 @@ use derive_more::{Display, Error};
 use glob::Pattern;
 use miette::Diagnostic;
 use pacquet_lockfile::{LoadLockfileError, Lockfile};
-use pacquet_network::{RegistryTlsConfig, ThrottledClient};
+use pacquet_network::{RegistryTlsConfig, ThrottledClient, ThrottledClientOptions};
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manager::{ResolvedPackages, WorkspacePackageInfo, WorkspacePackages};
 use pacquet_package_manifest::{PackageManifest, PackageManifestError};
@@ -87,15 +87,17 @@ impl State {
             lockfile_dir,
             lockfile_importer_id,
             workspace_packages,
-            http_client: ThrottledClient::new_with_tls_options(
+            http_client: ThrottledClient::new_with_options(
                 config.network_concurrency as usize,
-                Some(config.fetch_timeout),
-                config.strict_ssl,
-                config.ca.clone(),
-                network_tls_configs(config),
-                config.https_proxy.clone(),
-                config.http_proxy.clone(),
-                config.no_proxy.clone(),
+                ThrottledClientOptions {
+                    request_timeout_ms: Some(config.fetch_timeout),
+                    strict_ssl: config.strict_ssl,
+                    ca_certs: config.ca.clone(),
+                    registry_tls_configs: network_tls_configs(config),
+                    https_proxy: config.https_proxy.clone(),
+                    http_proxy: config.http_proxy.clone(),
+                    no_proxy: config.no_proxy.clone(),
+                },
             ),
             tarball_mem_cache: MemCache::new(),
             resolved_packages: ResolvedPackages::new(),

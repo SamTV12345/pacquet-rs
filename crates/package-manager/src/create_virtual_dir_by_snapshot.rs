@@ -48,9 +48,8 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
         } = self;
 
         // node_modules/.pacquet/pkg-name@x.y.z/node_modules
-        let virtual_node_modules_dir = virtual_store_dir
-            .join(dependency_path.package_specifier.to_virtual_store_name())
-            .join("node_modules");
+        let virtual_node_modules_dir =
+            virtual_store_dir.join(dependency_path.to_virtual_store_name()).join("node_modules");
         fs::create_dir_all(&virtual_node_modules_dir).map_err(|error| {
             CreateVirtualDirError::CreateNodeModulesDir {
                 dir: virtual_node_modules_dir.to_path_buf(),
@@ -59,8 +58,7 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
         })?;
 
         // 1. Install the files from `cas_paths`
-        let save_path =
-            virtual_node_modules_dir.join(dependency_path.package_specifier.name.to_string());
+        let save_path = virtual_node_modules_dir.join(dependency_path.package_name().to_string());
         create_cas_files(import_method, &save_path, cas_paths)
             .map_err(CreateVirtualDirError::CreateCasFiles)?;
 
@@ -87,6 +85,9 @@ pub(crate) fn package_dependency_map(
 }
 
 fn parse_package_snapshot_dependency(value: &str) -> Option<PackageSnapshotDependency> {
+    if value.starts_with("file:") || value.starts_with("link:") {
+        return Some(PackageSnapshotDependency::Link(value.to_string()));
+    }
     value
         .parse::<PkgVerPeer>()
         .ok()
