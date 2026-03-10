@@ -469,11 +469,9 @@ fn frozen_lockfile_flag_should_work_when_prefer_frozen_lockfile_is_disabled() {
 
 #[test]
 fn prefer_frozen_lockfile_flag_should_override_npmrc_false_setting() {
-    use std::io::Write;
-
     let CommandTempCwd { root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
-    let AddMockedRegistry { cache_dir, mock_instance, .. } = npmrc_info;
+    let AddMockedRegistry { store_dir, cache_dir, mock_instance, .. } = npmrc_info;
 
     let manifest_path = workspace.join("package.json");
     let package_json_content = serde_json::json!({
@@ -485,12 +483,15 @@ fn prefer_frozen_lockfile_flag_should_override_npmrc_false_setting() {
 
     pacquet_command(&workspace).with_args(["install"]).assert().success();
 
-    fs::OpenOptions::new()
-        .append(true)
-        .open(workspace.join(".npmrc"))
-        .expect("open .npmrc")
-        .write_all(b"\nprefer-frozen-lockfile=false\n")
-        .expect("append prefer-frozen-lockfile=false");
+    fs::write(
+        workspace.join(".npmrc"),
+        format!(
+            "registry=http://127.0.0.1:9/\nstore-dir={}\ncache-dir={}\nprefer-frozen-lockfile=false\nfetch-timeout=100\n",
+            store_dir.display(),
+            cache_dir.display()
+        ),
+    )
+    .expect("rewrite .npmrc");
 
     let cached_metadata = metadata_cache_file(
         &cache_dir,
@@ -500,13 +501,6 @@ fn prefer_frozen_lockfile_flag_should_override_npmrc_false_setting() {
     if cached_metadata.exists() {
         fs::remove_file(&cached_metadata).expect("remove cached metadata");
     }
-
-    fs::OpenOptions::new()
-        .append(true)
-        .open(workspace.join(".npmrc"))
-        .expect("open .npmrc")
-        .write_all(b"\nregistry=http://127.0.0.1:9/\n")
-        .expect("append unreachable registry");
 
     pacquet_command(&workspace)
         .with_args(["install", "--prefer-frozen-lockfile"])
@@ -519,11 +513,9 @@ fn prefer_frozen_lockfile_flag_should_override_npmrc_false_setting() {
 
 #[test]
 fn no_prefer_frozen_lockfile_flag_should_override_default_true_setting() {
-    use std::io::Write;
-
     let CommandTempCwd { root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
-    let AddMockedRegistry { cache_dir, mock_instance, .. } = npmrc_info;
+    let AddMockedRegistry { store_dir, cache_dir, mock_instance, .. } = npmrc_info;
 
     let manifest_path = workspace.join("package.json");
     let package_json_content = serde_json::json!({
@@ -544,12 +536,15 @@ fn no_prefer_frozen_lockfile_flag_should_override_default_true_setting() {
         fs::remove_file(&cached_metadata).expect("remove cached metadata");
     }
 
-    fs::OpenOptions::new()
-        .append(true)
-        .open(workspace.join(".npmrc"))
-        .expect("open .npmrc")
-        .write_all(b"\nregistry=http://127.0.0.1:9/\n")
-        .expect("append unreachable registry");
+    fs::write(
+        workspace.join(".npmrc"),
+        format!(
+            "registry=http://127.0.0.1:9/\nstore-dir={}\ncache-dir={}\nfetch-timeout=100\n",
+            store_dir.display(),
+            cache_dir.display()
+        ),
+    )
+    .expect("rewrite .npmrc");
 
     pacquet_command(&workspace).with_args(["install"]).assert().success();
     pacquet_command(&workspace)
