@@ -111,6 +111,33 @@ fn should_add_to_package_json() {
 }
 
 #[test]
+fn scoped_registry_should_override_default_registry_for_add() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { npmrc_path, mock_instance, .. } = npmrc_info;
+
+    std::fs::write(
+        &npmrc_path,
+        format!(
+            "registry=http://127.0.0.1:9/\n@pnpm.e2e:registry={}\nstore-dir=../pacquet-store\ncache-dir=../pacquet-cache\n",
+            mock_instance.url()
+        ),
+    )
+    .expect("rewrite .npmrc with scoped registry");
+
+    pacquet.with_args(["add", "@pnpm.e2e/hello-world-js-bin"]).assert().success();
+
+    let file = PackageManifest::from_path(workspace.join("package.json")).unwrap();
+    let dependency = file
+        .dependencies([DependencyGroup::Prod])
+        .find(|(name, _)| *name == "@pnpm.e2e/hello-world-js-bin")
+        .map(|(_, version)| version);
+    assert_eq!(dependency, Some("^1.0.0"));
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
 fn should_add_explicit_version_spec_to_package_json() {
     let (root, dir, anchor) =
         exec_pacquet_in_temp_cwd(["add", "@pnpm.e2e/hello-world-js-bin@1.0.0"]);

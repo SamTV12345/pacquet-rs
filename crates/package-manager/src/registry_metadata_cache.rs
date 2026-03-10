@@ -21,7 +21,8 @@ fn package_cache_file(cache_dir: &Path, registry: &str, package_name: &str) -> P
 }
 
 pub(crate) fn metadata_cache_file(config: &Npmrc, package_name: &str) -> PathBuf {
-    package_cache_file(&config.cache_dir, &config.registry, package_name)
+    let registry = config.registry_for_package_name(package_name);
+    package_cache_file(&config.cache_dir, &registry, package_name)
 }
 
 fn read_cached_package(cache_file: &Path) -> Option<Package> {
@@ -50,14 +51,11 @@ pub(crate) async fn fetch_package_from_registry_and_cache(
     http_client: &ThrottledClient,
     package_name: &str,
 ) -> Result<Package, RegistryError> {
-    let auth_header = config.auth_header_for_url(&format!("{}{}", &config.registry, package_name));
-    let package = Package::fetch_from_registry(
-        package_name,
-        http_client,
-        &config.registry,
-        auth_header.as_deref(),
-    )
-    .await?;
+    let registry = config.registry_for_package_name(package_name);
+    let auth_header = config.auth_header_for_url(&format!("{registry}{package_name}"));
+    let package =
+        Package::fetch_from_registry(package_name, http_client, &registry, auth_header.as_deref())
+            .await?;
     write_cached_package(&metadata_cache_file(config, package_name), &package);
     Ok(package)
 }

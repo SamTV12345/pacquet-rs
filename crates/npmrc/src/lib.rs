@@ -16,7 +16,8 @@ use crate::custom_deserializer::{
     default_modules_cache_max_age, default_modules_dir, default_network_concurrency,
     default_peers_suffix_max_length, default_public_hoist_pattern, default_registry,
     default_store_dir, default_virtual_store_dir, deserialize_bool, deserialize_pathbuf,
-    deserialize_registry, deserialize_store_dir, deserialize_u16, deserialize_u64,
+    deserialize_registry, deserialize_store_dir, deserialize_string_vec, deserialize_u16,
+    deserialize_u64,
 };
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -69,14 +70,14 @@ pub struct Npmrc {
     /// By default, all packages are hoisted - however, if you know that only some flawed packages
     /// have phantom dependencies, you can use this option to exclusively hoist the phantom
     /// dependencies (recommended).
-    #[serde(default = "default_hoist_pattern")]
+    #[serde(default = "default_hoist_pattern", deserialize_with = "deserialize_string_vec")]
     pub hoist_pattern: Vec<String>,
 
     /// Unlike hoist-pattern, which hoists dependencies to a hidden modules directory inside the
     /// virtual store, public-hoist-pattern hoists dependencies matching the pattern to the root
     /// modules directory. Hoisting to the root modules directory means that application code will
     /// have access to phantom dependencies, even if they modify the resolution strategy improperly.
-    #[serde(default = "default_public_hoist_pattern")]
+    #[serde(default = "default_public_hoist_pattern", deserialize_with = "deserialize_string_vec")]
     pub public_hoist_pattern: Vec<String>,
 
     /// By default, pnpm creates a semistrict node_modules, meaning dependencies have access to
@@ -263,6 +264,19 @@ fn read_npmrc_raw(dir: Option<PathBuf>) -> HashMap<String, String> {
     parse_raw_npmrc(&content)
 }
 
+fn normalize_registry_url(registry: &str) -> String {
+    let trimmed = registry.trim();
+    if trimmed.ends_with('/') { trimmed.to_string() } else { format!("{trimmed}/") }
+}
+
+fn package_scope(package_name: &str) -> Option<&str> {
+    if !package_name.starts_with('@') {
+        return None;
+    }
+    let separator = package_name.find('/')?;
+    Some(&package_name[..separator])
+}
+
 fn normalize_auth_key_uri(uri: &str) -> Option<String> {
     let trimmed = uri.trim();
     if trimmed.is_empty() {
@@ -406,18 +420,20 @@ fn auth_headers_from_settings(
     let registry_key = normalize_auth_key_uri(registry_url)
         .or_else(|| nerf_url(registry_url))
         .unwrap_or_else(|| "//registry.npmjs.org/".to_string());
-    if let Some(token_helper) = user_settings.get("tokenHelper") {
-        let token = load_token_helper(token_helper, "tokenHelper")?;
-        headers.insert(registry_key.clone(), token);
-    } else if let Some(token) = settings.get("_authToken") {
-        headers.insert(registry_key.clone(), format!("Bearer {token}"));
-    } else if let Some(auth) = settings.get("_auth") {
-        headers.insert(registry_key.clone(), format!("Basic {auth}"));
-    } else if let (Some(username), Some(password)) =
-        (settings.get("username"), settings.get("_password"))
-    {
-        let raw = format!("{username}:{password}");
-        headers.insert(registry_key, format!("Basic {}", BASE64_STD.encode(raw)));
+    if !headers.contains_key(&registry_key) {
+        if let Some(token_helper) = user_settings.get("tokenHelper") {
+            let token = load_token_helper(token_helper, "tokenHelper")?;
+            headers.insert(registry_key.clone(), token);
+        } else if let Some(token) = settings.get("_authToken") {
+            headers.insert(registry_key.clone(), format!("Bearer {token}"));
+        } else if let Some(auth) = settings.get("_auth") {
+            headers.insert(registry_key.clone(), format!("Basic {auth}"));
+        } else if let (Some(username), Some(password)) =
+            (settings.get("username"), settings.get("_password"))
+        {
+            let raw = format!("{username}:{password}");
+            headers.insert(registry_key, format!("Basic {}", BASE64_STD.encode(raw)));
+        }
     }
 
     let max_parts = get_max_parts(headers.keys().cloned());
@@ -427,6 +443,7 @@ fn auth_headers_from_settings(
 impl Npmrc {
     pub fn new() -> Self {
         let mut config: Npmrc = serde_ini::from_str("").unwrap(); // TODO: derive `SmartDefault` for `Npmrc and call `Npmrc::default()`
+        config.apply_derived_settings();
         config.recompute_auth_headers().expect("default npmrc auth config should be valid");
         config
     }
@@ -447,23 +464,27 @@ impl Npmrc {
         let current_dir = current_dir().ok();
         let home_dir = home_dir();
 
-        let load = |dir: &PathBuf| -> Option<Npmrc> {
-            dir.join(".npmrc")
-                .pipe(fs::read_to_string)
-                .ok()? // TODO: should it throw error instead?
-                .pipe_as_ref(serde_ini::from_str)
-                .ok() // TODO: should it throw error instead?
-        };
+        let load_content =
+            |dir: &PathBuf| -> Option<String> { dir.join(".npmrc").pipe(fs::read_to_string).ok() };
+        let parse = |content: &str| serde_ini::from_str(content).ok();
+
+        let home_content = home_dir.as_ref().and_then(load_content);
+        let current_content = current_dir.as_ref().and_then(load_content);
 
         let mut merged_raw = read_npmrc_raw(home_dir.clone());
         merged_raw.extend(read_npmrc_raw(current_dir.clone()));
         let user_raw = read_npmrc_raw(current_dir.clone());
 
-        let mut config = current_dir
-            .as_ref()
-            .and_then(load)
-            .or_else(|| home_dir.as_ref().and_then(load))
-            .unwrap_or_else(default);
+        let mut config = match (&home_content, &current_content) {
+            (Some(home), Some(current)) => parse(&format!("{home}\n{current}"))
+                .or_else(|| parse(current))
+                .or_else(|| parse(home)),
+            (None, Some(current)) => parse(current),
+            (Some(home), None) => parse(home),
+            (None, None) => None,
+        }
+        .unwrap_or_else(default);
+        config.apply_derived_settings();
         config.raw_settings = merged_raw;
         config.raw_user_settings = user_raw;
         if !config.raw_settings.contains_key("registry") {
@@ -471,6 +492,23 @@ impl Npmrc {
         }
         config.recompute_auth_headers()?;
         Ok(config)
+    }
+
+    pub fn apply_derived_settings(&mut self) {
+        if !self.hoist {
+            self.hoist_pattern.clear();
+        }
+
+        if self.shamefully_hoist {
+            self.public_hoist_pattern = vec!["*".to_string()];
+        } else if self.public_hoist_pattern.len() == 1 && self.public_hoist_pattern[0].is_empty() {
+            self.public_hoist_pattern.clear();
+        }
+
+        if !self.symlink {
+            self.hoist_pattern.clear();
+            self.public_hoist_pattern.clear();
+        }
     }
 
     fn recompute_auth_headers(&mut self) -> Result<(), AuthConfigError> {
@@ -505,6 +543,17 @@ impl Npmrc {
         };
         try_match(url)
             .or_else(|| remove_default_port(url).and_then(|without_port| try_match(&without_port)))
+    }
+
+    pub fn registry_for_package_name(&self, package_name: &str) -> String {
+        let Some(scope) = package_scope(package_name) else {
+            return self.registry.clone();
+        };
+        let key = format!("{scope}:registry");
+        self.raw_settings
+            .get(&key)
+            .map(|registry| normalize_registry_url(registry))
+            .unwrap_or_else(|| self.registry.clone())
     }
 
     /// Persist the config data until the program terminates.
@@ -572,6 +621,14 @@ mod tests {
     }
 
     #[test]
+    pub fn parse_single_string_hoist_patterns() {
+        let value: Npmrc =
+            serde_ini::from_str("hoist-pattern=*\npublic-hoist-pattern=*hello*").unwrap();
+        assert_eq!(value.hoist_pattern, vec!["*".to_string()]);
+        assert_eq!(value.public_hoist_pattern, vec!["*hello*".to_string()]);
+    }
+
+    #[test]
     pub fn parse_bool() {
         let value: Npmrc = serde_ini::from_str("prefer-frozen-lockfile=false").unwrap();
         assert!(!value.prefer_frozen_lockfile);
@@ -603,6 +660,36 @@ mod tests {
     pub fn parse_u64() {
         let value: Npmrc = serde_ini::from_str("modules-cache-max-age=1000").unwrap();
         assert_eq!(value.modules_cache_max_age, 1000);
+    }
+
+    #[test]
+    pub fn derived_settings_clear_hoist_pattern_when_hoist_is_false() {
+        let mut value: Npmrc = serde_ini::from_str("hoist=false").unwrap();
+        value.apply_derived_settings();
+        assert!(!value.hoist);
+        assert!(value.hoist_pattern.is_empty());
+    }
+
+    #[test]
+    pub fn derived_settings_force_public_hoist_all_when_shamefully_hoist_is_true() {
+        let mut value = Npmrc::new();
+        value.public_hoist_pattern = vec!["*eslint*".to_string()];
+        value.shamefully_hoist = true;
+        value.apply_derived_settings();
+        assert!(value.shamefully_hoist);
+        assert_eq!(value.public_hoist_pattern, vec!["*".to_string()]);
+    }
+
+    #[test]
+    pub fn derived_settings_clear_hoist_patterns_when_symlink_is_false() {
+        let mut value = Npmrc::new();
+        value.hoist_pattern = vec!["*".to_string()];
+        value.public_hoist_pattern = vec!["*hello*".to_string()];
+        value.symlink = false;
+        value.apply_derived_settings();
+        assert!(!value.symlink);
+        assert!(value.hoist_pattern.is_empty());
+        assert!(value.public_hoist_pattern.is_empty());
     }
 
     #[test]
@@ -672,6 +759,45 @@ mod tests {
 
         let without_slash: Npmrc = serde_ini::from_str("registry=https://yagiz.co/").unwrap();
         assert_eq!(without_slash.registry, "https://yagiz.co/");
+    }
+
+    #[test]
+    pub fn registry_for_package_name_uses_scoped_registry_from_raw_settings() {
+        let mut config = Npmrc::new();
+        config.registry = "https://default.example/".to_string();
+        config.raw_settings = HashMap::from([
+            ("registry".to_string(), "https://default.example/".to_string()),
+            ("@foo:registry".to_string(), "https://foo.example".to_string()),
+        ]);
+
+        assert_eq!(config.registry_for_package_name("@foo/pkg"), "https://foo.example/");
+        assert_eq!(config.registry_for_package_name("@bar/pkg"), "https://default.example/");
+        assert_eq!(config.registry_for_package_name("is-number"), "https://default.example/");
+    }
+
+    #[test]
+    pub fn current_merges_scoped_registries_from_home_and_project_npmrc() {
+        let home = tempdir().unwrap();
+        let project = tempdir().unwrap();
+
+        fs::write(
+            home.path().join(".npmrc"),
+            "registry=https://default.example/\n@foo:registry=https://foo.example\n",
+        )
+        .expect("write home npmrc");
+        fs::write(project.path().join(".npmrc"), "@bar:registry=https://bar.example/\n")
+            .expect("write project npmrc");
+
+        let config = Npmrc::current(
+            || Ok::<_, ()>(project.path().to_path_buf()),
+            || Some(home.path().to_path_buf()),
+            Npmrc::new,
+        )
+        .expect("load npmrc");
+
+        assert_eq!(config.registry_for_package_name("@foo/pkg"), "https://foo.example/");
+        assert_eq!(config.registry_for_package_name("@bar/pkg"), "https://bar.example/");
+        assert_eq!(config.registry_for_package_name("is-number"), "https://default.example/");
     }
 
     #[test]

@@ -195,15 +195,16 @@ async fn resolve_package_spec(
         return Ok((package_name.to_string(), workspace_spec));
     }
 
+    let registry = config.registry_for_package_name(package_name);
     let version_range = match requested_spec {
         None => {
             let auth_header =
-                config.auth_header_for_url(&format!("{}{}/latest", &config.registry, package_name));
+                config.auth_header_for_url(&format!("{registry}{package_name}/latest"));
             let latest_version = PackageVersion::fetch_from_registry(
                 package_name,
                 PackageTag::Latest,
                 http_client,
-                &config.registry,
+                &registry,
                 auth_header.as_deref(),
             )
             .await
@@ -211,13 +212,13 @@ async fn resolve_package_spec(
             latest_version.serialize(save_exact)
         }
         Some(spec) if spec.parse::<PackageTag>().is_ok() => {
-            let auth_header = config
-                .auth_header_for_url(&format!("{}{}/{}", &config.registry, package_name, spec));
+            let auth_header =
+                config.auth_header_for_url(&format!("{registry}{package_name}/{spec}"));
             PackageVersion::fetch_from_registry(
                 package_name,
                 spec.parse::<PackageTag>().expect("checked above"),
                 http_client,
-                &config.registry,
+                &registry,
                 auth_header.as_deref(),
             )
             .await
@@ -225,12 +226,11 @@ async fn resolve_package_spec(
             spec.to_string()
         }
         Some(spec) => {
-            let auth_header =
-                config.auth_header_for_url(&format!("{}{}", &config.registry, package_name));
+            let auth_header = config.auth_header_for_url(&format!("{registry}{package_name}"));
             let package = Package::fetch_from_registry(
                 package_name,
                 http_client,
-                &config.registry,
+                &registry,
                 auth_header.as_deref(),
             )
             .await
@@ -255,15 +255,16 @@ async fn resolve_npm_alias_target_spec(
     requested_spec: Option<&str>,
     save_exact: bool,
 ) -> Result<String, AddError> {
+    let registry = config.registry_for_package_name(target_name);
     let resolved = match requested_spec {
         None => {
             let auth_header =
-                config.auth_header_for_url(&format!("{}{}/latest", &config.registry, target_name));
+                config.auth_header_for_url(&format!("{registry}{target_name}/latest"));
             let latest_version = PackageVersion::fetch_from_registry(
                 target_name,
                 PackageTag::Latest,
                 http_client,
-                &config.registry,
+                &registry,
                 auth_header.as_deref(),
             )
             .await
@@ -272,13 +273,13 @@ async fn resolve_npm_alias_target_spec(
         }
         Some(spec) if spec.parse::<PackageTag>().is_ok() => {
             let tag = spec.parse::<PackageTag>().expect("checked above");
-            let auth_header = config
-                .auth_header_for_url(&format!("{}{}/{}", &config.registry, target_name, spec));
+            let auth_header =
+                config.auth_header_for_url(&format!("{registry}{target_name}/{spec}"));
             let resolved_version = PackageVersion::fetch_from_registry(
                 target_name,
                 spec.parse::<PackageTag>().expect("checked above"),
                 http_client,
-                &config.registry,
+                &registry,
                 auth_header.as_deref(),
             )
             .await
@@ -289,12 +290,11 @@ async fn resolve_npm_alias_target_spec(
             }
         }
         Some(spec) => {
-            let auth_header =
-                config.auth_header_for_url(&format!("{}{}", &config.registry, target_name));
+            let auth_header = config.auth_header_for_url(&format!("{registry}{target_name}"));
             let package = Package::fetch_from_registry(
                 target_name,
                 http_client,
-                &config.registry,
+                &registry,
                 auth_header.as_deref(),
             )
             .await

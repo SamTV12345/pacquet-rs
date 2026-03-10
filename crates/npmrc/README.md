@@ -4,10 +4,10 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 
 | Done | Field                | Notes |
 |------|----------------------|-------|
-| ~    | hoist                | virtual-store hoist + root public-hoist behavior wired |
-| ~    | hoist_pattern        | supports include/exclude pattern filtering for virtual-store hoists |
-| ~    | public_hoist_pattern | supports include/exclude pattern filtering for root node_modules hoists |
-| ~    | shamefully_hoist     | hoists all discovered virtual-store packages to root node_modules |
+| ~    | hoist                | virtual-store hoist wired; derived config clears hoist patterns when disabled |
+| ~    | hoist_pattern        | supports single-string `.npmrc` values plus include/exclude wildcard filtering for virtual-store hoists |
+| ~    | public_hoist_pattern | supports single-string `.npmrc` values plus include/exclude wildcard filtering for root node_modules hoists |
+| ~    | shamefully_hoist     | hoists all discovered virtual-store packages to root node_modules and normalizes to `public-hoist-pattern=*` |
 
 # Node-Modules Settings
 
@@ -16,7 +16,7 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 | ✅    | store_dir             |                                     |
 | ✅    | modules_dir           |                                     |
 | ~    | node_linker           | `hoisted` root hoist is wired; `pnp` now suppresses root node_modules hoists |
-| ~    | symlink               | `false` avoids root links for isolated linker; with hoisted linker packages are copied into root |
+| ~    | symlink               | `false` avoids root links for isolated linker, clears hoist/public-hoist patterns, and still copies with hoisted linker |
 | ✅    | virtual_store_dir     |                                     |
 | ~    | package_import_method | `auto`, `copy`, `hardlink`, `clone`, and `clone-or-copy` wired (`clone` depends on reflink support) |
 | ~    | modules_cache_max_age | stale orphan virtual-store entries are pruned based on age |
@@ -35,7 +35,7 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 
 | Done | Field              | Notes |
 |------|--------------------|-------|
-| ✅    | registry           |       |
+| ✅    | registry           | default and scoped (`@scope:registry`) registries are normalized and used for metadata fetch/cache |
 | ✅    | <URL>:_authToken   |       |
 | ✅    | <URL>:tokenHelper  | token helper must be an absolute existing path; read from user/project config |
 

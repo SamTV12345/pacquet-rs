@@ -59,7 +59,10 @@ where
                             .join(target_name)
                     }
                     ResolvedDependencyVersion::Link(link) => {
-                        let relative = link.strip_prefix("link:").unwrap_or(link);
+                        let relative = link
+                            .strip_prefix("link:")
+                            .or_else(|| link.strip_prefix("file:"))
+                            .unwrap_or(link);
                         config
                             .modules_dir
                             .parent()
@@ -68,18 +71,31 @@ where
                     }
                 };
                 let dependency_path = config.modules_dir.join(&name_str);
-                if dependency_path.exists() {
+                let should_refresh_existing = matches!(
+                    &spec.version,
+                    ResolvedDependencyVersion::Link(link)
+                        if link.starts_with("file:")
+                            || should_inject_workspace_dependency(
+                                project_snapshot,
+                                &name_str,
+                                &spec.specifier,
+                                config,
+                            )
+                );
+                if dependency_path.exists() && !should_refresh_existing {
                     return;
                 }
 
                 let result = match &spec.version {
-                    ResolvedDependencyVersion::Link(_) => {
+                    ResolvedDependencyVersion::Link(link) => {
                         if should_inject_workspace_dependency(
                             project_snapshot,
                             &name_str,
                             &spec.specifier,
                             config,
                         ) {
+                            link_package(false, &symlink_target, &dependency_path)
+                        } else if link.starts_with("file:") || spec.specifier.starts_with("file:") {
                             link_package(false, &symlink_target, &dependency_path)
                         } else {
                             if !config.symlink {

@@ -85,16 +85,13 @@ where
                 continue;
             }
 
-            if let Some(resolved_package) = resolve_link_dependency(version_range) {
-                if config.symlink
-                    && !lockfile_only
-                    && let Some(link_target) = version_range.strip_prefix("link:")
-                {
-                    let project_dir = manifest.path().parent().unwrap_or_else(|| Path::new("."));
-                    let local_dep_path = normalize_local_dependency_path(project_dir, link_target);
-                    let symlink_path = config.modules_dir.join(name);
-                    link_package(config.symlink, &local_dep_path, &symlink_path)
-                        .expect("symlink local link dependency");
+            if let Some((resolved_package, local_dep_path, should_symlink)) =
+                resolve_local_dependency(manifest.path(), version_range)
+            {
+                if !lockfile_only {
+                    let dependency_path = config.modules_dir.join(name);
+                    link_package(should_symlink, &local_dep_path, &dependency_path)
+                        .expect("install local dependency");
                 }
                 resolved_direct_dependencies.insert(key, resolved_package);
                 continue;
@@ -541,7 +538,10 @@ fn should_include_dependency_in_lockfile(
     if specifier.starts_with("workspace:") {
         return true;
     }
-    !matches!(resolved_version, ResolvedDependencyVersion::Link(_))
+    !matches!(
+        resolved_version,
+        ResolvedDependencyVersion::Link(version) if version.starts_with("link:")
+    )
 }
 
 fn merge_project_snapshot(
@@ -638,14 +638,26 @@ fn to_relative_path(from: &Path, to: &Path) -> String {
     if relative_parts.is_empty() { ".".to_string() } else { relative_parts.join("/") }
 }
 
-fn resolve_link_dependency(version_range: &str) -> Option<ResolvedPackage> {
-    let link_target = version_range.strip_prefix("link:")?;
-    Some(ResolvedPackage {
-        version: ResolvedDependencyVersion::Link(format!(
-            "link:{}",
-            link_target.replace('\\', "/")
-        )),
-    })
+fn resolve_local_dependency(
+    manifest_path: &Path,
+    version_range: &str,
+) -> Option<(ResolvedPackage, PathBuf, bool)> {
+    let (protocol, target, should_symlink) =
+        if let Some(target) = version_range.strip_prefix("link:") {
+            ("link:", target, true)
+        } else if let Some(target) = version_range.strip_prefix("file:") {
+            ("file:", target, false)
+        } else {
+            return None;
+        };
+    let project_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let local_dep_path = normalize_local_dependency_path(project_dir, target);
+    let normalized = format!("{protocol}{}", target.replace('\\', "/"));
+    Some((
+        ResolvedPackage { version: ResolvedDependencyVersion::Link(normalized) },
+        local_dep_path,
+        should_symlink,
+    ))
 }
 
 fn should_inject_workspace_dependency(

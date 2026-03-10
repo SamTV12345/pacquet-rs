@@ -252,33 +252,27 @@ fn wildcard_match(value: &str, pattern: &str) -> bool {
         return true;
     }
 
-    let mut remainder = value;
-    let mut first = true;
-    for part in pattern.split('*') {
-        if part.is_empty() {
-            continue;
-        }
-        if first {
-            if !remainder.starts_with(part) {
+    let parts = pattern.split('*').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    if parts.is_empty() {
+        return false;
+    }
+
+    let mut search_start = 0usize;
+    for (index, part) in parts.iter().enumerate() {
+        if index == 0 && !pattern.starts_with('*') {
+            if !value[search_start..].starts_with(part) {
                 return false;
             }
-            remainder = &remainder[part.len()..];
-            first = false;
+            search_start += part.len();
             continue;
         }
-        let Some(index) = remainder.find(part) else {
+        let Some(offset) = value[search_start..].find(part) else {
             return false;
         };
-        remainder = &remainder[index + part.len()..];
+        search_start += offset + part.len();
     }
 
-    if !pattern.ends_with('*')
-        && let Some(last) = pattern.split('*').next_back()
-    {
-        return value.ends_with(last);
-    }
-
-    true
+    pattern.ends_with('*') || value.ends_with(parts.last().expect("checked above"))
 }
 
 fn dependency_layout_is_present(
@@ -420,6 +414,16 @@ mod tests {
             select_hoisted_packages(&packages, true, &["*".to_string(), "!bar".to_string()]);
         assert!(selected.contains_key("foo"));
         assert!(!selected.contains_key("bar"));
+    }
+
+    #[test]
+    fn wildcard_match_supports_leading_star() {
+        assert!(wildcard_match("@pnpm.e2e/hello-world-js-bin", "*hello-world-js-bin"));
+    }
+
+    #[test]
+    fn wildcard_match_empty_pattern_does_not_match_everything() {
+        assert!(!wildcard_match("eslint", ""));
     }
 
     #[test]

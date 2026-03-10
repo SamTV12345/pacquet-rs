@@ -106,6 +106,43 @@ fn should_install_dependencies() {
 }
 
 #[test]
+fn scoped_registry_should_override_default_registry_for_install_and_metadata_cache() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { npmrc_path, store_dir: _, cache_dir, mock_instance } = npmrc_info;
+
+    fs::write(
+        &npmrc_path,
+        format!(
+            "registry=http://127.0.0.1:9/\n@pnpm.e2e:registry={}\nstore-dir=../pacquet-store\ncache-dir=../pacquet-cache\n",
+            mock_instance.url()
+        ),
+    )
+    .expect("rewrite .npmrc with scoped registry");
+
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin": "1.0.0",
+            },
+        })
+        .to_string(),
+    )
+    .expect("write package.json");
+
+    pacquet.with_arg("install").assert().success();
+
+    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin").exists());
+    assert!(
+        metadata_cache_file(&cache_dir, &mock_instance.url(), "@pnpm.e2e/hello-world-js-bin")
+            .exists()
+    );
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
 fn installed_dependency_bin_should_be_runnable_via_pacquet_run() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
@@ -1737,6 +1774,157 @@ fn link_protocol_dependency_should_link_local_package() {
     let lockfile_content =
         fs::read_to_string(app_dir.join("pnpm-lock.yaml")).expect("read app lockfile");
     assert!(lockfile_content.contains("version: link:../src"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn file_protocol_dependency_should_materialize_local_package() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let lib_dir = workspace.join("src");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create src dir");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.0.0",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write file package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'v1';\n").expect("write source file");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "file:../src"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let materialized_dep = app_dir.join("node_modules/@repo/lib");
+    assert!(materialized_dep.exists());
+    let metadata =
+        fs::symlink_metadata(&materialized_dep).expect("read materialized dependency metadata");
+    assert!(!metadata.file_type().is_symlink());
+    assert_eq!(
+        fs::read_to_string(materialized_dep.join("index.js")).expect("read installed file"),
+        "module.exports = 'v1';\n"
+    );
+
+    let lockfile_content =
+        fs::read_to_string(app_dir.join("pnpm-lock.yaml")).expect("read app lockfile");
+    assert!(lockfile_content.contains("specifier: file:../src"));
+    assert!(lockfile_content.contains("version: file:../src"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn frozen_file_protocol_dependency_should_materialize_local_package_from_lockfile() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let lib_dir = workspace.join("src");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create src dir");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.0.0",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write file package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'v1';\n").expect("write source file");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "file:../src"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+    fs::remove_dir_all(app_dir.join("node_modules")).expect("remove node_modules");
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install", "--frozen-lockfile"])
+        .assert()
+        .success();
+
+    let materialized_dep = app_dir.join("node_modules/@repo/lib");
+    assert!(materialized_dep.exists());
+    let metadata =
+        fs::symlink_metadata(&materialized_dep).expect("read materialized dependency metadata");
+    assert!(!metadata.file_type().is_symlink());
+    assert!(materialized_dep.join("package.json").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn reinstall_should_refresh_file_protocol_dependency_contents() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let lib_dir = workspace.join("src");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create src dir");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.0.0",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write file package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'v1';\n").expect("write source file");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "file:../src"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+    fs::write(lib_dir.join("index.js"), "module.exports = 'v2';\n").expect("update source file");
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install"])
+        .assert()
+        .success();
+
+    let materialized_dep = app_dir.join("node_modules/@repo/lib");
+    assert_eq!(
+        fs::read_to_string(materialized_dep.join("index.js")).expect("read installed file"),
+        "module.exports = 'v2';\n"
+    );
 
     drop(root); // cleanup
 }

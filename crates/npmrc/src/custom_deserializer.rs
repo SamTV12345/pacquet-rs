@@ -16,7 +16,7 @@ pub fn default_hoist_pattern() -> Vec<String> {
 }
 
 pub fn default_public_hoist_pattern() -> Vec<String> {
-    vec!["*eslint*".to_string(), "*prettier*".to_string()]
+    vec![]
 }
 
 // Get the drive letter from a path on Windows. If it's not a Windows path, return None.
@@ -149,6 +149,23 @@ where
 {
     let s = String::deserialize(deserializer)?;
     u16::from_str(&s).map_err(de::Error::custom)
+}
+
+pub fn deserialize_string_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    match StringOrVec::deserialize(deserializer)? {
+        StringOrVec::One(value) => Ok(vec![value]),
+        StringOrVec::Many(values) => Ok(values),
+    }
 }
 
 pub fn deserialize_pathbuf<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>

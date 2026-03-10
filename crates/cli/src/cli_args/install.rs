@@ -305,6 +305,7 @@ fn config_for_project(
     if let Some(value) = prefer_frozen_lockfile_override {
         next.prefer_frozen_lockfile = value;
     }
+    next.apply_derived_settings();
     next
 }
 

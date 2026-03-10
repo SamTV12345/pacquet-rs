@@ -84,6 +84,18 @@ impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
                         }
                         return;
                     }
+                    if let Some(file_target) = version_range.strip_prefix("file:") {
+                        let project_dir =
+                            manifest.path().parent().unwrap_or_else(|| Path::new("."));
+                        let file_target = if Path::new(file_target).is_absolute() {
+                            Path::new(file_target).to_path_buf()
+                        } else {
+                            project_dir.join(file_target)
+                        };
+                        crate::link_package(false, &file_target, &config.modules_dir.join(name))
+                            .expect("materialize local file dependency");
+                        return;
+                    }
                     let resolved_range = apply_workspace_root_peer_override(
                         config,
                         &workspace_root_peer_overrides,
