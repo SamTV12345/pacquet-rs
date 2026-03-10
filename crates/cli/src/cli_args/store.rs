@@ -83,6 +83,7 @@ impl StoreCommand {
                 let http_client = ThrottledClient::new_with_options(
                     config.network_concurrency as usize,
                     Some(config.fetch_timeout),
+                    config.strict_ssl,
                 );
                 let tarball_mem_cache = MemCache::new();
 

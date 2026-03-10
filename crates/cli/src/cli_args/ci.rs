@@ -15,6 +15,8 @@ impl CiArgs {
         InstallArgs {
             dependency_options: self.dependency_options,
             frozen_lockfile: true,
+            prefer_frozen_lockfile: false,
+            no_prefer_frozen_lockfile: false,
             fix_lockfile: false,
             ignore_scripts: true,
             lockfile_only: false,

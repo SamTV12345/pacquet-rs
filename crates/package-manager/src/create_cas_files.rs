@@ -23,16 +23,10 @@ pub fn create_cas_files(
     dir_path: &Path,
     cas_paths: &HashMap<String, PathBuf>,
 ) -> Result<(), CreateCasFilesError> {
-    assert_eq!(
-        import_method,
-        PackageImportMethod::Auto,
-        "Only PackageImportMethod::Auto is currently supported, but {dir_path:?} requires {import_method:?}",
-    );
-
     cas_paths
         .par_iter()
         .try_for_each(|(cleaned_entry, store_path)| {
-            link_file(store_path, &dir_path.join(cleaned_entry))
+            link_file(import_method, store_path, &dir_path.join(cleaned_entry))
         })
         .map_err(CreateCasFilesError::LinkFile)
 }
@@ -71,5 +65,37 @@ mod tests {
 
         assert!(target.join("a.txt").is_file());
         assert!(target.join("b.txt").is_file());
+    }
+
+    #[test]
+    fn supports_copy_import_method() {
+        let temp = tempdir().expect("create tempdir");
+        let store = temp.path().join("store");
+        let target = temp.path().join("target");
+        fs::create_dir_all(&store).expect("create store dir");
+
+        let source = store.join("pkg.txt");
+        fs::write(&source, "content").expect("write source file");
+        let cas_paths = HashMap::from([("pkg.txt".to_string(), source)]);
+
+        create_cas_files(PackageImportMethod::Copy, &target, &cas_paths)
+            .expect("create files with copy method");
+        assert!(target.join("pkg.txt").is_file());
+    }
+
+    #[test]
+    fn supports_hardlink_import_method() {
+        let temp = tempdir().expect("create tempdir");
+        let store = temp.path().join("store");
+        let target = temp.path().join("target");
+        fs::create_dir_all(&store).expect("create store dir");
+
+        let source = store.join("pkg.txt");
+        fs::write(&source, "content").expect("write source file");
+        let cas_paths = HashMap::from([("pkg.txt".to_string(), source.clone())]);
+
+        create_cas_files(PackageImportMethod::Hardlink, &target, &cas_paths)
+            .expect("create files with hardlink method");
+        assert!(target.join("pkg.txt").is_file());
     }
 }

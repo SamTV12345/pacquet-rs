@@ -173,6 +173,15 @@ async fn resolve_package_spec(
 
     let (package_name, requested_spec) = split_package_spec(package);
 
+    if let Some(spec) = requested_spec
+        && spec.starts_with("workspace:")
+    {
+        let Some(_) = workspace_packages.get(package_name) else {
+            return Err(AddError::WorkspacePackageNotFound { package: package_name.to_string() });
+        };
+        return Ok((package_name.to_string(), spec.to_string()));
+    }
+
     if workspace_only {
         let Some(_) = workspace_packages.get(package_name) else {
             return Err(AddError::WorkspacePackageNotFound { package: package_name.to_string() });
@@ -384,6 +393,10 @@ mod tests {
         assert_eq!(split_package_spec("fastify@1.2.3"), ("fastify", Some("1.2.3")));
         assert_eq!(split_package_spec("fastify@latest"), ("fastify", Some("latest")));
         assert_eq!(split_package_spec("@scope/pkg@^1.0.0"), ("@scope/pkg", Some("^1.0.0")));
+        assert_eq!(
+            split_package_spec("@scope/pkg@workspace:*"),
+            ("@scope/pkg", Some("workspace:*"))
+        );
     }
 
     #[test]

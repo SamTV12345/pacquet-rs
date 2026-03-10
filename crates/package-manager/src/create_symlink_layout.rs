@@ -1,4 +1,4 @@
-use crate::symlink_package;
+use crate::link_package;
 use pacquet_lockfile::{PackageSnapshotDependency, PkgName, PkgNameVerPeer};
 use std::{collections::HashMap, fs, path::Path};
 #[cfg(windows)]
@@ -11,6 +11,7 @@ pub fn create_symlink_layout(
     dependencies: &HashMap<PkgName, PackageSnapshotDependency>,
     virtual_root: &Path,
     virtual_node_modules_dir: &Path,
+    symlink: bool,
 ) {
     for (alias, spec) in dependencies {
         let (virtual_store_name, target_package_name) = match spec {
@@ -33,13 +34,13 @@ pub fn create_symlink_layout(
         if path_points_to_target(&symlink_target, &symlink_path) {
             continue;
         }
-        let symlink_result = symlink_package(&symlink_target, &symlink_path);
+        let symlink_result = link_package(symlink, &symlink_target, &symlink_path);
         #[cfg(windows)]
         let symlink_result = if symlink_result.is_err() {
             let mut retry = symlink_result;
             for _ in 0..2 {
                 thread::sleep(Duration::from_millis(20));
-                retry = symlink_package(&symlink_target, &symlink_path);
+                retry = link_package(symlink, &symlink_target, &symlink_path);
                 if retry.is_ok() {
                     break;
                 }

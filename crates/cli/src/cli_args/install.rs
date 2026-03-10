@@ -52,6 +52,14 @@ pub struct InstallArgs {
     #[clap(long)]
     pub frozen_lockfile: bool,
 
+    /// Prefer lockfile-only resolution when a compatible lockfile is present.
+    #[clap(long, conflicts_with = "no_prefer_frozen_lockfile")]
+    pub prefer_frozen_lockfile: bool,
+
+    /// Disable lockfile-only preference and always resolve dependencies online/offline as needed.
+    #[clap(long, conflicts_with = "prefer_frozen_lockfile")]
+    pub no_prefer_frozen_lockfile: bool,
+
     /// Fix broken lockfile entries and proceed even when frozen lockfile checks would fail.
     #[clap(long)]
     pub fix_lockfile: bool,
@@ -116,6 +124,8 @@ impl InstallArgs {
         let InstallArgs {
             dependency_options,
             frozen_lockfile,
+            prefer_frozen_lockfile,
+            no_prefer_frozen_lockfile,
             fix_lockfile,
             ignore_scripts: _ignore_scripts,
             lockfile_only,
@@ -131,6 +141,13 @@ impl InstallArgs {
         } = self;
         let lockfile_only = lockfile_only || resolution_only;
         let frozen_lockfile = frozen_lockfile && !fix_lockfile;
+        let prefer_frozen_lockfile_override = if prefer_frozen_lockfile {
+            Some(true)
+        } else if no_prefer_frozen_lockfile {
+            Some(false)
+        } else {
+            None
+        };
         let dependency_groups = dependency_options.dependency_groups().collect::<Vec<_>>();
 
         let mut install_targets = BTreeMap::<String, PathBuf>::new();
@@ -180,7 +197,13 @@ impl InstallArgs {
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| lockfile_dir.to_path_buf());
-            let target_config = config_for_project(config, &project_dir, shamefully_hoist).leak();
+            let target_config = config_for_project(
+                config,
+                &project_dir,
+                shamefully_hoist,
+                prefer_frozen_lockfile_override,
+            )
+            .leak();
 
             Install {
                 tarball_mem_cache,
@@ -261,7 +284,12 @@ fn apply_workspace_filters(
     Ok(selected)
 }
 
-fn config_for_project(config: &Npmrc, project_dir: &Path, shamefully_hoist: bool) -> Npmrc {
+fn config_for_project(
+    config: &Npmrc,
+    project_dir: &Path,
+    shamefully_hoist: bool,
+    prefer_frozen_lockfile_override: Option<bool>,
+) -> Npmrc {
     let mut next = config.clone();
     next.store_dir = StoreDir::new(config.store_dir.display().to_string());
     next.modules_dir = project_dir.join("node_modules");
@@ -273,6 +301,9 @@ fn config_for_project(config: &Npmrc, project_dir: &Path, shamefully_hoist: bool
     if shamefully_hoist {
         next.shamefully_hoist = true;
         next.hoist = true;
+    }
+    if let Some(value) = prefer_frozen_lockfile_override {
+        next.prefer_frozen_lockfile = value;
     }
     next
 }

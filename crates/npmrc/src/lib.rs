@@ -134,6 +134,10 @@ pub struct Npmrc {
     #[serde(default = "default_fetch_timeout", deserialize_with = "deserialize_u64")]
     pub fetch_timeout: u64,
 
+    /// Controls whether SSL/TLS certificate validation is enforced for registry requests.
+    #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
+    pub strict_ssl: bool,
+
     /// When set to false, pnpm won't read or generate a pnpm-lock.yaml file.
     #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
     pub lockfile: bool,
@@ -540,6 +544,7 @@ mod tests {
         assert_eq!(value.package_import_method, PackageImportMethod::default());
         assert_eq!(value.network_concurrency, 16);
         assert_eq!(value.fetch_timeout, 60000);
+        assert!(value.strict_ssl);
         assert!(value.lockfile);
         assert!(value.prefer_frozen_lockfile);
         assert!(!value.exclude_links_from_lockfile);
@@ -610,6 +615,12 @@ mod tests {
     pub fn parse_fetch_timeout() {
         let value: Npmrc = serde_ini::from_str("fetch-timeout=45000").unwrap();
         assert_eq!(value.fetch_timeout, 45000);
+    }
+
+    #[test]
+    pub fn parse_strict_ssl() {
+        let value: Npmrc = serde_ini::from_str("strict-ssl=false").unwrap();
+        assert!(!value.strict_ssl);
     }
 
     #[test]

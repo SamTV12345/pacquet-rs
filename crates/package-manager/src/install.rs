@@ -9,7 +9,12 @@ use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_tarball::MemCache;
-use std::path::Path;
+use serde::Deserialize;
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// This subroutine does everything `pacquet install` is supposed to do.
 #[must_use]
@@ -113,7 +118,7 @@ where
                         .is_ok()
                 });
 
-                if lockfile_is_reusable {
+                if lockfile_is_reusable && config.prefer_frozen_lockfile {
                     if !lockfile_only {
                         InstallFrozenLockfile {
                             http_client,
@@ -236,6 +241,9 @@ where
         tracing::info!(target: "pacquet::install", "Complete all");
         if !lockfile_only {
             hoist_virtual_store_packages(config)?;
+            if config.strict_peer_dependencies {
+                validate_strict_peer_dependencies(config, lockfile_dir)?;
+            }
             link_bins_for_manifest(config, manifest, dependency_groups.iter().copied())?;
         }
 
@@ -246,6 +254,173 @@ where
         progress_reporter::finish(result.is_ok());
         result
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StrictPeerPackageManifest {
+    name: Option<String>,
+    version: Option<String>,
+    peer_dependencies: Option<HashMap<String, String>>,
+    peer_dependencies_meta: Option<HashMap<String, StrictPeerDependencyMeta>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StrictPeerDependencyMeta {
+    optional: Option<bool>,
+}
+
+fn validate_strict_peer_dependencies(config: &Npmrc, workspace_root: &Path) -> miette::Result<()> {
+    let package_dirs = collect_candidate_package_dirs(config);
+    let mut issues = Vec::<String>::new();
+
+    for package_dir in package_dirs {
+        let manifest_path = package_dir.join("package.json");
+        let Ok(text) = fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<StrictPeerPackageManifest>(&text) else {
+            continue;
+        };
+        let Some(peer_dependencies) = manifest.peer_dependencies else {
+            continue;
+        };
+        let Some(node_modules_dir) = containing_node_modules_dir(&package_dir) else {
+            continue;
+        };
+        let package_name = manifest.name.unwrap_or_else(|| package_dir.display().to_string());
+
+        for (peer_name, peer_range) in peer_dependencies {
+            let is_optional = manifest
+                .peer_dependencies_meta
+                .as_ref()
+                .and_then(|meta| meta.get(&peer_name))
+                .and_then(|meta| meta.optional)
+                .unwrap_or(false);
+            if is_optional {
+                continue;
+            }
+
+            let peer_version = resolve_peer_version(
+                &peer_name,
+                &node_modules_dir,
+                workspace_root,
+                config.resolve_peers_from_workspace_root,
+            );
+            let Some(peer_version) = peer_version else {
+                issues.push(format!(
+                    "{package_name} requires peer {peer_name}@{peer_range}, but it is not installed"
+                ));
+                continue;
+            };
+            if !peer_version_satisfies(&peer_version, &peer_range) {
+                issues.push(format!(
+                    "{package_name} requires peer {peer_name}@{peer_range}, but found {peer_version}"
+                ));
+            }
+        }
+    }
+
+    if issues.is_empty() {
+        return Ok(());
+    }
+
+    let details =
+        issues.iter().take(10).map(|issue| format!("  - {issue}")).collect::<Vec<_>>().join("\n");
+    miette::bail!("Cannot proceed because strict-peer-dependencies is enabled:\n{details}");
+}
+
+fn collect_candidate_package_dirs(config: &Npmrc) -> Vec<PathBuf> {
+    let mut dirs = Vec::<PathBuf>::new();
+    dirs.extend(collect_package_dirs_in_node_modules(&config.modules_dir));
+
+    let Ok(virtual_store_entries) = fs::read_dir(&config.virtual_store_dir) else {
+        return dirs;
+    };
+    for entry in virtual_store_entries.flatten() {
+        let entry_path = entry.path();
+        let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name == "node_modules" {
+            continue;
+        }
+        dirs.extend(collect_package_dirs_in_node_modules(&entry_path.join("node_modules")));
+    }
+    dirs
+}
+
+fn collect_package_dirs_in_node_modules(node_modules_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(node_modules_dir) else {
+        return vec![];
+    };
+    let mut result = Vec::<PathBuf>::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == ".pnpm" || name == ".pacquet" || name == ".bin" {
+            continue;
+        }
+        if name.starts_with('@') {
+            let Ok(scope_entries) = fs::read_dir(&path) else {
+                continue;
+            };
+            for scope_entry in scope_entries.flatten() {
+                let scope_path = scope_entry.path();
+                if scope_path.is_dir() {
+                    result.push(scope_path);
+                }
+            }
+            continue;
+        }
+        result.push(path);
+    }
+    result
+}
+
+fn containing_node_modules_dir(package_dir: &Path) -> Option<PathBuf> {
+    package_dir.ancestors().find_map(|ancestor| {
+        ancestor
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "node_modules")
+            .then(|| ancestor.to_path_buf())
+    })
+}
+
+fn resolve_peer_version(
+    peer_name: &str,
+    package_node_modules_dir: &Path,
+    workspace_root: &Path,
+    resolve_from_workspace_root: bool,
+) -> Option<String> {
+    let mut candidate_dirs = vec![package_node_modules_dir.to_path_buf()];
+    if resolve_from_workspace_root {
+        let root_node_modules_dir = workspace_root.join("node_modules");
+        if root_node_modules_dir != package_node_modules_dir {
+            candidate_dirs.push(root_node_modules_dir);
+        }
+    }
+
+    candidate_dirs.into_iter().find_map(|node_modules_dir| {
+        let peer_manifest_path = node_modules_dir.join(peer_name).join("package.json");
+        let peer_text = fs::read_to_string(peer_manifest_path).ok()?;
+        let peer_manifest = serde_json::from_str::<StrictPeerPackageManifest>(&peer_text).ok()?;
+        peer_manifest.version
+    })
+}
+
+fn peer_version_satisfies(version: &str, range: &str) -> bool {
+    let Ok(version) = version.parse::<node_semver::Version>() else {
+        return true;
+    };
+    let Ok(range) = range.parse::<node_semver::Range>() else {
+        return true;
+    };
+    version.satisfies(&range)
 }
 
 #[cfg(test)]
@@ -329,5 +504,196 @@ mod tests {
         insta::assert_debug_snapshot!(get_all_folders(&project_root));
 
         drop((dir, mock_instance)); // cleanup
+    }
+
+    #[test]
+    fn strict_peer_validation_fails_for_missing_required_peer() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = Npmrc::new();
+        config.modules_dir = dir.path().join("node_modules");
+        config.virtual_store_dir = config.modules_dir.join(".pnpm");
+        config.strict_peer_dependencies = true;
+
+        let pkg_dir = config.modules_dir.join("a");
+        fs::create_dir_all(&pkg_dir).expect("create package dir");
+        fs::write(
+            pkg_dir.join("package.json"),
+            serde_json::json!({
+                "name": "a",
+                "version": "1.0.0",
+                "peerDependencies": {
+                    "peer-a": "^1.0.0"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+
+        let error = validate_strict_peer_dependencies(&config, dir.path())
+            .expect_err("missing peer should fail");
+        let message = error.to_string();
+        assert!(message.contains("strict-peer-dependencies"));
+        assert!(message.contains("peer-a"));
+    }
+
+    #[test]
+    fn strict_peer_validation_ignores_optional_peer() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = Npmrc::new();
+        config.modules_dir = dir.path().join("node_modules");
+        config.virtual_store_dir = config.modules_dir.join(".pnpm");
+        config.strict_peer_dependencies = true;
+
+        let pkg_dir = config.modules_dir.join("a");
+        fs::create_dir_all(&pkg_dir).expect("create package dir");
+        fs::write(
+            pkg_dir.join("package.json"),
+            serde_json::json!({
+                "name": "a",
+                "version": "1.0.0",
+                "peerDependencies": {
+                    "peer-a": "^1.0.0"
+                },
+                "peerDependenciesMeta": {
+                    "peer-a": {
+                        "optional": true
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+
+        validate_strict_peer_dependencies(&config, dir.path())
+            .expect("optional missing peer should pass");
+    }
+
+    #[test]
+    fn strict_peer_validation_fails_for_incompatible_peer_version() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = Npmrc::new();
+        config.modules_dir = dir.path().join("node_modules");
+        config.virtual_store_dir = config.modules_dir.join(".pnpm");
+        config.strict_peer_dependencies = true;
+
+        let pkg_dir = config.modules_dir.join("a");
+        let peer_dir = config.modules_dir.join("peer-a");
+        fs::create_dir_all(&pkg_dir).expect("create package dir");
+        fs::create_dir_all(&peer_dir).expect("create peer package dir");
+        fs::write(
+            pkg_dir.join("package.json"),
+            serde_json::json!({
+                "name": "a",
+                "version": "1.0.0",
+                "peerDependencies": {
+                    "peer-a": "^2.0.0"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+        fs::write(
+            peer_dir.join("package.json"),
+            serde_json::json!({
+                "name": "peer-a",
+                "version": "1.0.0"
+            })
+            .to_string(),
+        )
+        .expect("write peer package.json");
+
+        let error = validate_strict_peer_dependencies(&config, dir.path())
+            .expect_err("incompatible peer should fail");
+        let message = error.to_string();
+        assert!(message.contains("found 1.0.0"));
+    }
+
+    #[test]
+    fn strict_peer_validation_resolves_from_workspace_root_when_enabled() {
+        let dir = tempdir().expect("tempdir");
+        let workspace_root = dir.path().join("workspace");
+        let project_dir = workspace_root.join("packages/app");
+        let project_modules = project_dir.join("node_modules");
+        let root_modules = workspace_root.join("node_modules");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = project_modules.clone();
+        config.virtual_store_dir = project_modules.join(".pnpm");
+        config.strict_peer_dependencies = true;
+        config.resolve_peers_from_workspace_root = true;
+
+        let pkg_dir = project_modules.join("a");
+        let peer_dir = root_modules.join("peer-a");
+        fs::create_dir_all(&pkg_dir).expect("create package dir");
+        fs::create_dir_all(&peer_dir).expect("create root peer dir");
+        fs::write(
+            pkg_dir.join("package.json"),
+            serde_json::json!({
+                "name": "a",
+                "version": "1.0.0",
+                "peerDependencies": {
+                    "peer-a": "^1.0.0"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+        fs::write(
+            peer_dir.join("package.json"),
+            serde_json::json!({
+                "name": "peer-a",
+                "version": "1.0.0"
+            })
+            .to_string(),
+        )
+        .expect("write root peer package.json");
+
+        validate_strict_peer_dependencies(&config, &workspace_root)
+            .expect("peer from workspace root should satisfy strict-peer-dependencies");
+    }
+
+    #[test]
+    fn strict_peer_validation_fails_without_workspace_root_resolution() {
+        let dir = tempdir().expect("tempdir");
+        let workspace_root = dir.path().join("workspace");
+        let project_dir = workspace_root.join("packages/app");
+        let project_modules = project_dir.join("node_modules");
+        let root_modules = workspace_root.join("node_modules");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = project_modules.clone();
+        config.virtual_store_dir = project_modules.join(".pnpm");
+        config.strict_peer_dependencies = true;
+        config.resolve_peers_from_workspace_root = false;
+
+        let pkg_dir = project_modules.join("a");
+        let peer_dir = root_modules.join("peer-a");
+        fs::create_dir_all(&pkg_dir).expect("create package dir");
+        fs::create_dir_all(&peer_dir).expect("create root peer dir");
+        fs::write(
+            pkg_dir.join("package.json"),
+            serde_json::json!({
+                "name": "a",
+                "version": "1.0.0",
+                "peerDependencies": {
+                    "peer-a": "^1.0.0"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+        fs::write(
+            peer_dir.join("package.json"),
+            serde_json::json!({
+                "name": "peer-a",
+                "version": "1.0.0"
+            })
+            .to_string(),
+        )
+        .expect("write root peer package.json");
+
+        let error = validate_strict_peer_dependencies(&config, &workspace_root)
+            .expect_err("peer from workspace root should not be used when disabled");
+        assert!(error.to_string().contains("peer-a"));
     }
 }

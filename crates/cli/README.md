@@ -14,7 +14,7 @@
 [pnpm documentation](https://pnpm.io/cli/add)
 
 - [x] Install from npm registry, including explicit versions, semver ranges, tags, npm alias specs, and multiple package specs
-- [ ] Install from the workspace
+- [x] Install from the workspace (via `workspace:` protocol and `--workspace`)
 - [x] Install from local file system
 - [x] Install from remote tarball
 - [~] Install from Git repository (GitHub-style specs are supported)
@@ -47,6 +47,8 @@
 | ✅   | --lockfile-only             | writes pnpm-lock.yaml without creating node_modules |
 | ✅   | --fix-lockfile              | overrides frozen lockfile strictness for repair/update flow |
 | ✅   | --frozen-lockfile           |       |
+| ✅   | --prefer-frozen-lockfile    | overrides `.npmrc` preference for current command |
+| ✅   | --no-prefer-frozen-lockfile | overrides `.npmrc` preference for current command |
 | ✅   | --reporter=<name>           | accepted for compatibility |
 | ✅   | --use-store-server          | accepted for compatibility |
 | ✅   | --shamefully-hoist          | enables hoisted links in `.pnpm/node_modules` |

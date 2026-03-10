@@ -378,6 +378,84 @@ fn workspace_flag_should_fail_for_non_workspace_package() {
 }
 
 #[test]
+fn workspace_protocol_spec_should_add_workspace_dependency_without_workspace_flag() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    std::fs::create_dir_all(&app_dir).expect("create app package directory");
+    std::fs::create_dir_all(&lib_dir).expect("create lib package directory");
+    std::fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    std::fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+    std::fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "2.3.4"
+        })
+        .to_string(),
+    )
+    .expect("write lib manifest");
+
+    pacquet
+        .with_args(["-C", app_dir.to_str().unwrap(), "add", "@repo/lib@workspace:*"])
+        .assert()
+        .success();
+
+    let app_manifest = PackageManifest::from_path(app_dir.join("package.json")).unwrap();
+    assert!(
+        app_manifest
+            .dependencies([DependencyGroup::Prod])
+            .any(|(name, spec)| name == "@repo/lib" && spec == "workspace:*")
+    );
+    assert!(app_dir.join("node_modules/@repo/lib").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn workspace_protocol_spec_should_fail_for_non_workspace_package() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    std::fs::create_dir_all(&app_dir).expect("create app package directory");
+    std::fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    std::fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+
+    pacquet
+        .with_args(["-C", app_dir.to_str().unwrap(), "add", "@repo/missing@workspace:*"])
+        .assert()
+        .failure();
+
+    let app_manifest = PackageManifest::from_path(app_dir.join("package.json")).unwrap();
+    assert!(
+        !app_manifest
+            .dependencies([DependencyGroup::Prod])
+            .any(|(name, _)| name == "@repo/missing")
+    );
+
+    drop(root); // cleanup
+}
+
+#[test]
 fn add_filter_should_target_only_selected_workspace_project() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();

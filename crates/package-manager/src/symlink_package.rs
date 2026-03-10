@@ -68,6 +68,57 @@ pub enum SymlinkPackageError {
         #[error(source)]
         error: io::Error,
     },
+
+    #[display("Failed to read source directory at {path:?}: {error}")]
+    ReadSourceDir {
+        path: PathBuf,
+        #[error(source)]
+        error: io::Error,
+    },
+
+    #[display("Failed to read source entry type at {path:?}: {error}")]
+    ReadSourceEntryType {
+        path: PathBuf,
+        #[error(source)]
+        error: io::Error,
+    },
+
+    #[display("Failed to create destination directory at {path:?}: {error}")]
+    CreateDestinationDir {
+        path: PathBuf,
+        #[error(source)]
+        error: io::Error,
+    },
+
+    #[display("Failed to copy file from {from:?} to {to:?}: {error}")]
+    CopyFile {
+        from: PathBuf,
+        to: PathBuf,
+        #[error(source)]
+        error: io::Error,
+    },
+
+    #[display("Failed to canonicalize path at {path:?}: {error}")]
+    CanonicalizePath {
+        path: PathBuf,
+        #[error(source)]
+        error: io::Error,
+    },
+}
+
+/// Link package from `symlink_target` to `symlink_path`.
+///
+/// If `symlink` is false, this creates a physical directory copy at `symlink_path`.
+pub fn link_package(
+    symlink: bool,
+    symlink_target: &Path,
+    symlink_path: &Path,
+) -> Result<(), SymlinkPackageError> {
+    if symlink {
+        return symlink_package(symlink_target, symlink_path);
+    }
+
+    copy_package_dir(symlink_target, symlink_path)
 }
 
 /// Create symlink for a package.
@@ -213,4 +264,82 @@ fn rename_existing_path(path: &Path) -> Result<(), io::Error> {
         }
     }
     fs::rename(path, &rename_to)
+}
+
+fn copy_package_dir(source: &Path, destination: &Path) -> Result<(), SymlinkPackageError> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| SymlinkPackageError::CreateParentDir {
+            dir: parent.to_path_buf(),
+            error,
+        })?;
+    }
+
+    if destination.exists() {
+        remove_existing_path(destination)?;
+    }
+
+    let source = fs::canonicalize(source).map_err(|error| {
+        SymlinkPackageError::CanonicalizePath { path: source.to_path_buf(), error }
+    })?;
+    copy_dir_recursive(&source, destination)
+}
+
+fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), SymlinkPackageError> {
+    fs::create_dir_all(destination).map_err(|error| SymlinkPackageError::CreateDestinationDir {
+        path: destination.to_path_buf(),
+        error,
+    })?;
+
+    let entries = fs::read_dir(source).map_err(|error| SymlinkPackageError::ReadSourceDir {
+        path: source.to_path_buf(),
+        error,
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| SymlinkPackageError::ReadSourceDir {
+            path: source.to_path_buf(),
+            error,
+        })?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|error| {
+            SymlinkPackageError::ReadSourceEntryType { path: from.clone(), error }
+        })?;
+        if file_type.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+            continue;
+        }
+        fs::copy(&from, &to).map_err(|error| SymlinkPackageError::CopyFile {
+            from: from.clone(),
+            to: to.clone(),
+            error,
+        })?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn link_package_without_symlink_copies_directory() {
+        let dir = tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        let destination = dir.path().join("node_modules/pkg");
+        fs::create_dir_all(source.join("lib")).expect("create source dir");
+        fs::write(source.join("package.json"), "{\"name\":\"pkg\",\"version\":\"1.0.0\"}")
+            .expect("write package.json");
+        fs::write(source.join("lib/index.js"), "module.exports = 1;").expect("write nested file");
+
+        link_package(false, &source, &destination).expect("copy package");
+
+        assert!(destination.join("package.json").exists());
+        assert!(destination.join("lib/index.js").exists());
+        let metadata = fs::symlink_metadata(&destination).expect("read destination metadata");
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
+    }
 }

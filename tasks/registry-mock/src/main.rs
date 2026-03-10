@@ -35,6 +35,7 @@ async fn launch() {
         stderr: Some(&stderr),
         max_retries: 20,
         retry_delay: Duration::from_millis(500),
+        request_timeout: Duration::from_secs(2),
     };
     let saved_info = PreparedRegistryInfo::launch(options).await;
     dbg!(&saved_info, &stdout, &stderr);

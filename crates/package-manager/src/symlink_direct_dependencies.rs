@@ -1,4 +1,4 @@
-use crate::symlink_package;
+use crate::{link_package, should_materialize_root_links, symlink_package};
 use pacquet_lockfile::{PkgName, PkgNameVerPeer, ProjectSnapshot, ResolvedDependencyVersion};
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::DependencyGroup;
@@ -27,6 +27,9 @@ where
     /// Execute the subroutine.
     pub fn run(self) {
         let SymlinkDirectDependencies { config, project_snapshot, dependency_groups } = self;
+        if !should_materialize_root_links(config) {
+            return;
+        }
 
         project_snapshot
             .dependencies_by_groups(dependency_groups)
@@ -68,7 +71,16 @@ where
                     return;
                 }
 
-                symlink_package(&symlink_target, &dependency_path).unwrap_or_else(|error| {
+                let result = match &spec.version {
+                    ResolvedDependencyVersion::Link(_) => {
+                        if !config.symlink {
+                            return;
+                        }
+                        symlink_package(&symlink_target, &dependency_path)
+                    }
+                    _ => link_package(config.symlink, &symlink_target, &dependency_path),
+                };
+                result.unwrap_or_else(|error| {
                     panic!("direct dependency symlink should succeed ({name_str}): {error}")
                 });
             });

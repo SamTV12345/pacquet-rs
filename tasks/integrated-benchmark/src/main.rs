@@ -33,6 +33,7 @@ async fn main() {
             stderr: work_env.join("verdaccio.stderr.log").pipe(Some).as_deref(),
             max_retries: 10,
             retry_delay: tokio::time::Duration::from_millis(500),
+            request_timeout: tokio::time::Duration::from_secs(2),
         }
         .spawn_if_necessary()
         .await

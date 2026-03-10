@@ -8,7 +8,11 @@ use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_registry::PackageVersion;
 use pacquet_tarball::MemCache;
 use pipe_trait::Pipe;
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// In-memory cache for packages that have started resolving dependencies.
 ///
@@ -55,50 +59,68 @@ impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
             prefer_offline,
             offline,
         } = self;
+        let workspace_root_peer_overrides = workspace_root_peer_overrides(manifest.path());
 
         let _: Vec<()> = manifest
             .dependencies(dependency_groups.into_iter())
-            .map(|(name, version_range)| async move {
-                if let Some(link_target) = version_range.strip_prefix("link:") {
-                    let project_dir = manifest.path().parent().unwrap_or_else(|| Path::new("."));
-                    let link_target = if Path::new(link_target).is_absolute() {
-                        Path::new(link_target).to_path_buf()
-                    } else {
-                        project_dir.join(link_target)
-                    };
-                    crate::symlink_package(&link_target, &config.modules_dir.join(name))
-                        .expect("symlink local link dependency");
-                    return;
-                }
+            .map(|(name, version_range)| {
+                let workspace_root_peer_overrides = workspace_root_peer_overrides.clone();
+                async move {
+                    if let Some(link_target) = version_range.strip_prefix("link:") {
+                        let project_dir =
+                            manifest.path().parent().unwrap_or_else(|| Path::new("."));
+                        let link_target = if Path::new(link_target).is_absolute() {
+                            Path::new(link_target).to_path_buf()
+                        } else {
+                            project_dir.join(link_target)
+                        };
+                        if config.symlink {
+                            crate::link_package(
+                                config.symlink,
+                                &link_target,
+                                &config.modules_dir.join(name),
+                            )
+                            .expect("symlink local link dependency");
+                        }
+                        return;
+                    }
+                    let resolved_range = apply_workspace_root_peer_override(
+                        config,
+                        &workspace_root_peer_overrides,
+                        None,
+                        name,
+                        version_range,
+                    );
 
-                let dependency = InstallPackageFromRegistry {
-                    tarball_mem_cache,
-                    http_client,
-                    config,
-                    node_modules_dir: &config.modules_dir,
-                    name,
-                    version_range,
-                    prefer_offline,
-                    offline,
-                    force,
-                }
-                .run()
-                .await
-                .unwrap();
+                    let dependency = InstallPackageFromRegistry {
+                        tarball_mem_cache,
+                        http_client,
+                        config,
+                        node_modules_dir: &config.modules_dir,
+                        name,
+                        version_range: resolved_range.as_str(),
+                        prefer_offline,
+                        offline,
+                        force,
+                    }
+                    .run()
+                    .await
+                    .unwrap();
 
-                InstallWithoutLockfile {
-                    tarball_mem_cache,
-                    http_client,
-                    config,
-                    manifest,
-                    dependency_groups: (),
-                    resolved_packages,
-                    force,
-                    prefer_offline,
-                    offline,
+                    InstallWithoutLockfile {
+                        tarball_mem_cache,
+                        http_client,
+                        config,
+                        manifest,
+                        dependency_groups: (),
+                        resolved_packages,
+                        force,
+                        prefer_offline,
+                        offline,
+                    }
+                    .install_dependencies_from_registry(&dependency, &workspace_root_peer_overrides)
+                    .await;
                 }
-                .install_dependencies_from_registry(&dependency)
-                .await;
             })
             .pipe(future::join_all)
             .await;
@@ -108,7 +130,11 @@ impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
 impl<'a> InstallWithoutLockfile<'a, ()> {
     /// Install dependencies of a dependency.
     #[async_recursion]
-    async fn install_dependencies_from_registry(&self, package: &PackageVersion) {
+    async fn install_dependencies_from_registry(
+        &self,
+        package: &PackageVersion,
+        workspace_root_peer_overrides: &HashMap<String, String>,
+    ) {
         let InstallWithoutLockfile {
             tarball_mem_cache,
             http_client,
@@ -137,13 +163,20 @@ impl<'a> InstallWithoutLockfile<'a, ()> {
         package
             .dependencies(self.config.auto_install_peers)
             .map(|(name, version_range)| async {
+                let version_range = apply_workspace_root_peer_override(
+                    self.config,
+                    workspace_root_peer_overrides,
+                    package.peer_dependencies.as_ref(),
+                    name,
+                    version_range,
+                );
                 let dependency = InstallPackageFromRegistry {
                     tarball_mem_cache,
                     http_client,
                     config,
                     node_modules_dir: &node_modules_path,
                     name,
-                    version_range,
+                    version_range: &version_range,
                     prefer_offline: *prefer_offline,
                     offline: *offline,
                     force: *force,
@@ -151,11 +184,134 @@ impl<'a> InstallWithoutLockfile<'a, ()> {
                 .run()
                 .await
                 .unwrap(); // TODO: proper error propagation
-                self.install_dependencies_from_registry(&dependency).await;
+                self.install_dependencies_from_registry(&dependency, workspace_root_peer_overrides)
+                    .await;
             })
             .pipe(future::join_all)
             .await;
 
         tracing::info!(target: "pacquet::install", node_modules = ?node_modules_path, "Complete subset");
+    }
+}
+
+fn apply_workspace_root_peer_override(
+    config: &Npmrc,
+    workspace_root_peer_overrides: &HashMap<String, String>,
+    peer_dependencies: Option<&HashMap<String, String>>,
+    name: &str,
+    requested_range: &str,
+) -> String {
+    if !config.resolve_peers_from_workspace_root {
+        return requested_range.to_string();
+    }
+
+    let is_peer = peer_dependencies.is_some_and(|peers| peers.contains_key(name));
+    if !is_peer {
+        return requested_range.to_string();
+    }
+
+    workspace_root_peer_overrides.get(name).cloned().unwrap_or_else(|| requested_range.to_string())
+}
+
+fn workspace_root_peer_overrides(manifest_path: &Path) -> HashMap<String, String> {
+    let Some(start_dir) = manifest_path.parent() else {
+        return HashMap::new();
+    };
+    let Some(workspace_root) = find_workspace_root(start_dir) else {
+        return HashMap::new();
+    };
+    read_dependency_specs(&workspace_root.join("package.json"))
+}
+
+fn find_workspace_root(start_dir: &Path) -> Option<PathBuf> {
+    let mut dir = start_dir.to_path_buf();
+    loop {
+        if dir.join("pnpm-workspace.yaml").is_file() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+fn read_dependency_specs(package_json_path: &Path) -> HashMap<String, String> {
+    let Ok(text) = fs::read_to_string(package_json_path) else {
+        return HashMap::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return HashMap::new();
+    };
+
+    ["dependencies", "optionalDependencies", "devDependencies", "peerDependencies"]
+        .into_iter()
+        .flat_map(|field| {
+            value
+                .get(field)
+                .and_then(serde_json::Value::as_object)
+                .into_iter()
+                .flatten()
+                .filter_map(|(name, spec)| {
+                    spec.as_str().map(|spec| (name.to_string(), spec.to_string()))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn workspace_root_peer_overrides_reads_root_package_dependencies() {
+        let dir = tempdir().expect("tempdir");
+        let workspace_root = dir.path().join("workspace");
+        let project_dir = workspace_root.join("packages/app");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::write(workspace_root.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+            .expect("write workspace manifest");
+        fs::write(
+            workspace_root.join("package.json"),
+            serde_json::json!({
+                "name": "workspace-root",
+                "version": "1.0.0",
+                "dependencies": {
+                    "react": "^18.3.0"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write root package.json");
+        fs::write(project_dir.join("package.json"), "{\"name\":\"app\",\"version\":\"1.0.0\"}")
+            .expect("write app package.json");
+
+        let overrides = workspace_root_peer_overrides(&project_dir.join("package.json"));
+        assert_eq!(overrides.get("react").map(String::as_str), Some("^18.3.0"));
+    }
+
+    #[test]
+    fn apply_workspace_root_peer_override_uses_workspace_spec_for_peer() {
+        let mut config = Npmrc::new();
+        config.resolve_peers_from_workspace_root = true;
+        let root = HashMap::from([("react".to_string(), "^18.3.0".to_string())]);
+        let peers = HashMap::from([("react".to_string(), "^18.0.0".to_string())]);
+
+        let resolved =
+            apply_workspace_root_peer_override(&config, &root, Some(&peers), "react", "^18.0.0");
+        assert_eq!(resolved, "^18.3.0");
+    }
+
+    #[test]
+    fn apply_workspace_root_peer_override_keeps_non_peer_range() {
+        let mut config = Npmrc::new();
+        config.resolve_peers_from_workspace_root = true;
+        let root = HashMap::from([("react".to_string(), "^18.3.0".to_string())]);
+        let peers = HashMap::from([("typescript".to_string(), "^5.0.0".to_string())]);
+
+        let resolved =
+            apply_workspace_root_peer_override(&config, &root, Some(&peers), "react", "^18.0.0");
+        assert_eq!(resolved, "^18.0.0");
     }
 }

@@ -10,6 +10,7 @@ pub struct ThrottledClient {
     client: Client,
     permits: usize,
     request_timeout_ms: Option<u64>,
+    strict_ssl: bool,
 }
 
 impl ThrottledClient {
@@ -36,21 +37,23 @@ impl ThrottledClient {
 
     /// Construct a new throttled client with a fixed permit count.
     pub fn new_with_limit(permits: usize) -> Self {
-        Self::new_with_options(permits, None)
+        Self::new_with_options(permits, None, true)
     }
 
     /// Construct a new throttled client with a fixed permit count and optional request timeout.
-    pub fn new_with_options(permits: usize, request_timeout_ms: Option<u64>) -> Self {
+    pub fn new_with_options(
+        permits: usize,
+        request_timeout_ms: Option<u64>,
+        strict_ssl: bool,
+    ) -> Self {
         let permits = permits.max(1);
         let semaphore = permits.pipe(Semaphore::new);
-        let client = match request_timeout_ms {
-            Some(ms) => Client::builder()
-                .timeout(Duration::from_millis(ms))
-                .build()
-                .expect("build reqwest client with timeout"),
-            None => Client::new(),
-        };
-        ThrottledClient { semaphore, client, permits, request_timeout_ms }
+        let mut builder = Client::builder().danger_accept_invalid_certs(!strict_ssl);
+        if let Some(ms) = request_timeout_ms {
+            builder = builder.timeout(Duration::from_millis(ms));
+        }
+        let client = builder.build().expect("build reqwest client");
+        ThrottledClient { semaphore, client, permits, request_timeout_ms, strict_ssl }
     }
 
     /// Configured request concurrency limit.
@@ -61,6 +64,11 @@ impl ThrottledClient {
     /// Configured request timeout in milliseconds.
     pub fn request_timeout_ms(&self) -> Option<u64> {
         self.request_timeout_ms
+    }
+
+    /// Whether TLS certificate validation is enforced.
+    pub fn strict_ssl(&self) -> bool {
+        self.strict_ssl
     }
 }
 

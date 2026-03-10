@@ -6,7 +6,7 @@ use pacquet_lockfile::{
     ProjectSnapshot, ResolvedDependencyVersion,
 };
 use pacquet_network::ThrottledClient;
-use pacquet_npmrc::Npmrc;
+use pacquet_npmrc::{NodeLinker, Npmrc};
 use pacquet_package_manifest::DependencyGroup;
 use std::collections::{HashMap, HashSet};
 
@@ -54,8 +54,6 @@ where
 
         // TODO: check if the lockfile is out-of-date
 
-        assert!(config.prefer_frozen_lockfile, "Non frozen lockfile is not yet supported");
-
         if force
             || !importer_dependencies_ready(
                 config,
@@ -92,10 +90,15 @@ fn importer_dependencies_ready(
 
     let direct_dependencies =
         project_snapshot.dependencies_by_groups(dependency_groups).collect::<Vec<_>>();
+    let should_expect_direct_links =
+        config.symlink || matches!(config.node_linker, NodeLinker::Hoisted);
     if !direct_dependencies.iter().all(|(alias, spec)| {
-        let direct_link = config.modules_dir.join(alias.to_string());
-        if !direct_link.exists() {
-            return false;
+        let is_link_dependency = matches!(spec.version, ResolvedDependencyVersion::Link(_));
+        if should_expect_direct_links && !is_link_dependency {
+            let direct_link = config.modules_dir.join(alias.to_string());
+            if !direct_link.exists() {
+                return false;
+            }
         }
         direct_dependency_virtual_store_location(alias, &spec.version).is_none_or(
             |(_, virtual_store_name, package_name)| {

@@ -1,9 +1,9 @@
 use crate::{
     CreateCasFilesError, SymlinkPackageError, create_cas_files,
     fetch_package_from_registry_and_cache, fetch_package_with_metadata_cache, is_git_spec,
-    is_tarball_spec, progress_reporter, read_cached_package_from_config,
+    is_tarball_spec, link_package, progress_reporter, read_cached_package_from_config,
     resolve_package_version_from_git_spec, resolve_package_version_from_tarball_spec,
-    symlink_package,
+    should_materialize_root_links,
 };
 use derive_more::{Display, Error};
 use miette::Diagnostic;
@@ -181,6 +181,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
             .join("node_modules")
             .join(&package_version.name);
         let symlink_path = node_modules_dir.join(symlink_name);
+        let should_link = should_materialize_root_links(config);
 
         // Fast warm-install check: this package is already imported to the virtual store.
         if force && save_path.exists() {
@@ -192,9 +193,11 @@ impl<'a> InstallPackageFromRegistry<'a> {
         }
 
         if !force && save_path.join("package.json").is_file() {
-            symlink_package(&save_path, &symlink_path)
-                .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
-            progress_reporter::linked();
+            if should_link {
+                link_package(config.symlink, &save_path, &symlink_path)
+                    .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
+                progress_reporter::linked();
+            }
             return Ok(());
         }
 
@@ -207,9 +210,11 @@ impl<'a> InstallPackageFromRegistry<'a> {
                 )
                 .is_some_and(|index| package_is_already_imported(&save_path, &index.files))
         {
-            symlink_package(&save_path, &symlink_path)
-                .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
-            progress_reporter::linked();
+            if should_link {
+                link_package(config.symlink, &save_path, &symlink_path)
+                    .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
+                progress_reporter::linked();
+            }
             return Ok(());
         }
 
@@ -239,9 +244,11 @@ impl<'a> InstallPackageFromRegistry<'a> {
         create_cas_files(config.package_import_method, &save_path, &cas_paths)
             .map_err(InstallPackageFromRegistryError::CreateCasFiles)?;
 
-        symlink_package(&save_path, &symlink_path)
-            .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
-        progress_reporter::linked();
+        if should_link {
+            link_package(config.symlink, &save_path, &symlink_path)
+                .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
+            progress_reporter::linked();
+        }
 
         Ok(())
     }

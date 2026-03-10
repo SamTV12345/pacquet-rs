@@ -12,7 +12,7 @@ use std::{
     process::{Child, Command, Stdio},
 };
 use sysinfo::{Pid, Signal};
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, sleep, timeout};
 
 /// Handler of a mocked registry server instance.
 ///
@@ -41,23 +41,26 @@ pub struct MockInstanceOptions<'a> {
     pub stderr: Option<&'a Path>,
     pub max_retries: usize,
     pub retry_delay: Duration,
+    pub request_timeout: Duration,
 }
 
 impl<'a> MockInstanceOptions<'a> {
     async fn is_registry_ready(self) -> bool {
-        let MockInstanceOptions { client, port, .. } = self;
+        let MockInstanceOptions { client, port, request_timeout, .. } = self;
         let url = port_to_url(port);
 
-        let Err(error) = client.head(url).send().await else {
-            return true;
-        };
-
-        if error.is_connect() {
-            eprintln!("info: {error}");
-            return false;
+        match timeout(request_timeout, client.head(&url).send()).await {
+            Ok(Ok(_)) => true,
+            Ok(Err(error)) if error.is_connect() || error.is_timeout() => {
+                eprintln!("info: {error}");
+                false
+            }
+            Ok(Err(error)) => panic!("{error}"),
+            Err(_) => {
+                eprintln!("info: registry readiness probe timed out for {url}");
+                false
+            }
         }
-
-        panic!("{error}");
     }
 
     async fn wait_for_registry(self) {
@@ -148,6 +151,7 @@ impl AutoMockInstance {
                 stderr: None,
                 max_retries: 20,
                 retry_delay: Duration::from_millis(500),
+                request_timeout: Duration::from_secs(2),
             }
         });
 
@@ -163,5 +167,39 @@ impl AutoMockInstance {
 
     pub fn url(&self) -> String {
         self.info().url()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::{net::TcpListener, time::Instant};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn is_registry_ready_should_timeout_for_stalled_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind listener");
+        let port = listener.local_addr().expect("listener addr").port();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("accept socket");
+            sleep(Duration::from_secs(5)).await;
+        });
+
+        let client = Client::new();
+        let options = MockInstanceOptions {
+            client: &client,
+            port,
+            stdout: None,
+            stderr: None,
+            max_retries: 1,
+            retry_delay: Duration::from_millis(1),
+            request_timeout: Duration::from_millis(100),
+        };
+
+        let start = Instant::now();
+        let ready = options.is_registry_ready().await;
+        assert!(!ready);
+        assert!(start.elapsed() < Duration::from_secs(2));
+
+        server.abort();
     }
 }
