@@ -1845,6 +1845,122 @@ fn workspace_injected_dependency_should_write_peer_suffixed_local_snapshot() {
 }
 
 #[test]
+fn workspace_injected_dependency_should_dedupe_to_link_when_target_importer_matches() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let project_1_dir = workspace.join("packages/project-1");
+    let project_2_dir = workspace.join("packages/project-2");
+    fs::create_dir_all(&project_1_dir).expect("create project-1 dir");
+    fs::create_dir_all(&project_2_dir).expect("create project-2 dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        project_1_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-1",
+            "version": "1.0.0",
+            "dependencies": {
+                "is-number": "7.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-1 manifest");
+    fs::write(
+        project_2_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-2",
+            "version": "1.0.0",
+            "dependencies": {
+                "project-1": "workspace:*"
+            },
+            "dependenciesMeta": {
+                "project-1": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-2 manifest");
+
+    pacquet.with_args(["-C", workspace.to_str().unwrap(), "install", "-r"]).assert().success();
+
+    let deduped_dep = project_2_dir.join("node_modules/project-1");
+    assert!(deduped_dep.exists());
+    assert!(is_symlink_or_junction(&deduped_dep).unwrap());
+
+    let lockfile_content =
+        fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
+    assert!(lockfile_content.contains("packages/project-2:"));
+    assert!(lockfile_content.contains("version: link:../project-1"));
+    assert!(!lockfile_content.contains("'project-1@file:packages/project-1':"));
+
+    drop(mock_instance);
+    drop(root); // cleanup
+}
+
+#[test]
+fn frozen_workspace_injected_dependency_should_keep_deduped_link_from_lockfile() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let project_1_dir = workspace.join("packages/project-1");
+    let project_2_dir = workspace.join("packages/project-2");
+    fs::create_dir_all(&project_1_dir).expect("create project-1 dir");
+    fs::create_dir_all(&project_2_dir).expect("create project-2 dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        project_1_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-1",
+            "version": "1.0.0",
+            "dependencies": {
+                "is-number": "7.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-1 manifest");
+    fs::write(
+        project_2_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-2",
+            "version": "1.0.0",
+            "dependencies": {
+                "project-1": "workspace:*"
+            },
+            "dependenciesMeta": {
+                "project-1": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-2 manifest");
+
+    pacquet.with_args(["-C", workspace.to_str().unwrap(), "install", "-r"]).assert().success();
+    fs::remove_dir_all(project_2_dir.join("node_modules")).expect("remove project-2 node_modules");
+
+    pacquet_command(&workspace)
+        .with_args(["-C", workspace.to_str().unwrap(), "install", "-r", "--frozen-lockfile"])
+        .assert()
+        .success();
+
+    let deduped_dep = project_2_dir.join("node_modules/project-1");
+    assert!(deduped_dep.exists());
+    assert!(is_symlink_or_junction(&deduped_dep).unwrap());
+
+    drop(mock_instance);
+    drop(root); // cleanup
+}
+
+#[test]
 fn workspace_injected_dependency_should_refresh_on_reinstall_by_default() {
     let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
 

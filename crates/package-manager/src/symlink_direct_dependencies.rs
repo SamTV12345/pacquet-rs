@@ -83,10 +83,11 @@ where
                     &spec.version,
                     ResolvedDependencyVersion::Link(link)
                         if link.starts_with("file:")
-                            || should_inject_workspace_dependency(
+                            || should_materialize_workspace_dependency(
                                 project_snapshot,
                                 &name_str,
                                 &spec.specifier,
+                                &spec.version,
                                 config,
                             )
                 ) && !config.disable_relink_local_dir_deps;
@@ -96,10 +97,11 @@ where
 
                 let result = match &spec.version {
                     ResolvedDependencyVersion::Link(link) => {
-                        let should_materialize_local_copy = should_inject_workspace_dependency(
+                        let should_materialize_local_copy = should_materialize_workspace_dependency(
                             project_snapshot,
                             &name_str,
                             &spec.specifier,
+                            &spec.version,
                             config,
                         ) || link.starts_with("file:")
                             || spec.specifier.starts_with("file:");
@@ -223,13 +225,18 @@ fn materialize_virtual_store_package(
     inner(source_package_dir, destination_package_dir, &mut HashSet::new())
 }
 
-fn should_inject_workspace_dependency(
+fn should_materialize_workspace_dependency(
     project_snapshot: &ProjectSnapshot,
     dependency_name: &str,
     specifier: &str,
+    resolved_version: &ResolvedDependencyVersion,
     config: &Npmrc,
 ) -> bool {
     if !specifier.starts_with("workspace:") {
+        return false;
+    }
+    if !matches!(resolved_version, ResolvedDependencyVersion::Link(link) if link.starts_with("file:"))
+    {
         return false;
     }
     config.inject_workspace_packages
