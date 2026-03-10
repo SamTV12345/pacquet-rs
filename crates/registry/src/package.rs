@@ -36,7 +36,7 @@ impl Package {
         let url = || format!("{registry}{name}"); // TODO: use reqwest URL directly
         let network_error = |error| NetworkError { error, url: url() };
         http_client
-            .run_with_permit(|client| {
+            .run_with_permit_for_url(&url(), |client| {
                 let mut request = client.get(url()).header(
                     "accept",
                     "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*",

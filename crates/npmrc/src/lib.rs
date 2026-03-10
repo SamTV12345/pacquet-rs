@@ -15,10 +15,17 @@ use crate::custom_deserializer::{
     bool_true, default_cache_dir, default_fetch_timeout, default_hoist_pattern,
     default_modules_cache_max_age, default_modules_dir, default_network_concurrency,
     default_peers_suffix_max_length, default_public_hoist_pattern, default_registry,
-    default_store_dir, default_virtual_store_dir, deserialize_bool, deserialize_pathbuf,
-    deserialize_registry, deserialize_store_dir, deserialize_string_vec, deserialize_u16,
-    deserialize_u64,
+    default_store_dir, default_virtual_store_dir, deserialize_bool, deserialize_optional_pathbuf,
+    deserialize_pathbuf, deserialize_registry, deserialize_store_dir, deserialize_string_vec,
+    deserialize_u16, deserialize_u64,
 };
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegistrySslConfig {
+    pub ca: Option<String>,
+    pub cert: Option<String>,
+    pub key: Option<String>,
+}
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -139,6 +146,34 @@ pub struct Npmrc {
     #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
     pub strict_ssl: bool,
 
+    /// Legacy catch-all proxy setting.
+    #[serde(default)]
+    pub proxy: Option<String>,
+
+    /// HTTPS proxy URL.
+    #[serde(default)]
+    pub https_proxy: Option<String>,
+
+    /// HTTP proxy URL.
+    #[serde(default)]
+    pub http_proxy: Option<String>,
+
+    /// Comma-separated proxy bypass list.
+    #[serde(default)]
+    pub no_proxy: Option<String>,
+
+    /// Legacy npm key normalized to `no_proxy`.
+    #[serde(default)]
+    noproxy: Option<String>,
+
+    /// PEM-encoded CA certificates used for registry TLS validation.
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    pub ca: Vec<String>,
+
+    /// Path to a PEM file with CA certificates.
+    #[serde(default, deserialize_with = "deserialize_optional_pathbuf")]
+    cafile: Option<PathBuf>,
+
     /// When set to false, pnpm won't read or generate a pnpm-lock.yaml file.
     #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
     pub lockfile: bool,
@@ -212,6 +247,9 @@ pub struct Npmrc {
     /// Largest number of slash-separated segments among auth header keys.
     #[serde(skip, default)]
     auth_header_max_parts: usize,
+    /// Per-registry TLS settings keyed by nerfed URL (`//host/path/`).
+    #[serde(skip, default)]
+    pub ssl_configs: HashMap<String, RegistrySslConfig>,
 }
 
 #[cfg(test)]
@@ -374,6 +412,39 @@ fn get_max_parts(keys: impl Iterator<Item = String>) -> usize {
     keys.map(|key| key.split('/').count()).max().unwrap_or(0)
 }
 
+fn unescape_npmrc_newlines(value: &str) -> String {
+    value.replace("\\n", "\n")
+}
+
+fn get_process_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .or_else(|| std::env::var(name.to_uppercase()).ok())
+        .or_else(|| std::env::var(name.to_lowercase()).ok())
+}
+
+fn ssl_configs_from_settings(
+    settings: &HashMap<String, String>,
+) -> HashMap<String, RegistrySslConfig> {
+    let mut configs = HashMap::<String, RegistrySslConfig>::new();
+    for (key, value) in settings {
+        let Some((uri_key, config_type)) = split_auth_setting_key(key) else {
+            continue;
+        };
+        let Some(uri) = normalize_auth_key_uri(uri_key) else {
+            continue;
+        };
+        let entry = configs.entry(uri).or_default();
+        match config_type {
+            "ca" => entry.ca = Some(unescape_npmrc_newlines(value)),
+            "cert" => entry.cert = Some(unescape_npmrc_newlines(value)),
+            "key" => entry.key = Some(unescape_npmrc_newlines(value)),
+            _ => {}
+        }
+    }
+    configs
+}
+
 fn auth_headers_from_settings(
     settings: &HashMap<String, String>,
     user_settings: &HashMap<String, String>,
@@ -444,6 +515,8 @@ impl Npmrc {
     pub fn new() -> Self {
         let mut config: Npmrc = serde_ini::from_str("").unwrap(); // TODO: derive `SmartDefault` for `Npmrc and call `Npmrc::default()`
         config.apply_derived_settings();
+        config.recompute_tls_settings();
+        config.recompute_request_settings();
         config.recompute_auth_headers().expect("default npmrc auth config should be valid");
         config
     }
@@ -490,6 +563,8 @@ impl Npmrc {
         if !config.raw_settings.contains_key("registry") {
             config.raw_settings.insert("registry".to_string(), config.registry.clone());
         }
+        config.recompute_tls_settings();
+        config.recompute_request_settings();
         config.recompute_auth_headers()?;
         Ok(config)
     }
@@ -520,6 +595,32 @@ impl Npmrc {
         self.auth_headers_by_uri = headers;
         self.auth_header_max_parts = max_parts;
         Ok(())
+    }
+
+    fn recompute_tls_settings(&mut self) {
+        self.ca = self.ca.iter().map(|entry| unescape_npmrc_newlines(entry)).collect();
+        if let Some(cafile) = &self.cafile
+            && let Ok(content) = fs::read_to_string(cafile)
+        {
+            self.ca = vec![content];
+        }
+        self.ssl_configs = ssl_configs_from_settings(&self.raw_settings);
+    }
+
+    fn recompute_request_settings(&mut self) {
+        if self.https_proxy.is_none() {
+            self.https_proxy = self.proxy.clone().or_else(|| get_process_env("https_proxy"));
+        }
+        if self.http_proxy.is_none() {
+            self.http_proxy = self
+                .https_proxy
+                .clone()
+                .or_else(|| get_process_env("http_proxy"))
+                .or_else(|| get_process_env("proxy"));
+        }
+        if self.no_proxy.is_none() {
+            self.no_proxy = self.noproxy.clone().or_else(|| get_process_env("no_proxy"));
+        }
     }
 
     pub fn auth_header_for_url(&self, url: &str) -> Option<String> {
@@ -594,6 +695,11 @@ mod tests {
         assert_eq!(value.network_concurrency, 16);
         assert_eq!(value.fetch_timeout, 60000);
         assert!(value.strict_ssl);
+        assert_eq!(value.proxy, None);
+        assert_eq!(value.https_proxy, None);
+        assert_eq!(value.http_proxy, None);
+        assert_eq!(value.no_proxy, None);
+        assert!(value.ca.is_empty());
         assert!(value.lockfile);
         assert!(value.prefer_frozen_lockfile);
         assert!(!value.exclude_links_from_lockfile);
@@ -708,6 +814,99 @@ mod tests {
     pub fn parse_strict_ssl() {
         let value: Npmrc = serde_ini::from_str("strict-ssl=false").unwrap();
         assert!(!value.strict_ssl);
+    }
+
+    #[test]
+    pub fn current_reads_cafile_into_ca() {
+        let project = tempdir().unwrap();
+        let cafile = project.path().join("cafile.pem");
+        fs::write(&cafile, "xxx\n-----END CERTIFICATE-----").expect("write cafile");
+        fs::write(project.path().join(".npmrc"), format!("cafile={}", cafile.display()))
+            .expect("write npmrc");
+
+        let config =
+            Npmrc::current(|| Ok::<_, ()>(project.path().to_path_buf()), || None, Npmrc::new)
+                .expect("load npmrc");
+        assert_eq!(config.ca, vec!["xxx\n-----END CERTIFICATE-----".to_string()]);
+    }
+
+    #[test]
+    pub fn current_reads_inline_ssl_certificates_from_npmrc() {
+        let project = tempdir().unwrap();
+        let inline_ca = "-----BEGIN CERTIFICATE-----\\nMII-CA\\n-----END CERTIFICATE-----";
+        let inline_cert = "-----BEGIN CERTIFICATE-----\\nMII-CERT\\n-----END CERTIFICATE-----";
+        let inline_key = "-----BEGIN PRIVATE KEY-----\\nMII-KEY\\n-----END PRIVATE KEY-----";
+        fs::write(
+            project.path().join(".npmrc"),
+            format!(
+                "//registry.example.com/:ca={inline_ca}\n//registry.example.com/:cert={inline_cert}\n//registry.example.com/:key={inline_key}\n"
+            ),
+        )
+        .expect("write npmrc");
+
+        let config =
+            Npmrc::current(|| Ok::<_, ()>(project.path().to_path_buf()), || None, Npmrc::new)
+                .expect("load npmrc");
+        assert_eq!(
+            config.ssl_configs.get("//registry.example.com/"),
+            Some(&RegistrySslConfig {
+                ca: Some(
+                    "-----BEGIN CERTIFICATE-----\nMII-CA\n-----END CERTIFICATE-----".to_string()
+                ),
+                cert: Some(
+                    "-----BEGIN CERTIFICATE-----\nMII-CERT\n-----END CERTIFICATE-----".to_string()
+                ),
+                key: Some(
+                    "-----BEGIN PRIVATE KEY-----\nMII-KEY\n-----END PRIVATE KEY-----".to_string()
+                ),
+            })
+        );
+    }
+
+    #[test]
+    pub fn derived_request_settings_follow_pnpm_proxy_priority() {
+        let _env_guard = crate::env_lock().lock().expect("lock env mutex");
+        unsafe {
+            env::remove_var("HTTPS_PROXY");
+            env::remove_var("https_proxy");
+            env::remove_var("HTTP_PROXY");
+            env::remove_var("http_proxy");
+            env::remove_var("NO_PROXY");
+            env::remove_var("no_proxy");
+            env::remove_var("PROXY");
+            env::remove_var("proxy");
+        }
+        let mut config: Npmrc =
+            serde_ini::from_str("proxy=http://proxy.example\nnoproxy=localhost").unwrap();
+        config.recompute_request_settings();
+        assert_eq!(config.https_proxy.as_deref(), Some("http://proxy.example"));
+        assert_eq!(config.http_proxy.as_deref(), Some("http://proxy.example"));
+        assert_eq!(config.no_proxy.as_deref(), Some("localhost"));
+    }
+
+    #[test]
+    pub fn derived_request_settings_fallback_to_env_vars() {
+        let _env_guard = crate::env_lock().lock().expect("lock env mutex");
+        unsafe {
+            env::set_var("HTTPS_PROXY", "http://secure-proxy.example");
+            env::set_var("HTTP_PROXY", "http://plain-proxy.example");
+            env::set_var("NO_PROXY", "localhost,127.0.0.1");
+            env::remove_var("PROXY");
+            env::remove_var("proxy");
+        }
+        let mut config: Npmrc = serde_ini::from_str("").unwrap();
+        config.https_proxy = None;
+        config.http_proxy = None;
+        config.no_proxy = None;
+        config.recompute_request_settings();
+        assert_eq!(config.https_proxy.as_deref(), Some("http://secure-proxy.example"));
+        assert_eq!(config.http_proxy.as_deref(), Some("http://secure-proxy.example"));
+        assert_eq!(config.no_proxy.as_deref(), Some("localhost,127.0.0.1"));
+        unsafe {
+            env::remove_var("HTTPS_PROXY");
+            env::remove_var("HTTP_PROXY");
+            env::remove_var("NO_PROXY");
+        }
     }
 
     #[test]

@@ -53,8 +53,12 @@ impl<'a> InstallPackageBySnapshot<'a> {
                 (tarball_resolution.tarball.as_str().pipe(Cow::Borrowed), integrity)
             }
             LockfileResolution::Registry(registry_resolution) => {
-                let registry = custom_registry.as_ref().unwrap_or(&config.registry);
-                let registry = registry.strip_suffix('/').unwrap_or(registry);
+                let registry = registry_for_dependency_path(
+                    config,
+                    custom_registry.as_deref(),
+                    &package_specifier.name.to_string(),
+                );
+                let registry = registry.strip_suffix('/').unwrap_or(&registry);
                 let PkgNameVerPeer { name, suffix: ver_peer } = package_specifier;
                 let version = ver_peer.version();
                 let bare_name = name.bare.as_str();
@@ -134,6 +138,22 @@ impl<'a> InstallPackageBySnapshot<'a> {
     }
 }
 
+fn registry_for_dependency_path(
+    config: &Npmrc,
+    custom_registry: Option<&str>,
+    package_name: &str,
+) -> String {
+    custom_registry
+        .map(|registry| {
+            if registry.starts_with("http://") || registry.starts_with("https://") {
+                registry.to_string()
+            } else {
+                format!("https://{registry}")
+            }
+        })
+        .unwrap_or_else(|| config.registry_for_package_name(package_name))
+}
+
 fn package_is_already_imported(
     save_path: &Path,
     index_files: &HashMap<String, PackageFileInfo>,
@@ -161,6 +181,9 @@ fn representative_file_name<'a>(file_names: impl Iterator<Item = &'a str>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pacquet_npmrc::Npmrc;
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn representative_prefers_package_json() {
@@ -172,5 +195,28 @@ mod tests {
     fn representative_falls_back_to_lexicographically_smallest() {
         let files = ["z.js", "a.js", "m.js"];
         assert_eq!(representative_file_name(files.into_iter()), Some("a.js"));
+    }
+
+    #[test]
+    fn registry_for_dependency_path_prefers_scoped_registry_from_config() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join(".npmrc"),
+            "registry=https://default.example/\n@foo:registry=https://foo.example/\n",
+        )
+        .expect("write .npmrc");
+        let config = Npmrc::current(|| Ok::<_, ()>(dir.path().to_path_buf()), || None, Npmrc::new)
+            .expect("load npmrc");
+
+        assert_eq!(registry_for_dependency_path(&config, None, "@foo/pkg"), "https://foo.example/");
+    }
+
+    #[test]
+    fn registry_for_dependency_path_preserves_absolute_custom_registry() {
+        let config = Npmrc::new();
+        assert_eq!(
+            registry_for_dependency_path(&config, Some("http://localhost:4873"), "pkg"),
+            "http://localhost:4873"
+        );
     }
 }

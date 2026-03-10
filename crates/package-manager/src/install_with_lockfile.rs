@@ -481,15 +481,7 @@ where
             .and_then(|index| index.requires_build)
             .unwrap_or(false);
 
-        let expected_registry_tarball = {
-            let registry = config.registry.trim_end_matches('/');
-            let bare_name =
-                package_version.name.rsplit('/').next().unwrap_or(package_version.name.as_str());
-            format!(
-                "{registry}/{}/-/{bare_name}-{}.tgz",
-                package_version.name, package_version.version
-            )
-        };
+        let expected_registry_tarball = expected_registry_tarball(config, package_version);
         let should_use_tarball_resolution = config.lockfile_include_tarball_url
             || package_version.as_tarball_url() != expected_registry_tarball;
 
@@ -525,6 +517,14 @@ where
             optional: None,
         }
     }
+}
+
+fn expected_registry_tarball(config: &Npmrc, package_version: &PackageVersion) -> String {
+    let registry = config.registry_for_package_name(package_version.name.as_str());
+    let registry = registry.trim_end_matches('/');
+    let bare_name =
+        package_version.name.rsplit('/').next().unwrap_or(package_version.name.as_str());
+    format!("{registry}/{}/-/{bare_name}-{}.tgz", package_version.name, package_version.version)
 }
 
 fn should_include_dependency_in_lockfile(
@@ -1247,6 +1247,39 @@ mod tests {
 
         let dependencies_meta = snapshot.dependencies_meta.expect("dependenciesMeta");
         assert_eq!(dependencies_meta["workspace-pkg"]["injected"], serde_yaml::Value::Bool(true));
+    }
+
+    #[test]
+    fn expected_registry_tarball_uses_scoped_registry_from_config() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join(".npmrc"),
+            "registry=https://default.example/\n@foo:registry=https://foo.example/\n",
+        )
+        .expect("write .npmrc");
+        let config = Npmrc::current(|| Ok::<_, ()>(dir.path().to_path_buf()), || None, Npmrc::new)
+            .expect("load npmrc");
+        let package_version = PackageVersion {
+            name: "@foo/pkg".to_string(),
+            version: "1.2.3".parse().expect("version"),
+            dist: pacquet_registry::PackageDistribution {
+                tarball: "https://foo.example/@foo/pkg/-/pkg-1.2.3.tgz".to_string(),
+                integrity: None,
+                shasum: None,
+                file_count: None,
+                unpacked_size: None,
+            },
+            dependencies: None,
+            optional_dependencies: None,
+            dev_dependencies: None,
+            peer_dependencies: None,
+            bin: None,
+        };
+
+        assert_eq!(
+            expected_registry_tarball(&config, &package_version),
+            "https://foo.example/@foo/pkg/-/pkg-1.2.3.tgz"
+        );
     }
 
     fn dummy_snapshot_with_dependencies(

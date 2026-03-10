@@ -2,7 +2,7 @@ use derive_more::{Display, Error};
 use glob::Pattern;
 use miette::Diagnostic;
 use pacquet_lockfile::{LoadLockfileError, Lockfile};
-use pacquet_network::ThrottledClient;
+use pacquet_network::{RegistryTlsConfig, ThrottledClient};
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manager::{ResolvedPackages, WorkspacePackageInfo, WorkspacePackages};
 use pacquet_package_manifest::{PackageManifest, PackageManifestError};
@@ -47,6 +47,23 @@ pub enum InitStateError {
     LoadLockfile(#[error(source)] LoadLockfileError),
 }
 
+fn network_tls_configs(config: &Npmrc) -> std::collections::HashMap<String, RegistryTlsConfig> {
+    config
+        .ssl_configs
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                RegistryTlsConfig {
+                    ca: value.ca.clone(),
+                    cert: value.cert.clone(),
+                    key: value.key.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
 impl State {
     /// Initialize the application state.
     pub fn init(manifest_path: PathBuf, config: &'static Npmrc) -> Result<Self, InitStateError> {
@@ -70,10 +87,15 @@ impl State {
             lockfile_dir,
             lockfile_importer_id,
             workspace_packages,
-            http_client: ThrottledClient::new_with_options(
+            http_client: ThrottledClient::new_with_tls_options(
                 config.network_concurrency as usize,
                 Some(config.fetch_timeout),
                 config.strict_ssl,
+                config.ca.clone(),
+                network_tls_configs(config),
+                config.https_proxy.clone(),
+                config.http_proxy.clone(),
+                config.no_proxy.clone(),
             ),
             tarball_mem_cache: MemCache::new(),
             resolved_packages: ResolvedPackages::new(),
@@ -315,11 +337,45 @@ mod tests {
         config.network_concurrency = 3;
         config.fetch_timeout = 1234;
         config.strict_ssl = false;
+        config.https_proxy = Some("http://secure-proxy.example".to_string());
+        config.http_proxy = Some("http://plain-proxy.example".to_string());
+        config.no_proxy = Some("localhost".to_string());
         let config = config.leak();
 
         let state = State::init(manifest_path, config).expect("initialize state");
         assert_eq!(state.http_client.concurrency_limit(), 3);
         assert_eq!(state.http_client.request_timeout_ms(), Some(1234));
         assert!(!state.http_client.strict_ssl());
+        assert_eq!(state.http_client.https_proxy(), Some("http://secure-proxy.example"));
+        assert_eq!(state.http_client.http_proxy(), Some("http://plain-proxy.example"));
+        assert_eq!(state.http_client.no_proxy(), Some("localhost"));
+    }
+
+    #[test]
+    fn init_passes_tls_configuration_from_npmrc() {
+        let dir = tempdir().unwrap();
+        let manifest_path = dir.path().join("package.json");
+        let mut config = Npmrc::new();
+        config.ca = vec!["-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----".to_string()];
+        config.ssl_configs.insert(
+            "//registry.example.com/".to_string(),
+            pacquet_npmrc::RegistrySslConfig {
+                ca: Some(
+                    "-----BEGIN CERTIFICATE-----\nREGISTRY-CA\n-----END CERTIFICATE-----"
+                        .to_string(),
+                ),
+                cert: Some(
+                    "-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----".to_string(),
+                ),
+                key: Some(
+                    "-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----".to_string(),
+                ),
+            },
+        );
+        let config = config.leak();
+
+        let state = State::init(manifest_path, config).expect("initialize state");
+        assert_eq!(state.http_client.ca_cert_count(), 1);
+        assert_eq!(state.http_client.registry_tls_config_count(), 1);
     }
 }

@@ -143,6 +143,44 @@ fn scoped_registry_should_override_default_registry_for_install_and_metadata_cac
 }
 
 #[test]
+fn frozen_lockfile_should_use_scoped_registry_and_omit_tarball_url_by_default() {
+    let CommandTempCwd { root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { npmrc_path, mock_instance, .. } = npmrc_info;
+
+    fs::write(
+        &npmrc_path,
+        format!(
+            "registry=http://127.0.0.1:9/\n@pnpm.e2e:registry={}\nstore-dir=../pacquet-store\ncache-dir=../pacquet-cache\n",
+            mock_instance.url()
+        ),
+    )
+    .expect("rewrite .npmrc with scoped registry");
+
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin": "1.0.0",
+            },
+        })
+        .to_string(),
+    )
+    .expect("write package.json");
+
+    pacquet_command(&workspace).with_args(["install", "--lockfile-only"]).assert().success();
+
+    let lockfile_content =
+        fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read lockfile");
+    assert!(!lockfile_content.contains("tarball:"));
+
+    pacquet_command(&workspace).with_args(["install", "--frozen-lockfile"]).assert().success();
+    assert!(workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
 fn installed_dependency_bin_should_be_runnable_via_pacquet_run() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();

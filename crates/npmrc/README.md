@@ -35,7 +35,7 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 
 | Done | Field              | Notes |
 |------|--------------------|-------|
-| ✅    | registry           | default and scoped (`@scope:registry`) registries are normalized and used for metadata fetch/cache |
+| ✅    | registry           | default and scoped (`@scope:registry`) registries are normalized and used for metadata fetch/cache, lockfile tarball inference, and frozen installs |
 | ✅    | <URL>:_authToken   |       |
 | ✅    | <URL>:tokenHelper  | token helper must be an absolute existing path; read from user/project config |
 
@@ -46,6 +46,10 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 | ✅    | network_concurrency | limits concurrent HTTP requests |
 | ✅    | fetch_timeout       | request timeout (milliseconds) |
 | ✅    | strict_ssl          | controls TLS certificate validation |
+| ~    | proxy / https_proxy | pnpm-style proxy derivation is parsed from `.npmrc` and wired into the HTTP client |
+| ~    | no_proxy / noproxy  | pnpm-style `noproxy` normalization and bypass list wiring are in place |
+| ~    | cafile / ca         | PEM CA bundle is read from `.npmrc` and wired into the HTTP client |
+| ~    | `<URL>:ca/cert/key` | inline per-registry TLS config is parsed and selected by request URL |
 
 # Peer Dependency Settings
 

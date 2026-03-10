@@ -1,12 +1,29 @@
 use clap::{Args, Subcommand};
 use miette::{Context, IntoDiagnostic};
-use pacquet_network::ThrottledClient;
+use pacquet_network::{RegistryTlsConfig, ThrottledClient};
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manager::InstallPackageFromRegistry;
 use pacquet_store_dir::PackageFilesIndex;
 use pacquet_tarball::MemCache;
 use std::fs::File;
 use tempfile::tempdir;
+
+fn network_tls_configs(config: &Npmrc) -> std::collections::HashMap<String, RegistryTlsConfig> {
+    config
+        .ssl_configs
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                RegistryTlsConfig {
+                    ca: value.ca.clone(),
+                    cert: value.cert.clone(),
+                    key: value.key.clone(),
+                },
+            )
+        })
+        .collect()
+}
 
 #[derive(Debug, Subcommand)]
 pub enum StoreCommand {
@@ -80,10 +97,15 @@ impl StoreCommand {
                 temp_config.virtual_store_dir = temp_config.modules_dir.join(".pnpm");
                 temp_config.lockfile = false;
                 let temp_config = temp_config.leak();
-                let http_client = ThrottledClient::new_with_options(
+                let http_client = ThrottledClient::new_with_tls_options(
                     config.network_concurrency as usize,
                     Some(config.fetch_timeout),
                     config.strict_ssl,
+                    config.ca.clone(),
+                    network_tls_configs(config),
+                    config.https_proxy.clone(),
+                    config.http_proxy.clone(),
+                    config.no_proxy.clone(),
                 );
                 let tarball_mem_cache = MemCache::new();
 

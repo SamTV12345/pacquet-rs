@@ -1692,6 +1692,7 @@ dependencies = [
  "pipe-trait",
  "reqwest",
  "tokio",
+ "url",
 ]
 
 [[package]]

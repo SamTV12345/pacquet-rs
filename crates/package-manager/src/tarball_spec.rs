@@ -28,7 +28,7 @@ pub(crate) async fn resolve_package_version_from_tarball_spec(
 ) -> Result<PackageVersion, String> {
     let auth_header = config.auth_header_for_url(tarball_url);
     let response = http_client
-        .run_with_permit(|client| {
+        .run_with_permit_for_url(tarball_url, |client| {
             let mut request = client.get(tarball_url);
             if let Some(auth_header) = auth_header.as_deref() {
                 request = request.header("authorization", auth_header);

@@ -185,7 +185,7 @@ impl<'a> DownloadTarballToStore<'a> {
         loop {
             let result = async {
                 let response = http_client
-                    .run_with_permit(|client| {
+                    .run_with_permit_for_url(package_url, |client| {
                         let mut request = client.get(package_url);
                         if let Some(auth_header) = auth_header {
                             request = request.header("authorization", auth_header);

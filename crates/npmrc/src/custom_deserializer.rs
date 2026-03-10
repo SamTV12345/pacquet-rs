@@ -1,5 +1,5 @@
 use pacquet_store_dir::StoreDir;
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, de, de::IntoDeserializer};
 use std::{env, path::PathBuf, str::FromStr};
 
 #[cfg(windows)]
@@ -180,6 +180,17 @@ where
     }
 
     Ok(env::current_dir().map_err(de::Error::custom)?.join(path))
+}
+
+pub fn deserialize_optional_pathbuf<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s.trim().is_empty() {
+        return Ok(None);
+    }
+    deserialize_pathbuf(s.into_deserializer()).map(Some)
 }
 
 pub fn deserialize_store_dir<'de, D>(deserializer: D) -> Result<StoreDir, D::Error>
