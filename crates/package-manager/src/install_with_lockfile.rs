@@ -19,7 +19,7 @@ use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_registry::{PackageTag, PackageVersion};
 use pacquet_tarball::MemCache;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -103,10 +103,16 @@ where
             if let Some(workspace_package) =
                 resolve_workspace_dependency(workspace_packages, name, version_range)
             {
-                if config.symlink && !lockfile_only {
+                if !lockfile_only {
                     let symlink_path = config.modules_dir.join(name);
-                    link_package(config.symlink, &workspace_package.root_dir, &symlink_path)
-                        .expect("symlink workspace package");
+                    let materialize_as_symlink =
+                        !config.inject_workspace_packages && config.symlink;
+                    link_package(
+                        materialize_as_symlink,
+                        &workspace_package.root_dir,
+                        &symlink_path,
+                    )
+                    .expect("symlink workspace package");
                 }
 
                 let project_dir = manifest.path().parent().unwrap_or_else(|| Path::new("."));
@@ -159,6 +165,7 @@ where
             manifest,
             dependency_groups.iter().copied(),
             &resolved_direct_dependencies,
+            config.exclude_links_from_lockfile,
         );
 
         let mut packages = existing_lockfile
@@ -166,6 +173,8 @@ where
             .cloned()
             .unwrap_or_default();
         packages.extend(package_snapshots.into_iter());
+        let project_snapshot =
+            dedupe_project_snapshot(&project_snapshot, &packages, config.dedupe_peer_dependents);
 
         let project_snapshot =
             merge_project_snapshot(existing_lockfile, lockfile_importer_id, project_snapshot);
@@ -390,6 +399,7 @@ where
         manifest: &PackageManifest,
         dependency_groups: impl IntoIterator<Item = DependencyGroup>,
         resolved_direct_dependencies: &HashMap<(String, String), ResolvedPackage>,
+        exclude_links_from_lockfile: bool,
     ) -> ProjectSnapshot {
         let dependency_groups = dependency_groups.into_iter().collect::<Vec<_>>();
 
@@ -403,6 +413,13 @@ where
             for (name, specifier) in manifest.dependencies([group]) {
                 let key = (name.to_string(), specifier.to_string());
                 if let Some(resolved_dependency) = resolved_direct_dependencies.get(&key) {
+                    if !should_include_dependency_in_lockfile(
+                        specifier,
+                        &resolved_dependency.version,
+                        exclude_links_from_lockfile,
+                    ) {
+                        continue;
+                    }
                     map.insert(
                         Self::parse_pkg_name(name),
                         ResolvedDependencySpec {
@@ -510,6 +527,20 @@ where
             optional: None,
         }
     }
+}
+
+fn should_include_dependency_in_lockfile(
+    specifier: &str,
+    resolved_version: &ResolvedDependencyVersion,
+    exclude_links_from_lockfile: bool,
+) -> bool {
+    if !exclude_links_from_lockfile {
+        return true;
+    }
+    if specifier.starts_with("workspace:") {
+        return true;
+    }
+    !matches!(resolved_version, ResolvedDependencyVersion::Link(_))
 }
 
 fn merge_project_snapshot(
@@ -758,6 +789,157 @@ fn read_dependency_specs(package_json_path: &Path) -> HashMap<String, String> {
         .collect()
 }
 
+fn dedupe_project_snapshot(
+    project_snapshot: &ProjectSnapshot,
+    packages: &HashMap<DependencyPath, PackageSnapshot>,
+    dedupe_peer_dependents: bool,
+) -> ProjectSnapshot {
+    if !dedupe_peer_dependents {
+        return project_snapshot.clone();
+    }
+
+    let mut snapshot = project_snapshot.clone();
+    dedupe_resolved_dependency_map(snapshot.dependencies.as_mut(), packages);
+    dedupe_resolved_dependency_map(snapshot.optional_dependencies.as_mut(), packages);
+    dedupe_resolved_dependency_map(snapshot.dev_dependencies.as_mut(), packages);
+    snapshot
+}
+
+fn dedupe_resolved_dependency_map(
+    map: Option<&mut ResolvedDependencyMap>,
+    packages: &HashMap<DependencyPath, PackageSnapshot>,
+) {
+    let Some(map) = map else {
+        return;
+    };
+
+    for (alias, spec) in map.iter_mut() {
+        let Some(candidate_path) = resolved_dependency_to_path(alias, &spec.version) else {
+            continue;
+        };
+        let Some((resolved_path, _)) = resolve_package_snapshot_deduped(packages, &candidate_path)
+        else {
+            continue;
+        };
+        spec.version = resolved_path_to_version(alias, &resolved_path);
+    }
+}
+
+fn resolved_dependency_to_path(
+    alias: &PkgName,
+    resolved_version: &ResolvedDependencyVersion,
+) -> Option<DependencyPath> {
+    match resolved_version {
+        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => Some(DependencyPath {
+            custom_registry: None,
+            package_specifier: PkgNameVerPeer::new(alias.clone(), ver_peer.clone()),
+        }),
+        ResolvedDependencyVersion::PkgNameVerPeer(specifier) => {
+            Some(DependencyPath { custom_registry: None, package_specifier: specifier.clone() })
+        }
+        ResolvedDependencyVersion::Link(_) => None,
+    }
+}
+
+fn resolved_path_to_version(
+    alias: &PkgName,
+    dependency_path: &DependencyPath,
+) -> ResolvedDependencyVersion {
+    let specifier = &dependency_path.package_specifier;
+    if &specifier.name == alias {
+        ResolvedDependencyVersion::PkgVerPeer(specifier.suffix.clone())
+    } else {
+        ResolvedDependencyVersion::PkgNameVerPeer(specifier.clone())
+    }
+}
+
+fn resolve_package_snapshot<'a>(
+    packages: &'a HashMap<DependencyPath, PackageSnapshot>,
+    candidate_path: &DependencyPath,
+) -> Option<(DependencyPath, &'a PackageSnapshot)> {
+    if let Some(snapshot) = packages.get(candidate_path) {
+        return Some((candidate_path.clone(), snapshot));
+    }
+    packages
+        .iter()
+        .find(|(dependency_path, _)| {
+            dependency_path.package_specifier == candidate_path.package_specifier
+        })
+        .map(|(dependency_path, snapshot)| (dependency_path.clone(), snapshot))
+}
+
+fn resolve_package_snapshot_deduped<'a>(
+    packages: &'a HashMap<DependencyPath, PackageSnapshot>,
+    candidate_path: &DependencyPath,
+) -> Option<(DependencyPath, &'a PackageSnapshot)> {
+    let (resolved_path, resolved_snapshot) = resolve_package_snapshot(packages, candidate_path)?;
+    let mut best_path = resolved_path.clone();
+    let mut best_snapshot = resolved_snapshot;
+
+    for (other_path, other_snapshot) in packages {
+        if *other_path == resolved_path {
+            continue;
+        }
+        if !same_base_package(&resolved_path, other_path) {
+            continue;
+        }
+        if !is_compatible_and_has_more_deps(other_snapshot, best_snapshot) {
+            continue;
+        }
+        let better = dependency_score(other_snapshot) > dependency_score(best_snapshot)
+            || (dependency_score(other_snapshot) == dependency_score(best_snapshot)
+                && other_path.to_string() < best_path.to_string());
+        if better {
+            best_path = other_path.clone();
+            best_snapshot = other_snapshot;
+        }
+    }
+
+    Some((best_path, best_snapshot))
+}
+
+fn same_base_package(left: &DependencyPath, right: &DependencyPath) -> bool {
+    left.custom_registry == right.custom_registry
+        && left.package_specifier.name == right.package_specifier.name
+        && left.package_specifier.suffix.version() == right.package_specifier.suffix.version()
+}
+
+fn dependency_score(snapshot: &PackageSnapshot) -> usize {
+    let dependency_count = snapshot.dependencies.as_ref().map_or(0, HashMap::len);
+    let transitive_peer_count = snapshot.transitive_peer_dependencies.as_ref().map_or(0, Vec::len);
+    dependency_count + transitive_peer_count
+}
+
+fn is_compatible_and_has_more_deps(candidate: &PackageSnapshot, current: &PackageSnapshot) -> bool {
+    if dependency_score(candidate) < dependency_score(current) {
+        return false;
+    }
+
+    let candidate_deps = candidate.dependencies.as_ref();
+    let current_deps = current.dependencies.as_ref();
+    if let Some(current_deps) = current_deps {
+        let Some(candidate_deps) = candidate_deps else {
+            return false;
+        };
+        if !current_deps.iter().all(|(alias, dep)| {
+            candidate_deps.get(alias).is_some_and(|candidate_dep| candidate_dep == dep)
+        }) {
+            return false;
+        }
+    }
+
+    let candidate_peers = candidate
+        .transitive_peer_dependencies
+        .as_ref()
+        .map_or_else(HashSet::new, |peers| peers.iter().cloned().collect::<HashSet<_>>());
+    let current_peers = current
+        .transitive_peer_dependencies
+        .as_ref()
+        .map_or_else(HashSet::new, |peers| peers.iter().cloned().collect::<HashSet<_>>());
+
+    current_peers.is_subset(&candidate_peers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -899,5 +1081,223 @@ mod tests {
         let resolved =
             apply_workspace_root_peer_override(&config, &root, Some(&peers), "react", "^18.0.0");
         assert_eq!(resolved, "^18.0.0");
+    }
+
+    fn load_manifest_from_json(dir: &Path, value: serde_json::Value) -> PackageManifest {
+        let path = dir.join("package.json");
+        fs::write(&path, value.to_string()).expect("write package.json");
+        PackageManifest::from_path(path).expect("load package manifest")
+    }
+
+    #[test]
+    fn build_project_snapshot_excludes_external_link_when_config_enabled() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = load_manifest_from_json(
+            dir.path(),
+            serde_json::json!({
+                "name": "app",
+                "version": "1.0.0",
+                "dependencies": {
+                    "external-link": "link:../external",
+                    "is-number": "^7.0.0"
+                }
+            }),
+        );
+        let resolved = HashMap::from([
+            (
+                ("external-link".to_string(), "link:../external".to_string()),
+                ResolvedPackage {
+                    version: ResolvedDependencyVersion::Link("link:../external".to_string()),
+                },
+            ),
+            (
+                ("is-number".to_string(), "^7.0.0".to_string()),
+                ResolvedPackage {
+                    version: ResolvedDependencyVersion::PkgVerPeer(
+                        "7.0.0".parse().expect("version"),
+                    ),
+                },
+            ),
+        ]);
+
+        let snapshot = InstallWithLockfile::<'_, [DependencyGroup; 1]>::build_project_snapshot(
+            &manifest,
+            [DependencyGroup::Prod],
+            &resolved,
+            true,
+        );
+
+        let deps = snapshot.dependencies.expect("dependencies map");
+        let specifiers = snapshot.specifiers.expect("specifiers map");
+        assert!(deps.contains_key(&"is-number".parse().expect("pkg name")));
+        assert!(!deps.contains_key(&"external-link".parse().expect("pkg name")));
+        assert!(specifiers.contains_key("is-number"));
+        assert!(!specifiers.contains_key("external-link"));
+    }
+
+    #[test]
+    fn build_project_snapshot_keeps_workspace_protocol_link_when_excluding_links() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = load_manifest_from_json(
+            dir.path(),
+            serde_json::json!({
+                "name": "app",
+                "version": "1.0.0",
+                "dependencies": {
+                    "workspace-pkg": "workspace:*"
+                }
+            }),
+        );
+        let resolved = HashMap::from([(
+            ("workspace-pkg".to_string(), "workspace:*".to_string()),
+            ResolvedPackage {
+                version: ResolvedDependencyVersion::Link("link:../workspace-pkg".to_string()),
+            },
+        )]);
+
+        let snapshot = InstallWithLockfile::<'_, [DependencyGroup; 1]>::build_project_snapshot(
+            &manifest,
+            [DependencyGroup::Prod],
+            &resolved,
+            true,
+        );
+
+        let deps = snapshot.dependencies.expect("dependencies map");
+        let specifiers = snapshot.specifiers.expect("specifiers map");
+        assert!(deps.contains_key(&"workspace-pkg".parse().expect("pkg name")));
+        assert_eq!(specifiers.get("workspace-pkg"), Some(&"workspace:*".to_string()));
+    }
+
+    fn dummy_snapshot_with_dependencies(
+        dependencies: Option<HashMap<PkgName, PackageSnapshotDependency>>,
+        transitive_peers: Option<Vec<String>>,
+    ) -> PackageSnapshot {
+        PackageSnapshot {
+            resolution: LockfileResolution::Tarball(TarballResolution {
+                tarball: "file:dummy.tgz".to_string(),
+                integrity: None,
+            }),
+            id: None,
+            name: None,
+            version: None,
+            engines: None,
+            cpu: None,
+            os: None,
+            libc: None,
+            deprecated: None,
+            has_bin: None,
+            prepare: None,
+            requires_build: None,
+            bundled_dependencies: None,
+            peer_dependencies: None,
+            peer_dependencies_meta: None,
+            dependencies,
+            optional_dependencies: None,
+            transitive_peer_dependencies: transitive_peers,
+            dev: None,
+            optional: None,
+        }
+    }
+
+    #[test]
+    fn dedupe_project_snapshot_prefers_compatible_variant_with_more_deps() {
+        let alias: PkgName = "foo".parse().expect("alias");
+        let current_path: DependencyPath =
+            "/foo@1.0.0(peer-a@1.0.0)".parse().expect("current dependency path");
+        let better_path: DependencyPath =
+            "/foo@1.0.0(peer-a@1.0.0)(peer-b@1.0.0)".parse().expect("better dependency path");
+
+        let mut packages = HashMap::new();
+        packages.insert(
+            current_path.clone(),
+            dummy_snapshot_with_dependencies(
+                Some(HashMap::from([(
+                    "bar".parse().expect("bar"),
+                    PackageSnapshotDependency::PkgVerPeer("1.0.0".parse().expect("bar version")),
+                )])),
+                Some(vec!["peer-a".to_string()]),
+            ),
+        );
+        packages.insert(
+            better_path.clone(),
+            dummy_snapshot_with_dependencies(
+                Some(HashMap::from([
+                    (
+                        "bar".parse().expect("bar"),
+                        PackageSnapshotDependency::PkgVerPeer(
+                            "1.0.0".parse().expect("bar version"),
+                        ),
+                    ),
+                    (
+                        "baz".parse().expect("baz"),
+                        PackageSnapshotDependency::PkgVerPeer(
+                            "1.0.0".parse().expect("baz version"),
+                        ),
+                    ),
+                ])),
+                Some(vec!["peer-a".to_string(), "peer-b".to_string()]),
+            ),
+        );
+
+        let mut dependencies = ResolvedDependencyMap::new();
+        dependencies.insert(
+            alias.clone(),
+            ResolvedDependencySpec {
+                specifier: "^1.0.0".to_string(),
+                version: ResolvedDependencyVersion::PkgVerPeer(
+                    current_path.package_specifier.suffix.clone(),
+                ),
+            },
+        );
+        let snapshot =
+            ProjectSnapshot { dependencies: Some(dependencies), ..ProjectSnapshot::default() };
+
+        let deduped = dedupe_project_snapshot(&snapshot, &packages, true);
+        let resolved = deduped
+            .dependencies
+            .as_ref()
+            .and_then(|deps| deps.get(&alias))
+            .expect("resolved dependency");
+        let ResolvedDependencyVersion::PkgVerPeer(ver_peer) = &resolved.version else {
+            panic!("expected pkgverpeer");
+        };
+        assert_eq!(ver_peer.to_string(), better_path.package_specifier.suffix.to_string());
+    }
+
+    #[test]
+    fn dedupe_project_snapshot_keeps_original_when_disabled() {
+        let alias: PkgName = "foo".parse().expect("alias");
+        let current_path: DependencyPath =
+            "/foo@1.0.0(peer-a@1.0.0)".parse().expect("current dependency path");
+        let better_path: DependencyPath =
+            "/foo@1.0.0(peer-a@1.0.0)(peer-b@1.0.0)".parse().expect("better dependency path");
+
+        let mut packages = HashMap::new();
+        packages.insert(current_path.clone(), dummy_snapshot_with_dependencies(None, None));
+        packages.insert(better_path, dummy_snapshot_with_dependencies(None, None));
+
+        let mut dependencies = ResolvedDependencyMap::new();
+        dependencies.insert(
+            alias.clone(),
+            ResolvedDependencySpec {
+                specifier: "^1.0.0".to_string(),
+                version: ResolvedDependencyVersion::PkgVerPeer(
+                    current_path.package_specifier.suffix.clone(),
+                ),
+            },
+        );
+        let snapshot =
+            ProjectSnapshot { dependencies: Some(dependencies), ..ProjectSnapshot::default() };
+
+        let deduped = dedupe_project_snapshot(&snapshot, &packages, false);
+        let resolved = deduped
+            .dependencies
+            .as_ref()
+            .and_then(|deps| deps.get(&alias))
+            .expect("resolved dependency");
+        let ResolvedDependencyVersion::PkgVerPeer(ver_peer) = &resolved.version else {
+            panic!("expected pkgverpeer");
+        };
+        assert_eq!(ver_peer.to_string(), current_path.package_specifier.suffix.to_string());
     }
 }

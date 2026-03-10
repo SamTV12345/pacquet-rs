@@ -73,10 +73,16 @@ where
 
                 let result = match &spec.version {
                     ResolvedDependencyVersion::Link(_) => {
-                        if !config.symlink {
-                            return;
+                        if spec.specifier.starts_with("workspace:")
+                            && config.inject_workspace_packages
+                        {
+                            link_package(false, &symlink_target, &dependency_path)
+                        } else {
+                            if !config.symlink {
+                                return;
+                            }
+                            symlink_package(&symlink_target, &dependency_path)
                         }
-                        symlink_package(&symlink_target, &dependency_path)
                     }
                     _ => link_package(config.symlink, &symlink_target, &dependency_path),
                 };

@@ -28,6 +28,8 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 | ✅    | lockfile                     |       |
 | ✅    | prefer_frozen_lockfile       |       |
 | ✅    | lockfile_include_tarball_url |       |
+| ✅    | exclude_links_from_lockfile  | excludes external `link:` specs from importer snapshot while keeping `workspace:` links |
+| ~    | inject_workspace_packages    | workspace protocol dependencies are materialized instead of symlinked during install |
 
 # Registry & Authentication Settings
 
@@ -50,6 +52,6 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 | Done | Field                             | Notes |
 |------|-----------------------------------|-------|
 | ✅    | auto_install_peers                |       |
-| ~    | dedupe_peer_dependents            | controls peer-suffix preference for hoisted package selection |
+| ~    | dedupe_peer_dependents            | controls peer-suffix preference for hoisted package selection plus importer remapping in frozen and mutable lockfile installs |
 | ✅    | strict_peer_dependencies          | fails install on missing/incompatible required peers |
 | ✅    | resolve_peers_from_workspace_root | used by strict-peer validation plus lockfile and lockfile-less peer auto-install resolution fallback to workspace root |

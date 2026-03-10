@@ -501,7 +501,12 @@ fn prefer_frozen_lockfile_flag_should_override_npmrc_false_setting() {
         fs::remove_file(&cached_metadata).expect("remove cached metadata");
     }
 
-    drop(mock_instance); // simulate registry unavailability
+    fs::OpenOptions::new()
+        .append(true)
+        .open(workspace.join(".npmrc"))
+        .expect("open .npmrc")
+        .write_all(b"\nregistry=http://127.0.0.1:9/\n")
+        .expect("append unreachable registry");
 
     pacquet_command(&workspace)
         .with_args(["install", "--prefer-frozen-lockfile"])
@@ -514,6 +519,8 @@ fn prefer_frozen_lockfile_flag_should_override_npmrc_false_setting() {
 
 #[test]
 fn no_prefer_frozen_lockfile_flag_should_override_default_true_setting() {
+    use std::io::Write;
+
     let CommandTempCwd { root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
     let AddMockedRegistry { cache_dir, mock_instance, .. } = npmrc_info;
@@ -537,7 +544,12 @@ fn no_prefer_frozen_lockfile_flag_should_override_default_true_setting() {
         fs::remove_file(&cached_metadata).expect("remove cached metadata");
     }
 
-    drop(mock_instance); // simulate registry unavailability
+    fs::OpenOptions::new()
+        .append(true)
+        .open(workspace.join(".npmrc"))
+        .expect("open .npmrc")
+        .write_all(b"\nregistry=http://127.0.0.1:9/\n")
+        .expect("append unreachable registry");
 
     pacquet_command(&workspace).with_args(["install"]).assert().success();
     pacquet_command(&workspace)
@@ -1530,6 +1542,53 @@ fn workspace_protocol_dependency_should_link_local_package() {
     let lockfile_content =
         fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
     assert!(lockfile_content.contains("version: link:../lib"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn workspace_protocol_dependency_should_inject_local_package_when_enabled() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app package dir");
+    fs::create_dir_all(&lib_dir).expect("create lib package dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(app_dir.join(".npmrc"), "inject-workspace-packages=true\n").expect("write app npmrc");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.2.3",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write lib package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'lib';\n").expect("write lib entrypoint");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "workspace:*"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let injected_dep = app_dir.join("node_modules/@repo/lib");
+    assert!(injected_dep.exists());
+    let metadata = fs::symlink_metadata(&injected_dep).expect("read injected dependency metadata");
+    assert!(!metadata.file_type().is_symlink());
+    assert!(injected_dep.join("package.json").exists());
+    assert!(injected_dep.join("index.js").exists());
 
     drop(root); // cleanup
 }
