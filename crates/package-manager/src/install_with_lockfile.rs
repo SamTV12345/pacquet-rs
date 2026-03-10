@@ -105,6 +105,7 @@ where
                     http_client,
                     config,
                     &package_snapshots,
+                    workspace_packages,
                     &workspace_root_peer_overrides,
                     manifest.path(),
                     lockfile_dir,
@@ -134,6 +135,7 @@ where
                             http_client,
                             config,
                             &package_snapshots,
+                            workspace_packages,
                             &workspace_root_peer_overrides,
                             manifest.path(),
                             lockfile_dir,
@@ -481,6 +483,7 @@ where
         http_client: &ThrottledClient,
         config: &'static Npmrc,
         package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
+        workspace_packages: &WorkspacePackages,
         workspace_root_peer_overrides: &HashMap<String, String>,
         current_manifest_path: &Path,
         lockfile_dir: &Path,
@@ -516,6 +519,7 @@ where
                     http_client,
                     config,
                     package_snapshots,
+                    workspace_packages,
                     workspace_root_peer_overrides,
                     current_manifest_path,
                     lockfile_dir,
@@ -569,11 +573,45 @@ where
                             http_client,
                             config,
                             package_snapshots,
+                            workspace_packages,
                             workspace_root_peer_overrides,
-                            local_manifest.path(),
+                            current_manifest_path,
                             lockfile_dir,
                             child_name,
                             &local_child_path,
+                            &normalized_child_ref,
+                            prefer_offline,
+                            offline,
+                        )
+                        .await;
+                        snapshot_dependencies.insert(
+                            Self::parse_pkg_name(child_name),
+                            PackageSnapshotDependency::Link(resolved_local.version.to_string()),
+                        );
+                        continue;
+                    }
+
+                    if let Some(workspace_package) = resolve_workspace_dependency(
+                        workspace_packages,
+                        child_name,
+                        child_version_range,
+                    ) {
+                        let normalized_child_ref = normalized_local_file_reference(
+                            lockfile_dir,
+                            &workspace_package.root_dir,
+                        )
+                        .replace('\\', "/");
+                        let resolved_local = Self::snapshot_local_directory_package(
+                            resolved_packages,
+                            http_client,
+                            config,
+                            package_snapshots,
+                            workspace_packages,
+                            workspace_root_peer_overrides,
+                            current_manifest_path,
+                            lockfile_dir,
+                            child_name,
+                            &workspace_package.root_dir,
                             &normalized_child_ref,
                             prefer_offline,
                             offline,
@@ -660,6 +698,7 @@ where
         http_client: &ThrottledClient,
         config: &'static Npmrc,
         package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
+        workspace_packages: &WorkspacePackages,
         workspace_root_peer_overrides: &HashMap<String, String>,
         current_manifest_path: &Path,
         lockfile_dir: &Path,
@@ -696,11 +735,38 @@ where
                     http_client,
                     config,
                     package_snapshots,
+                    workspace_packages,
                     workspace_root_peer_overrides,
                     current_manifest_path,
                     lockfile_dir,
                     name,
                     &local_dep_path,
+                    &normalized_ref,
+                    prefer_offline,
+                    offline,
+                )
+                .await,
+            );
+        }
+
+        if let Some(workspace_package) =
+            resolve_workspace_dependency(workspace_packages, name, requested_range)
+        {
+            let normalized_ref =
+                normalized_local_file_reference(lockfile_dir, &workspace_package.root_dir)
+                    .replace('\\', "/");
+            return Some(
+                Self::snapshot_local_directory_package(
+                    resolved_packages,
+                    http_client,
+                    config,
+                    package_snapshots,
+                    workspace_packages,
+                    workspace_root_peer_overrides,
+                    current_manifest_path,
+                    lockfile_dir,
+                    name,
+                    &workspace_package.root_dir,
                     &normalized_ref,
                     prefer_offline,
                     offline,

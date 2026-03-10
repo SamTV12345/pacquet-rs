@@ -1961,6 +1961,161 @@ fn frozen_workspace_injected_dependency_should_keep_deduped_link_from_lockfile()
 }
 
 #[test]
+fn workspace_injected_dependency_should_snapshot_nested_workspace_dependency() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let project_1_dir = workspace.join("packages/project-1");
+    let project_2_dir = workspace.join("packages/project-2");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&project_1_dir).expect("create project-1 dir");
+    fs::create_dir_all(&project_2_dir).expect("create project-2 dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        project_1_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-1",
+            "version": "1.0.0",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write project-1 manifest");
+    fs::write(project_1_dir.join("index.js"), "module.exports = 'project-1';\n")
+        .expect("write project-1 entrypoint");
+    fs::write(
+        project_2_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-2",
+            "version": "1.0.0",
+            "main": "index.js",
+            "dependencies": {
+                "project-1": "workspace:*"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-2 manifest");
+    fs::write(project_2_dir.join("index.js"), "module.exports = 'project-2';\n")
+        .expect("write project-2 entrypoint");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "project-2": "workspace:*"
+            },
+            "dependenciesMeta": {
+                "project-2": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let injected_dep = app_dir.join("node_modules/project-2");
+    assert!(injected_dep.exists());
+    assert!(injected_dep.join("node_modules/project-1").exists());
+
+    let lockfile_content =
+        fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
+    assert!(lockfile_content.contains("project-2@file:packages/project-2:"));
+    assert!(lockfile_content.contains("project-1: file:packages/project-1"));
+    assert!(lockfile_content.contains("project-1@file:packages/project-1:"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn workspace_injected_dependency_should_snapshot_nested_workspace_dependency_with_consumer_peer_context()
+ {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let app_dir = workspace.join("packages/app");
+    let project_1_dir = workspace.join("packages/project-1");
+    let project_2_dir = workspace.join("packages/project-2");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&project_1_dir).expect("create project-1 dir");
+    fs::create_dir_all(&project_2_dir).expect("create project-2 dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        project_1_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-1",
+            "version": "1.0.0",
+            "main": "index.js",
+            "peerDependencies": {
+                "is-number": "^7.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-1 manifest");
+    fs::write(project_1_dir.join("index.js"), "module.exports = 'project-1';\n")
+        .expect("write project-1 entrypoint");
+    fs::write(
+        project_2_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-2",
+            "version": "1.0.0",
+            "main": "index.js",
+            "dependencies": {
+                "project-1": "workspace:*"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-2 manifest");
+    fs::write(project_2_dir.join("index.js"), "module.exports = 'project-2';\n")
+        .expect("write project-2 entrypoint");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "project-2": "workspace:*"
+            },
+            "devDependencies": {
+                "is-number": "7.0.0"
+            },
+            "dependenciesMeta": {
+                "project-2": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let injected_dep = app_dir.join("node_modules/project-2");
+    assert!(injected_dep.exists());
+    assert!(injected_dep.join("node_modules/project-1").exists());
+    assert!(injected_dep.join("node_modules/project-1/node_modules/is-number").exists());
+
+    let lockfile_content =
+        fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
+    assert!(lockfile_content.contains("version: file:packages/project-2"));
+    assert!(lockfile_content.contains("project-1: file:packages/project-1(is-number@7.0.0)"));
+    assert!(lockfile_content.contains("project-1@file:packages/project-1(is-number@7.0.0):"));
+
+    drop(mock_instance);
+    drop(root); // cleanup
+}
+
+#[test]
 fn workspace_injected_dependency_should_refresh_on_reinstall_by_default() {
     let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
 

@@ -44,7 +44,13 @@ pub fn get_all_files(root: &Path) -> Vec<String> {
 // Helper function to check if a path is a symlink or junction
 pub fn is_symlink_or_junction(path: &Path) -> io::Result<bool> {
     #[cfg(windows)]
-    return junction::exists(path);
+    {
+        match junction::exists(path) {
+            Ok(value) => Ok(value),
+            Err(error) if error.raw_os_error() == Some(4390) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
 
     #[cfg(not(windows))]
     return Ok(path.is_symlink());
@@ -60,4 +66,19 @@ pub fn is_path_executable(path: &Path) -> bool {
         .expect("get metadata of the file")
         .mode();
     mode & 0b001_001_001 != 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn is_symlink_or_junction_returns_false_for_plain_directory() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let plain = dir.path().join("plain");
+        fs::create_dir(&plain).expect("create plain dir");
+
+        assert!(!is_symlink_or_junction(&plain).expect("check plain dir"));
+    }
 }
