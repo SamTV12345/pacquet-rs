@@ -2107,9 +2107,130 @@ fn workspace_injected_dependency_should_snapshot_nested_workspace_dependency_wit
 
     let lockfile_content =
         fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
-    assert!(lockfile_content.contains("version: file:packages/project-2"));
+    assert!(lockfile_content.contains("version: file:packages/project-2(is-number@7.0.0)"));
+    assert!(lockfile_content.contains("project-2@file:packages/project-2(is-number@7.0.0):"));
     assert!(lockfile_content.contains("project-1: file:packages/project-1(is-number@7.0.0)"));
     assert!(lockfile_content.contains("project-1@file:packages/project-1(is-number@7.0.0):"));
+
+    drop(mock_instance);
+    drop(root); // cleanup
+}
+
+#[test]
+fn workspace_injected_dependency_should_only_dedupe_matching_transitive_peer_context() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let project_1_dir = workspace.join("packages/project-1");
+    let project_2_dir = workspace.join("packages/project-2");
+    let project_3_dir = workspace.join("packages/project-3");
+    let project_4_dir = workspace.join("packages/project-4");
+    fs::create_dir_all(&project_1_dir).expect("create project-1 dir");
+    fs::create_dir_all(&project_2_dir).expect("create project-2 dir");
+    fs::create_dir_all(&project_3_dir).expect("create project-3 dir");
+    fs::create_dir_all(&project_4_dir).expect("create project-4 dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        project_1_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-1",
+            "version": "1.0.0",
+            "main": "index.js",
+            "peerDependencies": {
+                "is-positive": ">=1.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-1 manifest");
+    fs::write(project_1_dir.join("index.js"), "module.exports = 'project-1';\n")
+        .expect("write project-1 entrypoint");
+    fs::write(
+        project_2_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-2",
+            "version": "1.0.0",
+            "main": "index.js",
+            "dependencies": {
+                "project-1": "workspace:*"
+            },
+            "devDependencies": {
+                "is-positive": "1.0.0"
+            },
+            "dependenciesMeta": {
+                "project-1": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-2 manifest");
+    fs::write(project_2_dir.join("index.js"), "module.exports = 'project-2';\n")
+        .expect("write project-2 entrypoint");
+    fs::write(
+        project_3_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-3",
+            "version": "1.0.0",
+            "dependencies": {
+                "project-2": "workspace:*"
+            },
+            "devDependencies": {
+                "is-positive": "2.0.0"
+            },
+            "dependenciesMeta": {
+                "project-2": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-3 manifest");
+    fs::write(
+        project_4_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-4",
+            "version": "1.0.0",
+            "dependencies": {
+                "project-2": "workspace:*"
+            },
+            "devDependencies": {
+                "is-positive": "1.0.0"
+            },
+            "dependenciesMeta": {
+                "project-2": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-4 manifest");
+
+    pacquet.with_args(["-C", workspace.to_str().unwrap(), "install", "-r"]).assert().success();
+
+    let project_3_dep = project_3_dir.join("node_modules/project-2");
+    assert!(project_3_dep.exists());
+    assert!(!is_symlink_or_junction(&project_3_dep).expect("read project-3 dep metadata"));
+    assert!(project_3_dep.join("node_modules/project-1").exists());
+    assert!(project_3_dep.join("node_modules/project-1/node_modules/is-positive").exists());
+
+    let project_4_dep = project_4_dir.join("node_modules/project-2");
+    assert!(project_4_dep.exists());
+    assert!(is_symlink_or_junction(&project_4_dep).expect("read project-4 dep metadata"));
+
+    let lockfile_content =
+        fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
+    assert!(lockfile_content.contains("packages/project-3:"));
+    assert!(lockfile_content.contains("version: file:packages/project-2(is-positive@2.0.0)"));
+    assert!(lockfile_content.contains("project-2@file:packages/project-2(is-positive@2.0.0):"));
+    assert!(lockfile_content.contains("packages/project-4:"));
+    assert!(lockfile_content.contains("version: link:../project-2"));
+    assert!(!lockfile_content.contains("project-2@file:packages/project-2(is-positive@1.0.0):"));
 
     drop(mock_instance);
     drop(root); // cleanup

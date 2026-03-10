@@ -49,6 +49,13 @@ where
 #[derive(Clone)]
 struct ResolvedPackage {
     version: ResolvedDependencyVersion,
+    peer_suffixes: BTreeMap<String, ResolvedDependencyVersion>,
+}
+
+impl ResolvedPackage {
+    fn new(version: ResolvedDependencyVersion) -> Self {
+        Self { version, peer_suffixes: BTreeMap::new() }
+    }
 }
 
 impl<'a, DependencyGroupList> InstallWithLockfile<'a, DependencyGroupList>
@@ -160,12 +167,10 @@ where
                         let project_dir =
                             manifest.path().parent().unwrap_or_else(|| Path::new("."));
                         let relative = to_relative_path(project_dir, &workspace_package.root_dir);
-                        ResolvedPackage {
-                            version: ResolvedDependencyVersion::Link(format!(
-                                "link:{}",
-                                relative.replace('\\', "/")
-                            )),
-                        }
+                        ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
+                            "link:{}",
+                            relative.replace('\\', "/")
+                        )))
                     };
                 resolved_direct_dependencies.insert(key, resolved_package);
                 continue;
@@ -370,7 +375,7 @@ where
             package_snapshots.insert(dependency_path, package_snapshot);
         }
 
-        ResolvedPackage { version: resolved_version }
+        ResolvedPackage::new(resolved_version)
     }
 
     #[async_recursion]
@@ -473,7 +478,7 @@ where
             package_snapshots.insert(dependency_path, package_snapshot);
         }
 
-        ResolvedPackage { version: resolved_version }
+        ResolvedPackage::new(resolved_version)
     }
 
     #[async_recursion]
@@ -534,9 +539,122 @@ where
                 };
 
                 resolved_local_peers.insert(peer_name.clone(), resolved_peer.version.clone());
+                merge_resolved_peer_suffixes(
+                    &mut resolved_local_peers,
+                    &resolved_peer.peer_suffixes,
+                );
                 snapshot_dependencies.insert(
                     Self::parse_pkg_name(peer_name),
                     resolved_version_to_snapshot_dependency(peer_name, &resolved_peer.version),
+                );
+            }
+        }
+
+        if let Some(local_manifest) = &local_manifest {
+            for (child_name, child_version_range) in
+                local_manifest.dependencies([DependencyGroup::Prod, DependencyGroup::Optional])
+            {
+                if let Some((resolved_local, local_child_path, should_symlink)) =
+                    resolve_local_dependency(local_manifest.path(), child_version_range)
+                {
+                    if should_symlink {
+                        snapshot_dependencies.insert(
+                            Self::parse_pkg_name(child_name),
+                            PackageSnapshotDependency::Link(resolved_local.version.to_string()),
+                        );
+                        continue;
+                    }
+
+                    let normalized_child_ref =
+                        normalized_local_file_reference(lockfile_dir, &local_child_path)
+                            .replace('\\', "/");
+                    let resolved_local = Self::snapshot_local_directory_package(
+                        resolved_packages,
+                        http_client,
+                        config,
+                        package_snapshots,
+                        workspace_packages,
+                        workspace_root_peer_overrides,
+                        current_manifest_path,
+                        lockfile_dir,
+                        child_name,
+                        &local_child_path,
+                        &normalized_child_ref,
+                        prefer_offline,
+                        offline,
+                    )
+                    .await;
+                    merge_resolved_peer_suffixes(
+                        &mut resolved_local_peers,
+                        &resolved_local.peer_suffixes,
+                    );
+                    snapshot_dependencies.insert(
+                        Self::parse_pkg_name(child_name),
+                        PackageSnapshotDependency::Link(resolved_local.version.to_string()),
+                    );
+                    continue;
+                }
+
+                if let Some(workspace_package) = resolve_workspace_dependency(
+                    workspace_packages,
+                    child_name,
+                    child_version_range,
+                ) {
+                    let normalized_child_ref =
+                        normalized_local_file_reference(lockfile_dir, &workspace_package.root_dir)
+                            .replace('\\', "/");
+                    let resolved_local = Self::snapshot_local_directory_package(
+                        resolved_packages,
+                        http_client,
+                        config,
+                        package_snapshots,
+                        workspace_packages,
+                        workspace_root_peer_overrides,
+                        current_manifest_path,
+                        lockfile_dir,
+                        child_name,
+                        &workspace_package.root_dir,
+                        &normalized_child_ref,
+                        prefer_offline,
+                        offline,
+                    )
+                    .await;
+                    merge_resolved_peer_suffixes(
+                        &mut resolved_local_peers,
+                        &resolved_local.peer_suffixes,
+                    );
+                    snapshot_dependencies.insert(
+                        Self::parse_pkg_name(child_name),
+                        PackageSnapshotDependency::Link(resolved_local.version.to_string()),
+                    );
+                    continue;
+                }
+
+                let resolved_range = apply_workspace_root_peer_override(
+                    config,
+                    workspace_root_peer_overrides,
+                    None,
+                    child_name,
+                    child_version_range,
+                );
+                let resolved_dependency = Self::resolve_and_snapshot_package(
+                    resolved_packages,
+                    http_client,
+                    config,
+                    package_snapshots,
+                    workspace_root_peer_overrides,
+                    child_name,
+                    &resolved_range,
+                    prefer_offline,
+                    offline,
+                )
+                .await;
+                snapshot_dependencies.insert(
+                    Self::parse_pkg_name(child_name),
+                    resolved_version_to_snapshot_dependency(
+                        child_name,
+                        &resolved_dependency.version,
+                    ),
                 );
             }
         }
@@ -550,109 +668,6 @@ where
         let virtual_store_name = dependency_path.to_virtual_store_name();
 
         if resolved_packages.insert(virtual_store_name) {
-            if let Some(local_manifest) = &local_manifest {
-                for (child_name, child_version_range) in
-                    local_manifest.dependencies([DependencyGroup::Prod, DependencyGroup::Optional])
-                {
-                    if let Some((resolved_local, local_child_path, should_symlink)) =
-                        resolve_local_dependency(local_manifest.path(), child_version_range)
-                    {
-                        if should_symlink {
-                            snapshot_dependencies.insert(
-                                Self::parse_pkg_name(child_name),
-                                PackageSnapshotDependency::Link(resolved_local.version.to_string()),
-                            );
-                            continue;
-                        }
-
-                        let normalized_child_ref =
-                            normalized_local_file_reference(lockfile_dir, &local_child_path)
-                                .replace('\\', "/");
-                        let resolved_local = Self::snapshot_local_directory_package(
-                            resolved_packages,
-                            http_client,
-                            config,
-                            package_snapshots,
-                            workspace_packages,
-                            workspace_root_peer_overrides,
-                            current_manifest_path,
-                            lockfile_dir,
-                            child_name,
-                            &local_child_path,
-                            &normalized_child_ref,
-                            prefer_offline,
-                            offline,
-                        )
-                        .await;
-                        snapshot_dependencies.insert(
-                            Self::parse_pkg_name(child_name),
-                            PackageSnapshotDependency::Link(resolved_local.version.to_string()),
-                        );
-                        continue;
-                    }
-
-                    if let Some(workspace_package) = resolve_workspace_dependency(
-                        workspace_packages,
-                        child_name,
-                        child_version_range,
-                    ) {
-                        let normalized_child_ref = normalized_local_file_reference(
-                            lockfile_dir,
-                            &workspace_package.root_dir,
-                        )
-                        .replace('\\', "/");
-                        let resolved_local = Self::snapshot_local_directory_package(
-                            resolved_packages,
-                            http_client,
-                            config,
-                            package_snapshots,
-                            workspace_packages,
-                            workspace_root_peer_overrides,
-                            current_manifest_path,
-                            lockfile_dir,
-                            child_name,
-                            &workspace_package.root_dir,
-                            &normalized_child_ref,
-                            prefer_offline,
-                            offline,
-                        )
-                        .await;
-                        snapshot_dependencies.insert(
-                            Self::parse_pkg_name(child_name),
-                            PackageSnapshotDependency::Link(resolved_local.version.to_string()),
-                        );
-                        continue;
-                    }
-
-                    let resolved_range = apply_workspace_root_peer_override(
-                        config,
-                        workspace_root_peer_overrides,
-                        None,
-                        child_name,
-                        child_version_range,
-                    );
-                    let resolved_dependency = Self::resolve_and_snapshot_package(
-                        resolved_packages,
-                        http_client,
-                        config,
-                        package_snapshots,
-                        workspace_root_peer_overrides,
-                        child_name,
-                        &resolved_range,
-                        prefer_offline,
-                        offline,
-                    )
-                    .await;
-                    snapshot_dependencies.insert(
-                        Self::parse_pkg_name(child_name),
-                        resolved_version_to_snapshot_dependency(
-                            child_name,
-                            &resolved_dependency.version,
-                        ),
-                    );
-                }
-            }
-
             package_snapshots.insert(
                 dependency_path,
                 PackageSnapshot {
@@ -688,6 +703,7 @@ where
 
         ResolvedPackage {
             version: ResolvedDependencyVersion::Link(normalized_ref_with_peers.to_string()),
+            peer_suffixes: resolved_local_peers,
         }
     }
 
@@ -724,9 +740,7 @@ where
                 .replace('\\', "/")
             );
             if should_symlink {
-                return Some(ResolvedPackage {
-                    version: ResolvedDependencyVersion::Link(normalized_ref),
-                });
+                return Some(ResolvedPackage::new(ResolvedDependencyVersion::Link(normalized_ref)));
             }
 
             return Some(
@@ -1040,6 +1054,7 @@ fn dedupe_injected_dependency_map(
             "link:{}",
             to_relative_path(project_dir, &workspace_package.root_dir).replace('\\', "/")
         ));
+        resolved_package.peer_suffixes.clear();
     }
 }
 
@@ -1361,7 +1376,7 @@ fn resolve_local_dependency(
     let local_dep_path = normalize_local_dependency_path(project_dir, target);
     let normalized = format!("{protocol}{}", target.replace('\\', "/"));
     Some((
-        ResolvedPackage { version: ResolvedDependencyVersion::Link(normalized) },
+        ResolvedPackage::new(ResolvedDependencyVersion::Link(normalized)),
         local_dep_path,
         should_symlink,
     ))
@@ -1425,6 +1440,15 @@ fn resolved_version_to_snapshot_dependency(
             let _ = dependency_name;
             PackageSnapshotDependency::Link(link.clone())
         }
+    }
+}
+
+fn merge_resolved_peer_suffixes(
+    target: &mut BTreeMap<String, ResolvedDependencyVersion>,
+    source: &BTreeMap<String, ResolvedDependencyVersion>,
+) {
+    for (peer_name, peer_version) in source {
+        target.entry(peer_name.clone()).or_insert_with(|| peer_version.clone());
     }
 }
 
@@ -1924,17 +1948,15 @@ mod tests {
         let resolved = HashMap::from([
             (
                 ("external-link".to_string(), "link:../external".to_string()),
-                ResolvedPackage {
-                    version: ResolvedDependencyVersion::Link("link:../external".to_string()),
-                },
+                ResolvedPackage::new(ResolvedDependencyVersion::Link(
+                    "link:../external".to_string(),
+                )),
             ),
             (
                 ("is-number".to_string(), "^7.0.0".to_string()),
-                ResolvedPackage {
-                    version: ResolvedDependencyVersion::PkgVerPeer(
-                        "7.0.0".parse().expect("version"),
-                    ),
-                },
+                ResolvedPackage::new(ResolvedDependencyVersion::PkgVerPeer(
+                    "7.0.0".parse().expect("version"),
+                )),
             ),
         ]);
 
@@ -1968,9 +1990,9 @@ mod tests {
         );
         let resolved = HashMap::from([(
             ("workspace-pkg".to_string(), "workspace:*".to_string()),
-            ResolvedPackage {
-                version: ResolvedDependencyVersion::Link("link:../workspace-pkg".to_string()),
-            },
+            ResolvedPackage::new(ResolvedDependencyVersion::Link(
+                "link:../workspace-pkg".to_string(),
+            )),
         )]);
 
         let snapshot = InstallWithLockfile::<'_, [DependencyGroup; 1]>::build_project_snapshot(
@@ -2006,9 +2028,9 @@ mod tests {
         );
         let resolved = HashMap::from([(
             ("workspace-pkg".to_string(), "workspace:*".to_string()),
-            ResolvedPackage {
-                version: ResolvedDependencyVersion::Link("link:../workspace-pkg".to_string()),
-            },
+            ResolvedPackage::new(ResolvedDependencyVersion::Link(
+                "link:../workspace-pkg".to_string(),
+            )),
         )]);
 
         let snapshot = InstallWithLockfile::<'_, [DependencyGroup; 1]>::build_project_snapshot(
@@ -2134,9 +2156,9 @@ mod tests {
 
         let mut resolved_direct_dependencies = HashMap::from([(
             ("project-1".to_string(), "workspace:*".to_string()),
-            ResolvedPackage {
-                version: ResolvedDependencyVersion::Link("file:packages/project-1".to_string()),
-            },
+            ResolvedPackage::new(ResolvedDependencyVersion::Link(
+                "file:packages/project-1".to_string(),
+            )),
         )]);
 
         dedupe_injected_direct_dependencies(
