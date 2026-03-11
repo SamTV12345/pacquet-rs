@@ -208,13 +208,15 @@ fn materialize_virtual_store_package(
         let dependency_source_dir = if source_package_dir
             .ancestors()
             .any(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some(".pnpm"))
-            && source_package_dir
-                .parent()
-                .and_then(|parent| parent.file_name())
-                .and_then(|name| name.to_str())
-                == Some("node_modules")
         {
-            source_package_dir.parent().expect("checked above").to_path_buf()
+            source_package_dir
+                .ancestors()
+                .skip(1)
+                .find(|ancestor| {
+                    ancestor.file_name().and_then(|name| name.to_str()) == Some("node_modules")
+                })
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| source_package_dir.join("node_modules"))
         } else {
             source_package_dir.join("node_modules")
         };
@@ -237,6 +239,28 @@ fn materialize_virtual_store_package(
             }
 
             if file_name_str.starts_with('@') {
+                if entry.path().join("package.json").is_file() {
+                    let source_dependency_dir = entry.path();
+                    if source_dependency_dir == source_package_dir {
+                        continue;
+                    }
+                    let destination_dependency_dir =
+                        destination_package_dir.join("node_modules").join(&file_name);
+                    if is_symlink_or_junction(&source_dependency_dir).unwrap_or(false)
+                        && should_preserve_link(&source_dependency_dir, virtual_store_dir)
+                    {
+                        symlink_package(&source_dependency_dir, &destination_dependency_dir)?;
+                        continue;
+                    }
+                    inner(
+                        import_method,
+                        &source_dependency_dir,
+                        &destination_dependency_dir,
+                        seen,
+                    )?;
+                    continue;
+                }
+
                 let scoped_entries = match fs::read_dir(entry.path()) {
                     Ok(entries) => entries,
                     Err(_) => continue,
