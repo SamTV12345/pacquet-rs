@@ -635,15 +635,27 @@ mod tests {
     #[test]
     fn prefer_symlinked_executables_symlinks_directories_bin_entry() {
         let dir = tempdir().expect("tempdir");
-        let package_dir = dir.path().join("pkg");
-        let manifest_path = package_dir.join("package.json");
+        let project_dir = dir.path().join("project");
+        let manifest_path = project_dir.join("package.json");
         let modules_dir = dir.path().join("node_modules");
         let target_dir = modules_dir.join("@scope/pkg-with-directories-bin");
         let target = target_dir.join("bin/cli");
+        fs::create_dir_all(&project_dir).expect("create project dir");
         fs::create_dir_all(target.parent().expect("target parent")).expect("create bin dir");
         fs::create_dir_all(&modules_dir).expect("create modules dir");
         fs::write(
             &manifest_path,
+            serde_json::json!({
+                "name": "app",
+                "dependencies": {
+                    "@scope/pkg-with-directories-bin": "1.0.0"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write project package.json");
+        fs::write(
+            target_dir.join("package.json"),
             serde_json::json!({
                 "name": "@scope/pkg-with-directories-bin",
                 "directories": {
@@ -652,7 +664,7 @@ mod tests {
             })
             .to_string(),
         )
-        .expect("write package.json");
+        .expect("write dependency package.json");
         fs::write(&target, "#!/bin/sh\necho hi\n").expect("write cli");
 
         let manifest = PackageManifest::from_path(manifest_path).expect("load manifest");
