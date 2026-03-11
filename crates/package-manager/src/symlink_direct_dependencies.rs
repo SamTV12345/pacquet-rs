@@ -2,7 +2,7 @@ use crate::{
     SymlinkPackageError, import_local_package_dir, link_package, should_materialize_root_links,
     symlink_package,
 };
-use pacquet_fs::is_symlink_or_junction;
+use pacquet_fs::{is_symlink_or_junction, symlink_or_junction_target};
 use pacquet_lockfile::{
     DependencyPath, PackageSnapshot, PkgName, PkgNameVerPeer, ProjectSnapshot,
     ResolvedDependencyVersion,
@@ -173,6 +173,23 @@ fn materialize_virtual_store_package(
     source_package_dir: &Path,
     destination_package_dir: &Path,
 ) -> Result<(), SymlinkPackageError> {
+    fn resolved_link_target(path: &Path) -> Option<PathBuf> {
+        let target = symlink_or_junction_target(path).ok()?;
+        let resolved = if target.is_absolute() {
+            target
+        } else {
+            path.parent().unwrap_or_else(|| Path::new(".")).join(target)
+        };
+        fs::canonicalize(resolved).ok()
+    }
+
+    fn should_preserve_link(path: &Path, virtual_store_dir: &Path) -> bool {
+        let Some(target) = resolved_link_target(path) else {
+            return false;
+        };
+        !target.starts_with(virtual_store_dir)
+    }
+
     fn inner(
         import_method: PackageImportMethod,
         source_package_dir: &Path,
@@ -193,6 +210,12 @@ fn materialize_virtual_store_package(
         }) else {
             return Ok(());
         };
+        let virtual_store_dir = source_package_dir
+            .ancestors()
+            .find(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some(".pnpm"))
+            .unwrap_or_else(|| {
+                virtual_node_modules_dir.parent().unwrap_or(virtual_node_modules_dir)
+            });
         let entries = match fs::read_dir(virtual_node_modules_dir) {
             Ok(entries) => entries,
             Err(_) => return Ok(()),
@@ -219,7 +242,9 @@ fn materialize_virtual_store_package(
                     }
                     let destination_dependency_dir =
                         destination_package_dir.join("node_modules").join(scoped_target_name);
-                    if is_symlink_or_junction(&scoped_source_dir).unwrap_or(false) {
+                    if is_symlink_or_junction(&scoped_source_dir).unwrap_or(false)
+                        && should_preserve_link(&scoped_source_dir, virtual_store_dir)
+                    {
                         symlink_package(&scoped_source_dir, &destination_dependency_dir)?;
                         continue;
                     }
@@ -234,7 +259,9 @@ fn materialize_virtual_store_package(
             }
             let destination_dependency_dir =
                 destination_package_dir.join("node_modules").join(&file_name);
-            if is_symlink_or_junction(&source_dependency_dir).unwrap_or(false) {
+            if is_symlink_or_junction(&source_dependency_dir).unwrap_or(false)
+                && should_preserve_link(&source_dependency_dir, virtual_store_dir)
+            {
                 symlink_package(&source_dependency_dir, &destination_dependency_dir)?;
                 continue;
             }
@@ -316,5 +343,47 @@ mod tests {
         let destination_dep = destination_package_dir.join("node_modules/project-1");
         assert!(destination_dep.exists());
         assert!(is_symlink_or_junction(&destination_dep).expect("check destination link"));
+    }
+
+    #[test]
+    fn materialize_virtual_store_package_recurses_into_virtual_store_links() {
+        let dir = tempdir().expect("tempdir");
+        let virtual_store_dir = dir.path().join(".pnpm");
+        let nested_pkg = virtual_store_dir.join("project-1@file+pkg/node_modules/project-1");
+        let source_package_dir =
+            virtual_store_dir.join("project-2@file+pkg/node_modules/project-2");
+        let destination_package_dir = dir.path().join("project/node_modules/project-2");
+
+        fs::create_dir_all(nested_pkg.join("node_modules/is-number")).expect("create nested pkg");
+        fs::create_dir_all(source_package_dir.join("node_modules")).expect("create source package");
+        fs::write(
+            nested_pkg.join("package.json"),
+            "{\"name\":\"project-1\",\"version\":\"1.0.0\"}",
+        )
+        .expect("write nested package manifest");
+        fs::write(
+            nested_pkg.join("node_modules/is-number/package.json"),
+            "{\"name\":\"is-number\",\"version\":\"7.0.0\"}",
+        )
+        .expect("write transitive package manifest");
+        fs::write(
+            source_package_dir.join("package.json"),
+            "{\"name\":\"project-2\",\"version\":\"1.0.0\"}",
+        )
+        .expect("write source package manifest");
+        symlink_dir(&nested_pkg, &source_package_dir.join("node_modules/project-1"))
+            .expect("create nested virtual store link");
+
+        materialize_virtual_store_package(
+            PackageImportMethod::Copy,
+            &source_package_dir,
+            &destination_package_dir,
+        )
+        .expect("materialize package");
+
+        let destination_dep = destination_package_dir.join("node_modules/project-1");
+        assert!(destination_dep.exists());
+        assert!(!is_symlink_or_junction(&destination_dep).expect("check destination metadata"));
+        assert!(destination_dep.join("node_modules/is-number").exists());
     }
 }
