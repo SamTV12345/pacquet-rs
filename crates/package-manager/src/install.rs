@@ -602,8 +602,9 @@ mod tests {
             });
 
         assert!(project_root.join(".pnp.cjs").exists());
-        assert_eq!(get_filenames_in_folder(&modules_dir), [".bin", ".modules.yaml", ".pnpm"]);
+        assert_eq!(get_filenames_in_folder(&modules_dir), [".modules.yaml", ".pnpm"]);
         assert!(!modules_dir.join("@pnpm.e2e").exists());
+        assert!(!modules_dir.join(".bin").exists());
         assert!(virtual_store_dir.join("@pnpm.e2e+hello-world-js-bin@1.0.0").exists());
 
         drop((dir, mock_instance));
