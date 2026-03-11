@@ -135,6 +135,17 @@ where
     bool::from_str(&s).map_err(de::Error::custom)
 }
 
+pub fn deserialize_optional_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s.trim().is_empty() {
+        return Ok(None);
+    }
+    bool::from_str(&s).map(Some).map_err(de::Error::custom)
+}
+
 pub fn deserialize_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,

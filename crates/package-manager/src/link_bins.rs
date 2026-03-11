@@ -33,7 +33,7 @@ pub fn link_bins_for_manifest(
 
         for (bin_name, relative_target) in collect_bin_entries(&package_manifest) {
             let target = package_dir.join(relative_target);
-            write_bin_wrapper(&bin_dir, &bin_name, &target)
+            write_bin_wrapper(config, &bin_dir, &bin_name, &target)
                 .wrap_err_with(|| format!("link bin `{bin_name}` from {}", target.display()))?;
         }
     }
@@ -64,7 +64,15 @@ fn default_bin_name(package_name: &str) -> String {
     package_name.rsplit('/').next().unwrap_or(package_name).to_string()
 }
 
-fn write_bin_wrapper(bin_dir: &Path, bin_name: &str, target: &Path) -> miette::Result<()> {
+fn write_bin_wrapper(
+    config: &Npmrc,
+    bin_dir: &Path,
+    bin_name: &str,
+    target: &Path,
+) -> miette::Result<()> {
+    #[cfg(windows)]
+    let _ = config;
+
     if !target.is_file() {
         miette::bail!("bin target does not exist: {}", target.display());
     }
@@ -79,9 +87,24 @@ fn write_bin_wrapper(bin_dir: &Path, bin_name: &str, target: &Path) -> miette::R
         .into_diagnostic()
         .wrap_err_with(|| format!("create {}", bin_dir.display()))?;
     let use_node = should_launch_with_node(&target);
+    #[cfg(unix)]
+    let prefer_symlinked_executables = config_prefers_symlinked_executables(config);
 
     #[cfg(unix)]
     {
+        if prefer_symlinked_executables && !use_node {
+            let bin_path = bin_dir.join(bin_name);
+            if bin_path.exists() {
+                fs::remove_file(&bin_path)
+                    .into_diagnostic()
+                    .wrap_err_with(|| format!("remove {}", bin_path.display()))?;
+            }
+            std::os::unix::fs::symlink(&target, &bin_path)
+                .into_diagnostic()
+                .wrap_err_with(|| format!("symlink {}", bin_path.display()))?;
+            return Ok(());
+        }
+
         use std::os::unix::fs::PermissionsExt;
 
         let bin_path = bin_dir.join(bin_name);
@@ -113,6 +136,10 @@ fn write_bin_wrapper(bin_dir: &Path, bin_name: &str, target: &Path) -> miette::R
     }
 
     Ok(())
+}
+
+fn config_prefers_symlinked_executables(config: &Npmrc) -> bool {
+    config.prefer_symlinked_executables_enabled()
 }
 
 #[cfg(unix)]
@@ -249,5 +276,32 @@ mod tests {
         writeln!(file, "console.log('hello')").expect("write body");
 
         assert!(should_launch_with_node(&target));
+    }
+
+    #[test]
+    fn hoisted_node_linker_prefers_symlinked_executables_by_default() {
+        let mut config = Npmrc::new();
+        config.node_linker = pacquet_npmrc::NodeLinker::Hoisted;
+
+        assert!(config_prefers_symlinked_executables(&config));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prefer_symlinked_executables_creates_symlink_for_non_node_binary() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("hello");
+        let bin_dir = dir.path().join(".bin");
+        let mut file = fs::File::create(&target).expect("create target");
+        writeln!(file, "#!/bin/sh").expect("write shebang");
+        writeln!(file, "echo hello").expect("write body");
+
+        let mut config = Npmrc::new();
+        config.prefer_symlinked_executables = Some(true);
+
+        write_bin_wrapper(&config, &bin_dir, "hello", &target).expect("write bin");
+
+        let metadata = fs::symlink_metadata(bin_dir.join("hello")).expect("read metadata");
+        assert!(metadata.file_type().is_symlink());
     }
 }

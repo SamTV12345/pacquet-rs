@@ -17,6 +17,7 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 | ✅    | modules_dir           |                                     |
 | ~    | node_linker           | `hoisted` root hoist is wired; `pnp` now suppresses root node_modules hoists and writes a `.pnp.cjs` manifest |
 | ~    | symlink               | `false` avoids root links for isolated linker, clears hoist/public-hoist patterns, and still copies with hoisted linker |
+| ~    | prefer_symlinked_executables | defaults to true for `node-linker=hoisted`; POSIX `.bin` entries symlink non-Node executables instead of wrapping them |
 | ✅    | virtual_store_dir     |                                     |
 | ~    | package_import_method | `auto`, `copy`, `hardlink`, `clone`, and `clone-or-copy` wired for store imports plus local directory materialization/relink; local source `node_modules` is ignored during import (`clone` depends on reflink support) |
 | ~    | disable_relink_local_dir_deps | skips refreshing/relinking already-installed local directory dependencies on reinstall, including injected workspace deps, hardlinked local dirs, and frozen installs |

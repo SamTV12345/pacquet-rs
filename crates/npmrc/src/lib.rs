@@ -20,9 +20,9 @@ use crate::custom_deserializer::{
     bool_true, default_cache_dir, default_fetch_timeout, default_hoist_pattern,
     default_modules_cache_max_age, default_modules_dir, default_network_concurrency,
     default_peers_suffix_max_length, default_public_hoist_pattern, default_registry,
-    default_store_dir, default_virtual_store_dir, deserialize_bool, deserialize_optional_pathbuf,
-    deserialize_pathbuf, deserialize_registry, deserialize_store_dir, deserialize_string_vec,
-    deserialize_u16, deserialize_u64,
+    default_store_dir, default_virtual_store_dir, deserialize_bool, deserialize_optional_bool,
+    deserialize_optional_pathbuf, deserialize_pathbuf, deserialize_registry, deserialize_store_dir,
+    deserialize_string_vec, deserialize_u16, deserialize_u64,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -120,6 +120,11 @@ pub struct Npmrc {
     /// It is a useful setting together with node-linker=pnp.
     #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
     pub symlink: bool,
+
+    /// When enabled, pnpm prefers symlinks instead of shell wrappers in `.bin` on POSIX.
+    /// When omitted, pnpm defaults this to true for `node-linker=hoisted`.
+    #[serde(default, deserialize_with = "deserialize_optional_bool")]
+    pub prefer_symlinked_executables: Option<bool>,
 
     /// The directory with links to the store. All direct and indirect dependencies of the
     /// project are linked into this directory.
@@ -630,6 +635,10 @@ impl Npmrc {
         }
     }
 
+    pub fn prefer_symlinked_executables_enabled(&self) -> bool {
+        self.prefer_symlinked_executables.unwrap_or(matches!(self.node_linker, NodeLinker::Hoisted))
+    }
+
     fn recompute_auth_headers(&mut self) -> Result<(), AuthConfigError> {
         let (headers, max_parts) = auth_headers_from_settings(
             &self.raw_settings,
@@ -743,6 +752,7 @@ mod tests {
         assert_eq!(value.https_proxy, None);
         assert_eq!(value.http_proxy, None);
         assert_eq!(value.no_proxy, None);
+        assert_eq!(value.prefer_symlinked_executables, None);
         assert!(value.ca.is_empty());
         assert!(value.lockfile);
         assert!(value.prefer_frozen_lockfile);
@@ -862,6 +872,21 @@ mod tests {
     pub fn parse_strict_ssl() {
         let value: Npmrc = serde_ini::from_str("strict-ssl=false").unwrap();
         assert!(!value.strict_ssl);
+    }
+
+    #[test]
+    pub fn prefer_symlinked_executables_defaults_to_true_for_hoisted_node_linker() {
+        let value: Npmrc = serde_ini::from_str("node-linker=hoisted").unwrap();
+        assert_eq!(value.prefer_symlinked_executables, None);
+        assert!(value.prefer_symlinked_executables_enabled());
+    }
+
+    #[test]
+    pub fn explicit_prefer_symlinked_executables_false_overrides_hoisted_default() {
+        let value: Npmrc =
+            serde_ini::from_str("node-linker=hoisted\nprefer-symlinked-executables=false").unwrap();
+        assert_eq!(value.prefer_symlinked_executables, Some(false));
+        assert!(!value.prefer_symlinked_executables_enabled());
     }
 
     #[test]
