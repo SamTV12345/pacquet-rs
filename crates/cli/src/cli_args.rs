@@ -1,7 +1,9 @@
 pub mod add;
+pub mod cache;
 pub mod ci;
 pub mod env;
 pub mod exec;
+pub mod fetch;
 pub mod install;
 pub mod list;
 pub mod remove;
@@ -12,10 +14,12 @@ pub mod why;
 use crate::State;
 use crate::state::find_workspace_root;
 use add::AddArgs;
+use cache::CacheArgs;
 use ci::CiArgs;
 use clap::{Parser, Subcommand};
 use env::EnvArgs;
 use exec::ExecArgs;
+use fetch::FetchArgs;
 use install::InstallArgs;
 use list::ListArgs;
 use miette::{Context, IntoDiagnostic};
@@ -52,6 +56,8 @@ pub enum CliCommand {
     Init,
     /// Add a package
     Add(AddArgs),
+    /// Inspect and manage the metadata cache.
+    Cache(CacheArgs),
     /// Install packages
     Install(InstallArgs),
     /// Install with a frozen lockfile (CI mode)
@@ -60,6 +66,8 @@ pub enum CliCommand {
     Env(EnvArgs),
     /// Run an arbitrary command in the current package context.
     Exec(ExecArgs),
+    /// Fetch packages from the lockfile into the store without mutating the workspace.
+    Fetch(FetchArgs),
     /// Remove package(s)
     #[clap(alias = "rm", alias = "uninstall", alias = "un", alias = "uni")]
     Remove(RemoveArgs),
@@ -106,6 +114,7 @@ impl CliArgs {
             CliCommand::Init => {
                 PackageManifest::init(&manifest_path()).wrap_err("initialize package.json")?;
             }
+            CliCommand::Cache(args) => args.run(npmrc)?,
             CliCommand::Add(mut args) => {
                 args.invoked_with_workspace_root = workspace_root;
                 args.run(state()?).await?
@@ -114,6 +123,7 @@ impl CliArgs {
             CliCommand::Ci(args) => args.run(state()?).await?,
             CliCommand::Env(args) => args.run().await?,
             CliCommand::Exec(args) => args.run(dir)?,
+            CliCommand::Fetch(args) => args.run(dir, npmrc).await?,
             CliCommand::Remove(args) => args.run(state()?).await?,
             CliCommand::List(args) => args.run(state()?)?,
             CliCommand::Why(args) => args.run(state()?)?,

@@ -96,6 +96,22 @@ pub fn execute_command(opts: ExecuteCommand<'_>) -> Result<(), ExecutorError> {
     wait_for_command(&mut command)
 }
 
+/// Execute one arbitrary command and capture its output.
+pub fn execute_command_capture(
+    opts: ExecuteCommand<'_>,
+) -> Result<LifecycleScriptOutput, ExecutorError> {
+    let path_var = prepend_node_modules_bin_paths(opts.pkg_root)?;
+    let env = [(OsString::from("PATH"), path_var.clone())];
+    let mut command = Command::new(resolve_program_for_emulator(opts.program, &env));
+    command.args(opts.args);
+    command.current_dir(opts.pkg_root);
+    command.env("PATH", path_var);
+    for (key, value) in opts.extra_env {
+        command.env(key, value);
+    }
+    wait_for_command_capture(&mut command)
+}
+
 /// Execute one script and capture its output instead of writing directly to stdio.
 pub fn execute_lifecycle_script_capture(
     opts: ExecuteLifecycleScript<'_>,

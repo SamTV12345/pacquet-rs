@@ -102,6 +102,30 @@
 | Done | Command       | Notes |
 | ---- | ------------- | ----- |
 | ✅   | `exec <cmd>`  | runs an arbitrary command with `node_modules/.bin` prepended to `PATH` |
+| ✅   | `exec -r`     | runs the command in all workspace packages |
+| ✅   | `--report-summary` | writes `pnpm-exec-summary.json` for recursive exec |
+| ✅   | `--reporter-hide-prefix` / `--no-reporter-hide-prefix` | recursive exec output prefix control |
+
+## `pacquet fetch`
+
+[pnpm documentation](https://pnpm.io/cli/fetch)
+
+| Done | Command | Notes |
+| ---- | ------- | ----- |
+| ✅   | `fetch` | warms the store from `pnpm-lock.yaml` without mutating workspace `node_modules` |
+| ✅   | `-P, --prod` | fetches only production and optional packages from the lockfile root importer |
+| ✅   | `-D, --dev` | fetches only development packages from the lockfile root importer |
+
+## `pacquet cache`
+
+[pnpm documentation](https://pnpm.io/cli/cache)
+
+| Done | Command | Notes |
+| ---- | ------- | ----- |
+| ✅   | `cache list` | lists locally cached package metadata files |
+| ✅   | `cache list-registries` | lists registries present in the local metadata cache |
+| ✅   | `cache view <pkg>` | shows cached metadata grouped by registry |
+| ✅   | `cache delete <pattern...>` | deletes matching metadata cache files |
 
 ## `pacquet test`
 

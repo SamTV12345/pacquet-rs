@@ -26,7 +26,7 @@ Experimental package manager for node.js written in rust.
 - [x] `.npmrc` parity: hoisting, `node-linker`, auth token helpers, request/TLS settings, local-dir/injected-workspace lockfile behaviors, and peer-dependency settings are wired.
 - [x] Store parity: `store status`, `store add`, and non-destructive `store prune`.
 - [x] Lifecycle parity: install script handling, `pnpm:devPreinstall`, and `ignore-scripts`/`lockfile-only` behavior are consistent with pnpm for current install flows.
-- [~] Command-surface parity: direct `exec` is in place; `dlx`, `fetch`, `dedupe`, `cache`, and broader recursive/reporting workflows are still missing.
+- [~] Command-surface parity: `exec` (including recursive summary/prefix controls), lockfile-based `fetch`, and metadata `cache` inspection are in place; `dlx` and `dedupe` are still missing.
 - [ ] Advanced compatibility: patching, hooks/pnpmfile support, shell completion, reporter polish, and error-code parity.
 
 ## Debugging
