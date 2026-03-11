@@ -323,10 +323,15 @@ fn import_dir_recursive(
             error,
         })?;
         let from = entry.path();
-        let to = destination.join(entry.file_name());
+        let file_name = entry.file_name();
+        let file_name_str = file_name.to_string_lossy();
+        let to = destination.join(&file_name);
         let file_type = entry.file_type().map_err(|error| {
             SymlinkPackageError::ReadSourceEntryType { path: from.clone(), error }
         })?;
+        if file_type.is_dir() && matches!(file_name_str.as_ref(), "node_modules" | ".git") {
+            continue;
+        }
         let canonical_from =
             if file_type.is_symlink() { fs::canonicalize(&from).ok() } else { None };
         if file_type.is_dir() || canonical_from.as_ref().is_some_and(|target| target.is_dir()) {
@@ -385,5 +390,23 @@ mod tests {
             same_file::is_same_file(source.join("index.js"), destination.join("index.js"))
                 .expect("compare physical files")
         );
+    }
+
+    #[test]
+    fn import_local_package_dir_skips_source_node_modules() {
+        let dir = tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        let source_dep = source.join("node_modules/dep");
+        let destination = dir.path().join("node_modules/pkg");
+        fs::create_dir_all(&source_dep).expect("create source node_modules dir");
+        fs::write(source.join("index.js"), "module.exports = 1;").expect("write source file");
+        fs::write(source_dep.join("index.js"), "module.exports = 'dep';")
+            .expect("write nested dep");
+
+        import_local_package_dir(PackageImportMethod::Copy, &source, &destination)
+            .expect("import local package");
+
+        assert!(destination.join("index.js").exists());
+        assert!(!destination.join("node_modules").exists());
     }
 }

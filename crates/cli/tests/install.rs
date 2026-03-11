@@ -2467,6 +2467,79 @@ fn workspace_injected_dependency_should_refresh_on_reinstall_by_default() {
 }
 
 #[test]
+fn workspace_injected_dependency_should_materialize_when_node_linker_is_hoisted() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let project_1_dir = workspace.join("packages/project-1");
+    let project_2_dir = workspace.join("packages/project-2");
+    fs::create_dir_all(&project_1_dir).expect("create project-1 dir");
+    fs::create_dir_all(&project_2_dir).expect("create project-2 dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "workspace-root",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write workspace root manifest");
+    fs::write(
+        workspace.join(".npmrc"),
+        format!(
+            "node-linker=hoisted\ndedupe-injected-deps=false\nregistry={}\n",
+            mock_instance.url()
+        ),
+    )
+    .expect("write workspace npmrc");
+    fs::write(
+        project_1_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-1",
+            "version": "1.0.0",
+            "main": "index.js",
+            "dependencies": {
+                "is-number": "7.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-1 manifest");
+    fs::write(project_1_dir.join("index.js"), "module.exports = 'project-1';\n")
+        .expect("write project-1 entrypoint");
+    fs::write(
+        project_2_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-2",
+            "version": "1.0.0",
+            "dependencies": {
+                "project-1": "workspace:*"
+            },
+            "dependenciesMeta": {
+                "project-1": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-2 manifest");
+
+    pacquet.with_args(["-C", workspace.to_str().unwrap(), "install", "-r"]).assert().success();
+
+    let injected_dep = project_2_dir.join("node_modules/project-1");
+    assert!(injected_dep.exists());
+    assert!(!is_symlink_or_junction(&injected_dep).expect("read injected dependency metadata"));
+    assert!(injected_dep.join("node_modules/is-number").exists());
+    assert!(workspace.join("node_modules/is-number").exists());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
 fn workspace_injected_dependency_should_relink_hardlinked_files_on_reinstall() {
     let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
 
@@ -2526,6 +2599,96 @@ fn workspace_injected_dependency_should_relink_hardlinked_files_on_reinstall() {
         "module.exports = 'v1';\n"
     );
     assert!(same_physical_file(&installed_file, &virtual_store_file));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn workspace_injected_dependency_should_relink_hardlinked_files_in_multiple_projects_when_hoisted()
+{
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_1_dir = workspace.join("packages/app-1");
+    let app_2_dir = workspace.join("packages/app-2");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_1_dir).expect("create app-1 package dir");
+    fs::create_dir_all(&app_2_dir).expect("create app-2 package dir");
+    fs::create_dir_all(&lib_dir).expect("create lib package dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "workspace-root",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write workspace root manifest");
+    fs::write(
+        workspace.join(".npmrc"),
+        "node-linker=hoisted\npackage-import-method=hardlink\ndedupe-injected-deps=false\n",
+    )
+    .expect("write workspace npmrc");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.2.3",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write lib package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'v1';\n").expect("write lib entrypoint");
+
+    for app_dir in [&app_1_dir, &app_2_dir] {
+        fs::write(
+            app_dir.join("package.json"),
+            serde_json::json!({
+                "name": app_dir.file_name().and_then(|name| name.to_str()).expect("app dir name"),
+                "version": "1.0.0",
+                "dependencies": {
+                    "@repo/lib": "workspace:*"
+                },
+                "dependenciesMeta": {
+                    "@repo/lib": {
+                        "injected": true
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write app package manifest");
+    }
+
+    pacquet.with_args(["-C", workspace.to_str().unwrap(), "install", "-r"]).assert().success();
+
+    let virtual_store_file = find_virtual_store_file(&workspace, "@repo/lib", "index.js");
+    let installed_1 = app_1_dir.join("node_modules/@repo/lib/index.js");
+    let installed_2 = app_2_dir.join("node_modules/@repo/lib/index.js");
+    assert!(same_physical_file(&installed_1, &virtual_store_file));
+    assert!(same_physical_file(&installed_2, &virtual_store_file));
+
+    fs::remove_file(&installed_1).expect("remove app-1 installed file");
+    fs::write(&installed_1, "module.exports = 'broken-1';\n").expect("rewrite app-1 file");
+    fs::remove_file(&installed_2).expect("remove app-2 installed file");
+    fs::write(&installed_2, "module.exports = 'broken-2';\n").expect("rewrite app-2 file");
+    assert!(!same_physical_file(&installed_1, &virtual_store_file));
+    assert!(!same_physical_file(&installed_2, &virtual_store_file));
+
+    pacquet_command(&workspace).with_args(["install", "-r"]).assert().success();
+
+    assert_eq!(
+        fs::read_to_string(&installed_1).expect("read app-1 reinstalled file"),
+        "module.exports = 'v1';\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&installed_2).expect("read app-2 reinstalled file"),
+        "module.exports = 'v1';\n"
+    );
+    assert!(same_physical_file(&installed_1, &virtual_store_file));
+    assert!(same_physical_file(&installed_2, &virtual_store_file));
 
     drop(root); // cleanup
 }
