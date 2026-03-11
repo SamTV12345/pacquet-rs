@@ -173,8 +173,11 @@ pub fn symlink_package(
         || symlink_target.to_path_buf(),
         |parent| {
             let relative_base = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-            let relative_target =
-                fs::canonicalize(symlink_target).unwrap_or_else(|_| symlink_target.to_path_buf());
+            let relative_target = if symlink_target.is_absolute() {
+                symlink_target.to_path_buf()
+            } else {
+                parent.join(symlink_target)
+            };
             relative_path(&relative_target, &relative_base)
         },
     );
@@ -439,5 +442,27 @@ mod tests {
             fs::read_to_string(link_path.join("index.js")).expect("read through symlink"),
             "module.exports = 'linked';\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_package_preserves_symlink_identity_of_target() {
+        let dir = tempdir().expect("tempdir");
+        let source = dir.path().join("local-pkg");
+        let source_symlink = dir.path().join("symlink");
+        let parent = dir.path().join("app/node_modules");
+        let link_path = parent.join("local-pkg");
+
+        fs::create_dir_all(&source).expect("create source dir");
+        fs::write(source.join("index.js"), "module.exports = 'linked';\n")
+            .expect("write source file");
+        fs::create_dir_all(&parent).expect("create node_modules dir");
+        symlink_dir(&source, &source_symlink).expect("create source symlink");
+
+        symlink_package(&source_symlink, &link_path).expect("create package symlink");
+
+        let link_target = fs::read_link(&link_path).expect("read symlink target");
+        assert!(link_target.to_string_lossy().contains("symlink"));
+        assert!(!link_target.to_string_lossy().contains("local-pkg"));
     }
 }
