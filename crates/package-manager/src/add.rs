@@ -1,5 +1,5 @@
 use crate::{
-    Install, ResolvedPackages, WorkspacePackages, is_git_spec, is_tarball_spec,
+    Install, ResolvedPackages, WorkspacePackages, is_git_spec, is_tarball_spec, normalize_git_spec,
     resolve_package_version_from_git_spec, resolve_package_version_from_tarball_spec,
 };
 use derive_more::{Display, Error};
@@ -143,6 +143,17 @@ async fn resolve_package_spec(
     save_exact: bool,
     workspace_only: bool,
 ) -> Result<(String, String), AddError> {
+    let (package_name, requested_spec) = split_package_spec(package);
+    if let Some(spec) = requested_spec
+        && is_git_spec(spec)
+    {
+        resolve_package_version_from_git_spec(config, http_client, spec)
+            .await
+            .map_err(AddError::InstallDependencies)?;
+        let normalized_spec = normalize_git_spec(spec).unwrap_or_else(|| spec.to_string());
+        return Ok((package_name.to_string(), normalized_spec));
+    }
+
     if let Some((name, spec)) = resolve_local_path_spec(project_dir, package)? {
         return Ok((name, spec));
     }
@@ -157,7 +168,8 @@ async fn resolve_package_spec(
         let package_version = resolve_package_version_from_git_spec(config, http_client, package)
             .await
             .map_err(AddError::InstallDependencies)?;
-        return Ok((package_version.name, package.to_string()));
+        let normalized_spec = normalize_git_spec(package).unwrap_or_else(|| package.to_string());
+        return Ok((package_version.name, normalized_spec));
     }
     if let Some((alias_name, target_name, target_requested_spec)) = parse_npm_alias_spec(package) {
         let resolved_spec = resolve_npm_alias_target_spec(
@@ -170,8 +182,6 @@ async fn resolve_package_spec(
         .await?;
         return Ok((alias_name.to_string(), format!("npm:{target_name}@{resolved_spec}")));
     }
-
-    let (package_name, requested_spec) = split_package_spec(package);
 
     if let Some(spec) = requested_spec
         && spec.starts_with("workspace:")
@@ -409,6 +419,10 @@ mod tests {
         assert_eq!(split_package_spec("fastify@1.2.3"), ("fastify", Some("1.2.3")));
         assert_eq!(split_package_spec("fastify@latest"), ("fastify", Some("latest")));
         assert_eq!(split_package_spec("@scope/pkg@^1.0.0"), ("@scope/pkg", Some("^1.0.0")));
+        assert_eq!(
+            split_package_spec("say-hi@github:zkochan/hi#main"),
+            ("say-hi", Some("github:zkochan/hi#main"))
+        );
         assert_eq!(
             split_package_spec("@scope/pkg@workspace:*"),
             ("@scope/pkg", Some("workspace:*"))

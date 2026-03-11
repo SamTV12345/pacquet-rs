@@ -20,6 +20,38 @@ use std::{
 #[cfg(not(target_os = "macos"))] // It causes ConnectionReset on CI
 use pacquet_testing_utils::fixtures::{BIG_LOCKFILE, BIG_MANIFEST};
 
+#[cfg(unix)]
+fn write_unix_executable(path: &Path, content: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::write(path, content).expect("write executable");
+    let mut permissions = fs::metadata(path).expect("read metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("set executable permissions");
+}
+
+fn write_bin_append_line_script(workspace: &Path, name: &str, line: &str) {
+    let bin_dir = workspace.join("node_modules/.bin");
+    fs::create_dir_all(&bin_dir).expect("create node_modules/.bin");
+
+    #[cfg(windows)]
+    {
+        fs::write(
+            bin_dir.join(format!("{name}.cmd")),
+            format!("@echo off\r\necho {line}>> install-order.txt\r\n"),
+        )
+        .expect("write .cmd file");
+    }
+
+    #[cfg(unix)]
+    {
+        write_unix_executable(
+            &bin_dir.join(name),
+            &format!("#!/bin/sh\necho {line} >> install-order.txt\n"),
+        );
+    }
+}
+
 fn normalize_store_files_for_snapshot(files: Vec<String>) -> Vec<String> {
     files.into_iter().filter(|path| !path.starts_with("v10/projects/")).collect()
 }
@@ -155,6 +187,118 @@ fn install_should_write_modules_manifest_with_pruned_at() {
 }
 
 #[test]
+fn install_should_execute_project_lifecycle_scripts() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "workspace",
+            "version": "1.0.0",
+            "scripts": {
+                "pnpm:devPreinstall": "devpreinstall-bin",
+                "preinstall": "preinstall-bin",
+                "install": "install-bin",
+                "postinstall": "postinstall-bin",
+                "preprepare": "preprepare-bin",
+                "prepare": "prepare-bin",
+                "postprepare": "postprepare-bin"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write package.json");
+    write_bin_append_line_script(&workspace, "devpreinstall-bin", "pnpm:devPreinstall");
+    write_bin_append_line_script(&workspace, "preinstall-bin", "preinstall");
+    write_bin_append_line_script(&workspace, "install-bin", "install");
+    write_bin_append_line_script(&workspace, "postinstall-bin", "postinstall");
+    write_bin_append_line_script(&workspace, "preprepare-bin", "preprepare");
+    write_bin_append_line_script(&workspace, "prepare-bin", "prepare");
+    write_bin_append_line_script(&workspace, "postprepare-bin", "postprepare");
+
+    pacquet.with_arg("install").assert().success();
+
+    let lines =
+        fs::read_to_string(workspace.join("install-order.txt")).expect("read install-order");
+    assert_eq!(
+        lines.lines().collect::<Vec<_>>(),
+        vec![
+            "pnpm:devPreinstall",
+            "preinstall",
+            "install",
+            "postinstall",
+            "preprepare",
+            "prepare",
+            "postprepare",
+        ]
+    );
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn ignore_scripts_should_skip_project_lifecycle_scripts() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "workspace",
+            "version": "1.0.0",
+            "scripts": {
+                "pnpm:devPreinstall": "devpreinstall-bin",
+                "preinstall": "preinstall-bin",
+                "install": "install-bin",
+                "postinstall": "postinstall-bin"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write package.json");
+    write_bin_append_line_script(&workspace, "devpreinstall-bin", "pnpm:devPreinstall");
+    write_bin_append_line_script(&workspace, "preinstall-bin", "preinstall");
+    write_bin_append_line_script(&workspace, "install-bin", "install");
+    write_bin_append_line_script(&workspace, "postinstall-bin", "postinstall");
+
+    pacquet.with_args(["install", "--ignore-scripts"]).assert().success();
+
+    assert!(!workspace.join("install-order.txt").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn lockfile_only_should_skip_project_lifecycle_scripts() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "workspace",
+            "version": "1.0.0",
+            "scripts": {
+                "pnpm:devPreinstall": "devpreinstall-bin",
+                "preinstall": "preinstall-bin",
+                "install": "install-bin",
+                "postinstall": "postinstall-bin"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write package.json");
+    write_bin_append_line_script(&workspace, "devpreinstall-bin", "pnpm:devPreinstall");
+    write_bin_append_line_script(&workspace, "preinstall-bin", "preinstall");
+    write_bin_append_line_script(&workspace, "install-bin", "install");
+    write_bin_append_line_script(&workspace, "postinstall-bin", "postinstall");
+
+    pacquet.with_args(["install", "--lockfile-only"]).assert().success();
+
+    assert!(!workspace.join("install-order.txt").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
 fn scoped_registry_should_override_default_registry_for_install_and_metadata_cache() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
@@ -257,6 +401,48 @@ fn installed_dependency_bin_should_be_runnable_via_pacquet_run() {
     run.with_args(["run", "hello"]).assert().success();
 
     drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn link_protocol_dependency_with_directories_bin_should_install_bin_entry() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let pkg_dir = workspace.join("pkg-with-directories-bin");
+    fs::create_dir_all(app_dir.join("node_modules")).expect("create app node_modules");
+    fs::create_dir_all(pkg_dir.join("bin")).expect("create package bin dir");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "pkg-with-directories-bin": "link:../pkg-with-directories-bin"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package.json");
+    fs::write(
+        pkg_dir.join("package.json"),
+        serde_json::json!({
+            "name": "pkg-with-directories-bin",
+            "version": "1.0.0",
+            "directories": {
+                "bin": "bin"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write linked package manifest");
+    fs::write(pkg_dir.join("bin/pkg-with-directories-bin"), "#!/bin/sh\necho linked\n")
+        .expect("write linked bin");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    assert!(installed_bin_path(&app_dir, "pkg-with-directories-bin").exists());
+
+    drop(root);
 }
 
 #[test]
@@ -679,6 +865,7 @@ fn no_prefer_frozen_lockfile_flag_should_override_default_true_setting() {
     drop(root); // cleanup
 }
 
+#[test]
 fn should_accept_ignore_scripts_flag() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();

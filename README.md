@@ -22,11 +22,11 @@ Experimental package manager for node.js written in rust.
 - [x] Top-level `-w, --workspace-root` so `add` and `install` can target the workspace root from a subproject.
 - [~] Install-mode parity: `--ignore-scripts`, `--lockfile-only`, `--fix-lockfile`, `--offline`, `--prefer-offline`, `--resolution-only`, `--force`, `--reporter`, `--use-store-server`, and `--shamefully-hoist` are wired up; deeper reporter/store-server semantics are still missing.
 - [~] Workspace command parity: workspace-root safety plus `add/install/remove --filter`, `add --workspace`, `add -r/--recursive`, `install -r/--recursive`, and `remove -r/--recursive` are in place; broader recursive command coverage is still missing.
-- [~] Additional `add` sources: `workspace:`, local file system, remote tarball, npm alias specs, and GitHub-style Git specs (`github:` / `git+https://github.com/...`) are in place; broader Git host/protocol coverage is still missing.
-- [ ] `.npmrc` parity: hoisting, `node-linker`, auth token helpers, peer-dependency settings, and remaining request config.
+- [~] Additional `add` sources: `workspace:`, local file system, remote tarball, npm alias specs, and GitHub-style Git specs (`owner/repo`, `github:`, `https://github.com/...`, `git+ssh://git@github.com/...`) are in place; broader Git host/protocol coverage is still missing.
+- [x] `.npmrc` parity: hoisting, `node-linker`, auth token helpers, request/TLS settings, local-dir/injected-workspace lockfile behaviors, and peer-dependency settings are wired.
 - [x] Store parity: `store status`, `store add`, and non-destructive `store prune`.
-- [ ] Lifecycle parity: install script handling and `ignore-scripts` behavior consistent with pnpm.
-- [ ] Command-surface parity: `exec`, `dlx`, `fetch`, `dedupe`, `cache`, and related advanced workflows.
+- [x] Lifecycle parity: install script handling, `pnpm:devPreinstall`, and `ignore-scripts`/`lockfile-only` behavior are consistent with pnpm for current install flows.
+- [~] Command-surface parity: direct `exec` is in place; `dlx`, `fetch`, `dedupe`, `cache`, and broader recursive/reporting workflows are still missing.
 - [ ] Advanced compatibility: patching, hooks/pnpmfile support, shell completion, reporter polish, and error-code parity.
 
 ## Debugging

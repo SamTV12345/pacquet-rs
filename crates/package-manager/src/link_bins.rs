@@ -2,10 +2,11 @@ use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use serde_json::Value;
-use std::{collections::BTreeSet, fs, path::Path};
-
-#[cfg(windows)]
-use std::path::PathBuf;
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 pub fn link_bins_for_manifest(
     config: &Npmrc,
@@ -42,22 +43,120 @@ pub fn link_bins_for_manifest(
 }
 
 fn collect_bin_entries(manifest: &PackageManifest) -> Vec<(String, String)> {
+    let manifest_dir =
+        manifest.path().parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     match manifest.value().get("bin") {
         Some(Value::String(target)) => manifest
             .value()
             .get("name")
             .and_then(Value::as_str)
             .map(default_bin_name)
-            .map(|name| vec![(name, target.clone())])
+            .map(|name| collect_safe_bin_entry(&manifest_dir, &name, target))
             .unwrap_or_default(),
         Some(Value::Object(entries)) => entries
             .iter()
             .filter_map(|(name, target)| {
-                target.as_str().map(|target| (name.clone(), target.to_string()))
+                let target = target.as_str()?;
+                collect_safe_bin_entry(&manifest_dir, name, target).into_iter().next()
             })
             .collect(),
-        _ => Vec::new(),
+        _ => collect_bin_entries_from_directories(manifest),
     }
+}
+
+fn collect_bin_entries_from_directories(manifest: &PackageManifest) -> Vec<(String, String)> {
+    let Some(bin_dir) = manifest
+        .value()
+        .get("directories")
+        .and_then(Value::as_object)
+        .and_then(|dirs| dirs.get("bin"))
+        .and_then(Value::as_str)
+    else {
+        return Vec::new();
+    };
+
+    let manifest_dir =
+        manifest.path().parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let absolute_bin_dir = manifest_dir.join(bin_dir);
+    let Ok(manifest_root) = fs::canonicalize(&manifest_dir) else {
+        return Vec::new();
+    };
+    let Ok(absolute_bin_dir) = fs::canonicalize(&absolute_bin_dir) else {
+        return Vec::new();
+    };
+    if !absolute_bin_dir.starts_with(&manifest_root) {
+        return Vec::new();
+    }
+
+    let mut files = Vec::new();
+    collect_bin_files_recursive(&absolute_bin_dir, &mut files);
+    files
+        .into_iter()
+        .filter_map(|file| {
+            let relative = file.strip_prefix(&manifest_root).ok()?;
+            let name = file.file_name()?.to_string_lossy().to_string();
+            Some((name, relative.to_string_lossy().replace('\\', "/")))
+        })
+        .collect()
+}
+
+fn collect_bin_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_file() {
+            files.push(path);
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_bin_files_recursive(&path, files);
+        }
+    }
+}
+
+fn collect_safe_bin_entry(
+    manifest_dir: &Path,
+    command_name: &str,
+    relative_target: &str,
+) -> Vec<(String, String)> {
+    let Some(bin_name) = normalize_bin_name(command_name) else {
+        return Vec::new();
+    };
+    if !is_safe_bin_name(&bin_name) {
+        return Vec::new();
+    }
+    let target_path = manifest_dir.join(relative_target);
+    let Ok(manifest_root) = fs::canonicalize(manifest_dir) else {
+        return Vec::new();
+    };
+    let Ok(target_path) = fs::canonicalize(target_path) else {
+        return Vec::new();
+    };
+    if !target_path.starts_with(&manifest_root) {
+        return Vec::new();
+    }
+    vec![(bin_name, relative_target.to_string())]
+}
+
+fn normalize_bin_name(command_name: &str) -> Option<String> {
+    if let Some(stripped) = command_name.strip_prefix('@') {
+        let (_, name) = stripped.split_once('/')?;
+        return Some(name.to_string());
+    }
+    Some(command_name.to_string())
+}
+
+fn is_safe_bin_name(bin_name: &str) -> bool {
+    bin_name == "$"
+        || bin_name.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(ch, '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')')
+        })
 }
 
 fn default_bin_name(package_name: &str) -> String {
@@ -269,6 +368,224 @@ mod tests {
     }
 
     #[test]
+    fn directories_bin_uses_file_names_and_collects_recursively() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("package.json");
+        let bin_dir = dir.path().join("bin/nested");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        fs::write(dir.path().join("bin/root"), "#!/bin/sh\necho hi\n").expect("write root");
+        fs::write(bin_dir.join("cli"), "#!/bin/sh\necho hi\n").expect("write cli");
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "name": "@scope/pkg-with-directories-bin",
+                "directories": {
+                    "bin": "bin"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+
+        let manifest = PackageManifest::from_path(manifest_path).expect("load manifest");
+        let mut entries = collect_bin_entries(&manifest);
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec![
+                ("cli".to_string(), "bin/nested/cli".to_string()),
+                ("root".to_string(), "bin/root".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn directories_bin_skips_path_traversal_outside_package_root() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("package.json");
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "name": "malicious",
+                "directories": {
+                    "bin": "../outside"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+
+        let manifest = PackageManifest::from_path(manifest_path).expect("load manifest");
+        assert!(collect_bin_entries(&manifest).is_empty());
+    }
+
+    #[test]
+    fn directories_bin_skips_real_path_traversal_outside_package_root() {
+        let dir = tempdir().expect("tempdir");
+        let secret_dir = dir.path().join("secret");
+        let pkg_dir = dir.path().join("pkg");
+        fs::create_dir_all(&secret_dir).expect("create secret dir");
+        fs::create_dir_all(&pkg_dir).expect("create pkg dir");
+        fs::write(secret_dir.join("secret.sh"), "echo secret").expect("write secret");
+        let manifest_path = pkg_dir.join("package.json");
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "name": "malicious",
+                "directories": {
+                    "bin": "../secret"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+
+        let manifest = PackageManifest::from_path(manifest_path).expect("load manifest");
+        assert!(collect_bin_entries(&manifest).is_empty());
+    }
+
+    #[test]
+    fn object_bin_skips_path_traversal_outside_package_root() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("package.json");
+        fs::write(dir.path().join("good.js"), "console.log('ok')").expect("write good.js");
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "name": "pkg",
+                "bin": {
+                    "safe": "good.js",
+                    "unsafe": "../escape.js"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+
+        let manifest = PackageManifest::from_path(manifest_path).expect("load manifest");
+        assert_eq!(
+            collect_bin_entries(&manifest),
+            vec![("safe".to_string(), "good.js".to_string())]
+        );
+    }
+
+    #[test]
+    fn object_bin_accepts_scoped_name_and_skips_scoped_path_traversal_name() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("package.json");
+        fs::write(dir.path().join("good.js"), "console.log('ok')").expect("write good.js");
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "name": "pkg",
+                "bin": {
+                    "@scope/../../.npmrc": "./malicious.js",
+                    "@scope/../etc/passwd": "./evil.js",
+                    "@scope/legit": "./good.js"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+
+        let manifest = PackageManifest::from_path(manifest_path).expect("load manifest");
+        assert_eq!(
+            collect_bin_entries(&manifest),
+            vec![("legit".to_string(), "./good.js".to_string())]
+        );
+    }
+
+    #[test]
+    fn object_bin_normalizes_scoped_command_name() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("package.json");
+        fs::write(dir.path().join("a"), "echo ok").expect("write a");
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "name": "@foo/a",
+                "bin": {
+                    "@foo/a": "./a"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+
+        let manifest = PackageManifest::from_path(manifest_path).expect("load manifest");
+        assert_eq!(collect_bin_entries(&manifest), vec![("a".to_string(), "./a".to_string())]);
+    }
+
+    #[test]
+    fn object_bin_allows_dollar_command_name() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("package.json");
+        fs::write(dir.path().join("undollar.js"), "console.log('ok')").expect("write undollar.js");
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "name": "undollar",
+                "bin": {
+                    "$": "./undollar.js"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+
+        let manifest = PackageManifest::from_path(manifest_path).expect("load manifest");
+        assert_eq!(
+            collect_bin_entries(&manifest),
+            vec![("$".to_string(), "./undollar.js".to_string())]
+        );
+    }
+
+    #[test]
+    fn string_bin_skips_path_traversal_outside_package_root() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("package.json");
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "name": "foo",
+                "bin": "../bad"
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+
+        let manifest = PackageManifest::from_path(manifest_path).expect("load manifest");
+        assert!(collect_bin_entries(&manifest).is_empty());
+    }
+
+    #[test]
+    fn object_bin_skips_dangerous_bin_names() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("package.json");
+        fs::write(dir.path().join("good"), "echo ok").expect("write good");
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "name": "foo",
+                "bin": {
+                    "../bad": "./bad",
+                    "..\\\\bad": "./bad",
+                    "good": "./good",
+                    "~/bad": "./bad"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+
+        let manifest = PackageManifest::from_path(manifest_path).expect("load manifest");
+        assert_eq!(
+            collect_bin_entries(&manifest),
+            vec![("good".to_string(), "./good".to_string())]
+        );
+    }
+
+    #[test]
     fn shebang_node_script_is_detected() {
         let dir = tempdir().expect("tempdir");
         let target = dir.path().join("hello");
@@ -303,6 +620,42 @@ mod tests {
         write_bin_wrapper(&config, &bin_dir, "hello", &target).expect("write bin");
 
         let metadata = fs::symlink_metadata(bin_dir.join("hello")).expect("read metadata");
+        assert!(metadata.file_type().is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prefer_symlinked_executables_symlinks_directories_bin_entry() {
+        let dir = tempdir().expect("tempdir");
+        let package_dir = dir.path().join("pkg");
+        let manifest_path = package_dir.join("package.json");
+        let modules_dir = dir.path().join("node_modules");
+        let target_dir = modules_dir.join("@scope/pkg-with-directories-bin");
+        let target = target_dir.join("bin/cli");
+        fs::create_dir_all(target.parent().expect("target parent")).expect("create bin dir");
+        fs::create_dir_all(&modules_dir).expect("create modules dir");
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "name": "@scope/pkg-with-directories-bin",
+                "directories": {
+                    "bin": "bin"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+        fs::write(&target, "#!/bin/sh\necho hi\n").expect("write cli");
+
+        let manifest = PackageManifest::from_path(manifest_path).expect("load manifest");
+        let mut config = Npmrc::new();
+        config.modules_dir = modules_dir;
+        config.node_linker = pacquet_npmrc::NodeLinker::Hoisted;
+
+        link_bins_for_manifest(&config, &manifest, [DependencyGroup::Prod]).expect("link bins");
+
+        let metadata =
+            fs::symlink_metadata(config.modules_dir.join(".bin/cli")).expect("read metadata");
         assert!(metadata.file_type().is_symlink());
     }
 }

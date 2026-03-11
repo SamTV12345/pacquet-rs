@@ -53,6 +53,14 @@ pub struct ExecuteLifecycleScript<'a> {
     pub init_cwd: &'a Path,
 }
 
+/// Parameters used to run one arbitrary command in a package context.
+pub struct ExecuteCommand<'a> {
+    pub pkg_root: &'a Path,
+    pub program: &'a str,
+    pub args: &'a [String],
+    pub extra_env: &'a [(OsString, OsString)],
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct LifecycleScriptOutput {
     pub stdout: String,
@@ -71,6 +79,20 @@ pub fn execute_lifecycle_script(opts: ExecuteLifecycleScript<'_>) -> Result<(), 
 
     let mut command = shell_command(opts.script_shell, &command_line)?;
     apply_common_env(&mut command, opts.pkg_root, &common_env);
+    wait_for_command(&mut command)
+}
+
+/// Execute one arbitrary command with pnpm-like PATH preparation.
+pub fn execute_command(opts: ExecuteCommand<'_>) -> Result<(), ExecutorError> {
+    let path_var = prepend_node_modules_bin_paths(opts.pkg_root)?;
+    let env = [(OsString::from("PATH"), path_var.clone())];
+    let mut command = Command::new(resolve_program_for_emulator(opts.program, &env));
+    command.args(opts.args);
+    command.current_dir(opts.pkg_root);
+    command.env("PATH", path_var);
+    for (key, value) in opts.extra_env {
+        command.env(key, value);
+    }
     wait_for_command(&mut command)
 }
 
@@ -511,5 +533,41 @@ mod tests {
         assert!(common_env.iter().any(|(key, value)| {
             key == OsStr::new("NODE_PATH") && value == OsStr::new("/tmp/node_modules_extra")
         }));
+    }
+
+    #[test]
+    fn execute_command_runs_binary_from_node_modules_bin() {
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("node_modules/.bin");
+        fs::create_dir_all(&bin_dir).expect("create .bin");
+
+        #[cfg(windows)]
+        {
+            fs::write(bin_dir.join("hello.cmd"), "@echo off\r\necho ok> exec-result.txt\r\n")
+                .expect("write .cmd");
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let script_path = bin_dir.join("hello");
+            fs::write(&script_path, "#!/bin/sh\necho ok > exec-result.txt\n")
+                .expect("write script");
+            let mut permissions = fs::metadata(&script_path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).expect("chmod");
+        }
+
+        execute_command(ExecuteCommand {
+            pkg_root: dir.path(),
+            program: "hello",
+            args: &[],
+            extra_env: &[],
+        })
+        .expect("execute command");
+
+        let result = fs::read_to_string(dir.path().join("exec-result.txt")).expect("read result");
+        assert_eq!(result.trim(), "ok");
     }
 }

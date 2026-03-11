@@ -317,4 +317,15 @@ mod tests {
             Some("//registry.example.com/custom/".to_string())
         );
     }
+
+    #[test]
+    fn matching_ssl_config_key_matches_default_https_port_entries() {
+        let configs =
+            HashMap::from([("//registry.example.com/".to_string(), RegistryTlsConfig::default())]);
+
+        assert_eq!(
+            matching_ssl_config_key(&configs, "https://registry.example.com:443/pkg"),
+            Some("//registry.example.com/".to_string())
+        );
+    }
 }

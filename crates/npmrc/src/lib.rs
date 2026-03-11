@@ -109,11 +109,15 @@ pub struct Npmrc {
     pub cache_dir: PathBuf,
 
     /// The directory in which dependencies will be installed (instead of node_modules).
-    #[serde(default = "default_modules_dir", deserialize_with = "deserialize_pathbuf")]
+    #[serde(
+        default = "default_modules_dir",
+        alias = "modules_dir",
+        deserialize_with = "deserialize_pathbuf"
+    )]
     pub modules_dir: PathBuf,
 
     /// Defines what linker should be used for installing Node packages.
-    #[serde(default)]
+    #[serde(default, alias = "node_linker")]
     pub node_linker: NodeLinker,
 
     /// When symlink is set to false, pnpm creates a virtual store directory without any symlinks.
@@ -123,17 +127,25 @@ pub struct Npmrc {
 
     /// When enabled, pnpm prefers symlinks instead of shell wrappers in `.bin` on POSIX.
     /// When omitted, pnpm defaults this to true for `node-linker=hoisted`.
-    #[serde(default, deserialize_with = "deserialize_optional_bool")]
+    #[serde(
+        default,
+        alias = "prefer_symlinked_executables",
+        deserialize_with = "deserialize_optional_bool"
+    )]
     pub prefer_symlinked_executables: Option<bool>,
 
     /// The directory with links to the store. All direct and indirect dependencies of the
     /// project are linked into this directory.
-    #[serde(default = "default_virtual_store_dir", deserialize_with = "deserialize_pathbuf")]
+    #[serde(
+        default = "default_virtual_store_dir",
+        alias = "virtual_store_dir",
+        deserialize_with = "deserialize_pathbuf"
+    )]
     pub virtual_store_dir: PathBuf,
 
     /// Controls the way packages are imported from the store (if you want to disable symlinks
     /// inside node_modules, then you need to change the node-linker setting, not this one).
-    #[serde(default)]
+    #[serde(default, alias = "package_import_method")]
     pub package_import_method: PackageImportMethod,
 
     /// The time in minutes after which orphan packages from the modules directory should be
@@ -145,15 +157,23 @@ pub struct Npmrc {
     pub modules_cache_max_age: u64,
 
     /// Maximum number of concurrent HTTP requests.
-    #[serde(default = "default_network_concurrency", deserialize_with = "deserialize_u16")]
+    #[serde(
+        default = "default_network_concurrency",
+        alias = "network_concurrency",
+        deserialize_with = "deserialize_u16"
+    )]
     pub network_concurrency: u16,
 
     /// HTTP request timeout in milliseconds.
-    #[serde(default = "default_fetch_timeout", deserialize_with = "deserialize_u64")]
+    #[serde(
+        default = "default_fetch_timeout",
+        alias = "fetch_timeout",
+        deserialize_with = "deserialize_u64"
+    )]
     pub fetch_timeout: u64,
 
     /// Controls whether SSL/TLS certificate validation is enforced for registry requests.
-    #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
+    #[serde(default = "bool_true", alias = "strict_ssl", deserialize_with = "deserialize_bool")]
     pub strict_ssl: bool,
 
     /// Legacy catch-all proxy setting.
@@ -161,15 +181,15 @@ pub struct Npmrc {
     pub proxy: Option<String>,
 
     /// HTTPS proxy URL.
-    #[serde(default)]
+    #[serde(default, alias = "https_proxy")]
     pub https_proxy: Option<String>,
 
     /// HTTP proxy URL.
-    #[serde(default)]
+    #[serde(default, alias = "http_proxy")]
     pub http_proxy: Option<String>,
 
     /// Comma-separated proxy bypass list.
-    #[serde(default)]
+    #[serde(default, alias = "no_proxy")]
     pub no_proxy: Option<String>,
 
     /// Legacy npm key normalized to `no_proxy`.
@@ -191,33 +211,53 @@ pub struct Npmrc {
     /// When set to true and the available pnpm-lock.yaml satisfies the package.json dependencies
     /// directive, a headless installation is performed. A headless installation skips all
     /// dependency resolution as it does not need to modify the lockfile.
-    #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
+    #[serde(
+        default = "bool_true",
+        alias = "prefer_frozen_lockfile",
+        deserialize_with = "deserialize_bool"
+    )]
     pub prefer_frozen_lockfile: bool,
 
     /// Add the full URL to the package's tarball to every entry in pnpm-lock.yaml.
-    #[serde(default, deserialize_with = "deserialize_bool")]
+    #[serde(
+        default,
+        alias = "lockfile_include_tarball_url",
+        deserialize_with = "deserialize_bool"
+    )]
     pub lockfile_include_tarball_url: bool,
 
     /// Exclude dependencies that are linked from the lockfile.
-    #[serde(default, deserialize_with = "deserialize_bool")]
+    #[serde(default, alias = "exclude_links_from_lockfile", deserialize_with = "deserialize_bool")]
     pub exclude_links_from_lockfile: bool,
 
     /// Controls whether workspace packages are injected by default.
-    #[serde(default, deserialize_with = "deserialize_bool")]
+    #[serde(default, alias = "inject_workspace_packages", deserialize_with = "deserialize_bool")]
     pub inject_workspace_packages: bool,
 
     /// When enabled, injected workspace dependencies may be deduplicated back to links when the
     /// target workspace project already provides a compatible dependency set.
-    #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
+    #[serde(
+        default = "bool_true",
+        alias = "dedupe_injected_deps",
+        deserialize_with = "deserialize_bool"
+    )]
     pub dedupe_injected_deps: bool,
 
     /// When enabled, local directory dependencies are not refreshed on reinstall if they are
     /// already present in node_modules.
-    #[serde(default, deserialize_with = "deserialize_bool")]
+    #[serde(
+        default,
+        alias = "disable_relink_local_dir_deps",
+        deserialize_with = "deserialize_bool"
+    )]
     pub disable_relink_local_dir_deps: bool,
 
     /// Maximum length of peer suffixes persisted to the lockfile.
-    #[serde(default = "default_peers_suffix_max_length", deserialize_with = "deserialize_u16")]
+    #[serde(
+        default = "default_peers_suffix_max_length",
+        alias = "peers_suffix_max_length",
+        deserialize_with = "deserialize_u16"
+    )]
     pub peers_suffix_max_length: u16,
 
     /// The base URL of the npm package registry (trailing slash included).
@@ -225,34 +265,46 @@ pub struct Npmrc {
     pub registry: String, // TODO: use Url type (compatible with reqwest)
 
     /// When true, any missing non-optional peer dependencies are automatically installed.
-    #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
+    #[serde(
+        default = "bool_true",
+        alias = "auto_install_peers",
+        deserialize_with = "deserialize_bool"
+    )]
     pub auto_install_peers: bool,
 
     /// When this setting is set to true, packages with peer dependencies will be deduplicated after peers resolution.
-    #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
+    #[serde(
+        default = "bool_true",
+        alias = "dedupe_peer_dependents",
+        deserialize_with = "deserialize_bool"
+    )]
     pub dedupe_peer_dependents: bool,
 
     /// If this is enabled, commands will fail if there is a missing or invalid peer dependency in the tree.
-    #[serde(default, deserialize_with = "deserialize_bool")]
+    #[serde(default, alias = "strict_peer_dependencies", deserialize_with = "deserialize_bool")]
     pub strict_peer_dependencies: bool,
 
     /// When enabled, dependencies of the root workspace project are used to resolve peer
     /// dependencies of any projects in the workspace. It is a useful feature as you can install
     /// your peer dependencies only in the root of the workspace, and you can be sure that all
     /// projects in the workspace use the same versions of the peer dependencies.
-    #[serde(default = "bool_true", deserialize_with = "deserialize_bool")]
+    #[serde(
+        default = "bool_true",
+        alias = "resolve_peers_from_workspace_root",
+        deserialize_with = "deserialize_bool"
+    )]
     pub resolve_peers_from_workspace_root: bool,
 
     /// Controls whether pre- and post- scripts are executed when running a script explicitly.
-    #[serde(default, deserialize_with = "deserialize_bool")]
+    #[serde(default, alias = "enable_pre_post_scripts", deserialize_with = "deserialize_bool")]
     pub enable_pre_post_scripts: bool,
 
     /// Custom shell binary to run lifecycle scripts in.
-    #[serde(default)]
+    #[serde(default, alias = "script_shell")]
     pub script_shell: Option<String>,
 
     /// When true, a shell emulator can be used (not yet implemented in pacquet).
-    #[serde(default, deserialize_with = "deserialize_bool")]
+    #[serde(default, alias = "shell_emulator", deserialize_with = "deserialize_bool")]
     pub shell_emulator: bool,
 
     /// Raw merged `.npmrc` key/value pairs used for auth resolution.
@@ -872,6 +924,70 @@ mod tests {
     pub fn parse_strict_ssl() {
         let value: Npmrc = serde_ini::from_str("strict-ssl=false").unwrap();
         assert!(!value.strict_ssl);
+    }
+
+    #[test]
+    pub fn parse_request_settings_from_underscore_keys() {
+        let value: Npmrc = serde_ini::from_str(
+            "https_proxy=http://secure-proxy.example\nhttp_proxy=http://plain-proxy.example\nno_proxy=localhost,127.0.0.1",
+        )
+        .unwrap();
+        assert_eq!(value.https_proxy.as_deref(), Some("http://secure-proxy.example"));
+        assert_eq!(value.http_proxy.as_deref(), Some("http://plain-proxy.example"));
+        assert_eq!(value.no_proxy.as_deref(), Some("localhost,127.0.0.1"));
+    }
+
+    #[test]
+    pub fn parse_request_settings_numeric_and_bool_from_underscore_keys() {
+        let value: Npmrc =
+            serde_ini::from_str("network_concurrency=12\nfetch_timeout=45000\nstrict_ssl=false")
+                .unwrap();
+        assert_eq!(value.network_concurrency, 12);
+        assert_eq!(value.fetch_timeout, 45000);
+        assert!(!value.strict_ssl);
+    }
+
+    #[test]
+    pub fn parse_node_module_and_lockfile_settings_from_underscore_keys() {
+        let value: Npmrc = serde_ini::from_str(
+            "modules_dir=vendor_modules\nnode_linker=hoisted\nprefer_symlinked_executables=false\nvirtual_store_dir=vendor_modules/.store\npackage_import_method=copy\nprefer_frozen_lockfile=false",
+        )
+        .unwrap();
+        assert!(value.modules_dir.ends_with("vendor_modules"));
+        assert_eq!(value.node_linker, NodeLinker::Hoisted);
+        assert_eq!(value.prefer_symlinked_executables, Some(false));
+        assert!(value.virtual_store_dir.ends_with("vendor_modules/.store"));
+        assert_eq!(value.package_import_method, PackageImportMethod::Copy);
+        assert!(!value.prefer_frozen_lockfile);
+    }
+
+    #[test]
+    pub fn parse_local_dependency_and_lockfile_bool_settings_from_underscore_keys() {
+        let value: Npmrc = serde_ini::from_str(
+            "lockfile_include_tarball_url=true\nexclude_links_from_lockfile=true\ninject_workspace_packages=true\ndedupe_injected_deps=false\ndisable_relink_local_dir_deps=true\npeers_suffix_max_length=77",
+        )
+        .unwrap();
+        assert!(value.lockfile_include_tarball_url);
+        assert!(value.exclude_links_from_lockfile);
+        assert!(value.inject_workspace_packages);
+        assert!(!value.dedupe_injected_deps);
+        assert!(value.disable_relink_local_dir_deps);
+        assert_eq!(value.peers_suffix_max_length, 77);
+    }
+
+    #[test]
+    pub fn parse_peer_and_script_settings_from_underscore_keys() {
+        let value: Npmrc = serde_ini::from_str(
+            "auto_install_peers=false\ndedupe_peer_dependents=false\nstrict_peer_dependencies=true\nresolve_peers_from_workspace_root=false\nenable_pre_post_scripts=true\nscript_shell=/bin/bash\nshell_emulator=true",
+        )
+        .unwrap();
+        assert!(!value.auto_install_peers);
+        assert!(!value.dedupe_peer_dependents);
+        assert!(value.strict_peer_dependencies);
+        assert!(!value.resolve_peers_from_workspace_root);
+        assert!(value.enable_pre_post_scripts);
+        assert_eq!(value.script_shell.as_deref(), Some("/bin/bash"));
+        assert!(value.shell_emulator);
     }
 
     #[test]

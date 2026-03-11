@@ -1,6 +1,7 @@
 use crate::State;
 use clap::Args;
-use miette::Context;
+use miette::{Context, IntoDiagnostic};
+use pacquet_executor::{ExecuteLifecycleScript, execute_lifecycle_script};
 use pacquet_lockfile::Lockfile;
 use pacquet_npmrc::{NodeLinker, Npmrc};
 use pacquet_package_manager::{Install, WorkspacePackages};
@@ -127,7 +128,7 @@ impl InstallArgs {
             prefer_frozen_lockfile,
             no_prefer_frozen_lockfile,
             fix_lockfile,
-            ignore_scripts: _ignore_scripts,
+            ignore_scripts,
             lockfile_only,
             force,
             resolution_only,
@@ -225,6 +226,10 @@ impl InstallArgs {
             .run()
             .await?;
 
+            if !ignore_scripts && !lockfile_only {
+                run_install_lifecycle_scripts(target_manifest.path().to_path_buf(), target_config)?;
+            }
+
             current_lockfile = if config.lockfile {
                 Lockfile::load_from_dir(lockfile_dir)
                     .wrap_err("reload lockfile after workspace install")?
@@ -282,6 +287,43 @@ fn apply_workspace_filters(
     }
 
     Ok(selected)
+}
+
+fn run_install_lifecycle_scripts(manifest_path: PathBuf, config: &Npmrc) -> miette::Result<()> {
+    let manifest = PackageManifest::from_path(manifest_path.clone())
+        .wrap_err("reload package.json for lifecycle scripts")?;
+    let package_dir =
+        manifest_path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let init_cwd = std::env::current_dir().into_diagnostic().wrap_err("get current directory")?;
+    const LIFECYCLE_SCRIPTS: [&str; 7] = [
+        "pnpm:devPreinstall",
+        "preinstall",
+        "install",
+        "postinstall",
+        "preprepare",
+        "prepare",
+        "postprepare",
+    ];
+
+    for script_name in LIFECYCLE_SCRIPTS {
+        let Some(script) = manifest.script(script_name, true)? else {
+            continue;
+        };
+        execute_lifecycle_script(ExecuteLifecycleScript {
+            pkg_root: &package_dir,
+            package_json_path: &manifest_path,
+            script_name,
+            script,
+            args: &[],
+            extra_env: &[],
+            script_shell: config.script_shell.as_deref(),
+            shell_emulator: config.shell_emulator,
+            init_cwd: &init_cwd,
+        })
+        .wrap_err_with(|| format!("executing install lifecycle script `{script_name}`"))?;
+    }
+
+    Ok(())
 }
 
 fn config_for_project(

@@ -17,7 +17,7 @@
 - [x] Install from the workspace (via `workspace:` protocol and `--workspace`)
 - [x] Install from local file system
 - [x] Install from remote tarball
-- [~] Install from Git repository (GitHub-style specs are supported)
+- [~] Install from Git repository (GitHub shorthand/`github:`/GitHub URL specs are supported, including named installs; broader Git host coverage is still missing)
 
 | Done | Command                       | Notes |
 | ---- | ----------------------------- | ----- |
@@ -52,7 +52,7 @@
 | ✅   | --reporter=<name>           | accepted for compatibility |
 | ✅   | --use-store-server          | accepted for compatibility |
 | ✅   | --shamefully-hoist          | enables hoisted links in `.pnpm/node_modules` |
-| ✅   | --ignore-scripts            | install already skips lifecycle scripts |
+| ✅   | --ignore-scripts            | skips project and dependency lifecycle scripts during install |
 | ✅   | --filter <package_selector> | workspace installs can target selected projects |
 | ✅   | -r, --recursive             | installs all workspace projects from any workspace cwd |
 | ✅   | --resolution-only           | resolves and writes lockfile without installing |
@@ -88,12 +88,20 @@
 | ✅   | --sequential                 | supported for direct `run` and embedded `pnpm run` |
 | ✅   | --reverse                    | supported for direct `run` and embedded `pnpm run` |
 | ✅   | --no-bail / --bail           | supported for direct `run` and embedded `pnpm run` |
-|      | enable-pre-post-scripts      |       |
+| ✅   | enable-pre-post-scripts      | runs `pre<name>`/`post<name>` around `pacquet run <name>` when enabled in `.npmrc` |
 | ✅   | --resume-from <package_name> | supported for direct `run` and embedded `pnpm run` |
 | ✅   | --report-summary             | supported for direct `run` and embedded `pnpm run` |
 | ✅   | --filter <package_selector>  | direct and embedded workspace selection |
 | ✅   | --filter-prod <selector>     | direct and embedded workspace selection with prod-only traversal |
 | ✅   | --fail-if-no-match           | direct and embedded filter behavior |
+
+## `pacquet exec`
+
+[pnpm documentation](https://pnpm.io/cli/exec)
+
+| Done | Command       | Notes |
+| ---- | ------------- | ----- |
+| ✅   | `exec <cmd>`  | runs an arbitrary command with `node_modules/.bin` prepended to `PATH` |
 
 ## `pacquet test`
 

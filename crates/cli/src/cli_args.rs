@@ -1,6 +1,7 @@
 pub mod add;
 pub mod ci;
 pub mod env;
+pub mod exec;
 pub mod install;
 pub mod list;
 pub mod remove;
@@ -14,6 +15,7 @@ use add::AddArgs;
 use ci::CiArgs;
 use clap::{Parser, Subcommand};
 use env::EnvArgs;
+use exec::ExecArgs;
 use install::InstallArgs;
 use list::ListArgs;
 use miette::{Context, IntoDiagnostic};
@@ -56,6 +58,8 @@ pub enum CliCommand {
     Ci(CiArgs),
     /// Manage Node.js versions.
     Env(EnvArgs),
+    /// Run an arbitrary command in the current package context.
+    Exec(ExecArgs),
     /// Remove package(s)
     #[clap(alias = "rm", alias = "uninstall", alias = "un", alias = "uni")]
     Remove(RemoveArgs),
@@ -109,6 +113,7 @@ impl CliArgs {
             CliCommand::Install(args) => args.run(state()?).await?,
             CliCommand::Ci(args) => args.run(state()?).await?,
             CliCommand::Env(args) => args.run().await?,
+            CliCommand::Exec(args) => args.run(dir)?,
             CliCommand::Remove(args) => args.run(state()?).await?,
             CliCommand::List(args) => args.run(state()?)?,
             CliCommand::Why(args) => args.run(state()?)?,
