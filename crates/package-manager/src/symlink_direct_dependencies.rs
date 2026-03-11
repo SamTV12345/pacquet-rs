@@ -349,10 +349,12 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let workspace_dep = dir.path().join("packages/project-1");
         let source_package_dir = dir.path().join(".pnpm/project-2@file+pkg/node_modules/project-2");
+        let source_container_dir =
+            source_package_dir.parent().expect("source container").to_path_buf();
         let destination_package_dir = dir.path().join("project/node_modules/project-2");
 
         fs::create_dir_all(&workspace_dep).expect("create workspace dependency");
-        fs::create_dir_all(source_package_dir.join("node_modules")).expect("create source package");
+        fs::create_dir_all(&source_package_dir).expect("create source package");
         fs::write(
             workspace_dep.join("package.json"),
             "{\"name\":\"project-1\",\"version\":\"1.0.0\"}",
@@ -363,7 +365,7 @@ mod tests {
             "{\"name\":\"project-2\",\"version\":\"1.0.0\"}",
         )
         .expect("write source package manifest");
-        symlink_dir(&workspace_dep, &source_package_dir.join("node_modules/project-1"))
+        symlink_dir(&workspace_dep, &source_container_dir.join("project-1"))
             .expect("create workspace link");
 
         materialize_virtual_store_package(
@@ -385,10 +387,12 @@ mod tests {
         let nested_pkg = virtual_store_dir.join("project-1@file+pkg/node_modules/project-1");
         let source_package_dir =
             virtual_store_dir.join("project-2@file+pkg/node_modules/project-2");
+        let source_container_dir =
+            source_package_dir.parent().expect("source container").to_path_buf();
         let destination_package_dir = dir.path().join("project/node_modules/project-2");
 
         fs::create_dir_all(nested_pkg.join("node_modules/is-number")).expect("create nested pkg");
-        fs::create_dir_all(source_package_dir.join("node_modules")).expect("create source package");
+        fs::create_dir_all(&source_package_dir).expect("create source package");
         fs::write(
             nested_pkg.join("package.json"),
             "{\"name\":\"project-1\",\"version\":\"1.0.0\"}",
@@ -404,7 +408,7 @@ mod tests {
             "{\"name\":\"project-2\",\"version\":\"1.0.0\"}",
         )
         .expect("write source package manifest");
-        symlink_dir(&nested_pkg, &source_package_dir.join("node_modules/project-1"))
+        symlink_dir(&nested_pkg, &source_container_dir.join("project-1"))
             .expect("create nested virtual store link");
 
         materialize_virtual_store_package(
