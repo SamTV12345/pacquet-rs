@@ -1,5 +1,6 @@
 use crate::{
     InstallPackageBySnapshot, ResolvedPackages, create_symlink_layout, package_dependency_map,
+    should_prune_orphaned_virtual_store_entries,
 };
 use futures_util::stream::{self, StreamExt};
 use pacquet_lockfile::{DependencyPath, PackageSnapshot, PkgNameVerPeer};
@@ -9,7 +10,6 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, SystemTime},
 };
 
 /// This subroutine generates filesystem layout for the virtual store at `node_modules/.pacquet`.
@@ -299,7 +299,13 @@ fn prune_orphaned_virtual_store_entries(
     config: &Npmrc,
     packages: &HashMap<DependencyPath, PackageSnapshot>,
 ) {
-    let max_age_minutes = config.modules_cache_max_age;
+    if !should_prune_orphaned_virtual_store_entries(
+        &config.modules_dir,
+        config.modules_cache_max_age,
+    ) {
+        return;
+    }
+
     let Ok(entries) = fs::read_dir(&config.virtual_store_dir) else {
         return;
     };
@@ -321,28 +327,8 @@ fn prune_orphaned_virtual_store_entries(
         if name == "node_modules" || wanted.contains(&name) {
             continue;
         }
-        if !is_stale_enough(&path, max_age_minutes) {
-            continue;
-        }
         let _ = fs::remove_dir_all(&path);
     }
-}
-
-fn is_stale_enough(path: &std::path::Path, max_age_minutes: u64) -> bool {
-    if max_age_minutes == 0 {
-        return true;
-    }
-
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-    let Ok(modified) = metadata.modified() else {
-        return false;
-    };
-    let Ok(elapsed) = SystemTime::now().duration_since(modified) else {
-        return false;
-    };
-    elapsed >= Duration::from_secs(max_age_minutes.saturating_mul(60))
 }
 
 #[cfg(test)]
@@ -442,13 +428,15 @@ mod tests {
     #[test]
     fn prune_orphaned_virtual_store_entries_removes_orphans_when_cache_age_is_zero() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let virtual_store_dir = dir.path().join("node_modules/.pnpm");
+        let modules_dir = dir.path().join("node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
         fs::create_dir_all(virtual_store_dir.join("kept@1.0.0/node_modules/kept"))
             .expect("create kept package dir");
         fs::create_dir_all(virtual_store_dir.join("orphan@1.0.0/node_modules/orphan"))
             .expect("create orphan package dir");
 
         let mut config = Npmrc::new();
+        config.modules_dir = modules_dir;
         config.virtual_store_dir = virtual_store_dir.clone();
         config.modules_cache_max_age = 0;
 
@@ -463,11 +451,16 @@ mod tests {
     #[test]
     fn prune_orphaned_virtual_store_entries_keeps_orphans_when_not_stale() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let virtual_store_dir = dir.path().join("node_modules/.pnpm");
+        let modules_dir = dir.path().join("node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
         fs::create_dir_all(virtual_store_dir.join("orphan@1.0.0/node_modules/orphan"))
             .expect("create orphan package dir");
+        fs::create_dir_all(&modules_dir).expect("create modules dir");
+        fs::write(modules_dir.join(".modules.yaml"), "prunedAt: '9999999999'\n")
+            .expect("write fresh modules manifest");
 
         let mut config = Npmrc::new();
+        config.modules_dir = modules_dir;
         config.virtual_store_dir = virtual_store_dir.clone();
         config.modules_cache_max_age = 10_000;
 

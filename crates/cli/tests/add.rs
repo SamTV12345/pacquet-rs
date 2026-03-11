@@ -1,9 +1,10 @@
 use assert_cmd::prelude::*;
 use command_extra::CommandExtra;
+use pacquet_fs::symlink_dir;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_testing_utils::{
     bin::{AddMockedRegistry, CommandTempCwd},
-    fs::{get_all_folders, get_filenames_in_folder},
+    fs::{get_all_folders, get_filenames_in_folder, symlink_or_junction_target},
 };
 use pretty_assertions::assert_eq;
 #[cfg(unix)]
@@ -764,13 +765,225 @@ fn should_add_file_protocol_directory_without_package_json() {
         .find(|(name, _)| *name == "pkg")
         .map(|(_, spec)| spec.to_string())
         .expect("local dependency spec");
-    #[cfg(windows)]
-    assert_eq!(dep, r"file:.\pkg");
-    #[cfg(not(windows))]
-    assert_eq!(dep, "file:./pkg");
+    assert_eq!(dep, "file:pkg");
 
     assert!(app_dir.join("node_modules/pkg").exists());
     assert!(app_dir.join("pnpm-lock.yaml").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn should_add_file_protocol_local_path_dependency() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let lib_dir = workspace.join("lib");
+    std::fs::create_dir_all(&app_dir).expect("create app directory");
+    std::fs::create_dir_all(&lib_dir).expect("create lib directory");
+    std::fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+    std::fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.0.0",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write lib manifest");
+    std::fs::write(lib_dir.join("index.js"), "module.exports = 'lib';\n").expect("write lib file");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "add", "file:../lib"]).assert().success();
+
+    let app_manifest = PackageManifest::from_path(app_dir.join("package.json")).unwrap();
+    let dep = app_manifest
+        .dependencies([DependencyGroup::Prod])
+        .find(|(name, _)| *name == "@repo/lib")
+        .map(|(_, spec)| spec.to_string())
+        .expect("local dependency spec");
+    #[cfg(windows)]
+    assert_eq!(dep, r"file:..\lib");
+    #[cfg(not(windows))]
+    assert_eq!(dep, "file:../lib");
+
+    assert!(app_dir.join("node_modules/@repo/lib").exists());
+    assert!(app_dir.join("pnpm-lock.yaml").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn should_add_link_protocol_local_path_dependency_without_current_dir_prefix() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let pkg_dir = app_dir.join("pkg");
+    std::fs::create_dir_all(&pkg_dir).expect("create pkg directory");
+    std::fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+    std::fs::write(
+        pkg_dir.join("package.json"),
+        serde_json::json!({
+            "name": "pkg",
+            "version": "1.0.0",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write pkg manifest");
+    std::fs::write(pkg_dir.join("index.js"), "module.exports = 'pkg';\n").expect("write pkg file");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "add", "link:./pkg"]).assert().success();
+
+    let app_manifest = PackageManifest::from_path(app_dir.join("package.json")).unwrap();
+    let dep = app_manifest
+        .dependencies([DependencyGroup::Prod])
+        .find(|(name, _)| *name == "pkg")
+        .map(|(_, spec)| spec.to_string())
+        .expect("local dependency spec");
+    assert_eq!(dep, "link:pkg");
+
+    assert!(app_dir.join("node_modules/pkg").exists());
+    let lockfile_content =
+        std::fs::read_to_string(app_dir.join("pnpm-lock.yaml")).expect("read lockfile");
+    assert!(lockfile_content.contains("specifier: link:pkg"));
+    assert!(lockfile_content.contains("version: link:pkg"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn should_add_link_protocol_dependency_with_symlinked_node_modules() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let lib_dir = workspace.join("local-pkg");
+    let shared_node_modules = workspace.join("shared-node_modules");
+    std::fs::create_dir_all(&app_dir).expect("create app dir");
+    std::fs::create_dir_all(&lib_dir).expect("create local-pkg dir");
+    std::fs::create_dir_all(&shared_node_modules).expect("create shared node_modules dir");
+    symlink_dir(&shared_node_modules, &app_dir.join("node_modules"))
+        .expect("symlink app node_modules to shared directory");
+    std::fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+    std::fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "local-pkg",
+            "version": "1.0.0",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write linked package manifest");
+    std::fs::write(lib_dir.join("index.js"), "module.exports = 'linked';\n")
+        .expect("write source file");
+
+    pacquet
+        .with_args(["-C", app_dir.to_str().unwrap(), "add", "link:../local-pkg"])
+        .assert()
+        .success();
+
+    let app_manifest = PackageManifest::from_path(app_dir.join("package.json")).unwrap();
+    let dep = app_manifest
+        .dependencies([DependencyGroup::Prod])
+        .find(|(name, _)| *name == "local-pkg")
+        .map(|(_, spec)| spec.to_string())
+        .expect("local dependency spec");
+    #[cfg(windows)]
+    assert_eq!(dep, r"link:..\local-pkg");
+    #[cfg(not(windows))]
+    assert_eq!(dep, "link:../local-pkg");
+
+    let linked_dep = app_dir.join("node_modules/local-pkg");
+    assert!(linked_dep.exists());
+    assert_eq!(
+        std::fs::read_to_string(linked_dep.join("index.js")).expect("read linked file"),
+        "module.exports = 'linked';\n"
+    );
+
+    let lockfile_content =
+        std::fs::read_to_string(app_dir.join("pnpm-lock.yaml")).expect("read lockfile");
+    assert!(lockfile_content.contains("version: link:../local-pkg"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn should_preserve_symlink_target_for_link_protocol_dependency() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let local_pkg_dir = workspace.join("local-pkg");
+    let symlink_dir_path = workspace.join("symlink");
+    std::fs::create_dir_all(&app_dir).expect("create app dir");
+    std::fs::create_dir_all(&local_pkg_dir).expect("create local-pkg dir");
+    std::fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+    std::fs::write(
+        local_pkg_dir.join("package.json"),
+        serde_json::json!({
+            "name": "local-pkg",
+            "version": "1.0.0",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write linked package manifest");
+    std::fs::write(local_pkg_dir.join("index.js"), "module.exports = 'linked';\n")
+        .expect("write source file");
+    symlink_dir(&local_pkg_dir, &symlink_dir_path).expect("create symlink to local package");
+
+    pacquet
+        .with_args(["-C", app_dir.to_str().unwrap(), "add", "link:../symlink"])
+        .assert()
+        .success();
+
+    let app_manifest = PackageManifest::from_path(app_dir.join("package.json")).unwrap();
+    let dep = app_manifest
+        .dependencies([DependencyGroup::Prod])
+        .find(|(name, _)| *name == "local-pkg")
+        .map(|(_, spec)| spec.to_string())
+        .expect("local dependency spec");
+    #[cfg(windows)]
+    assert_eq!(dep, r"link:..\symlink");
+    #[cfg(not(windows))]
+    assert_eq!(dep, "link:../symlink");
+
+    let link_target = symlink_or_junction_target(&app_dir.join("node_modules/local-pkg"))
+        .expect("read local dependency link target");
+    assert!(link_target.to_string_lossy().contains("symlink"));
+    assert!(!link_target.to_string_lossy().contains("local-pkg"));
 
     drop(root); // cleanup
 }

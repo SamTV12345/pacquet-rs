@@ -3,6 +3,7 @@ pub use _utils::*;
 
 use assert_cmd::prelude::*;
 use command_extra::CommandExtra;
+use pacquet_fs::symlink_dir;
 use pacquet_testing_utils::{
     bin::{AddMockedRegistry, CommandTempCwd},
     fs::{get_all_files, get_all_folders, is_symlink_or_junction},
@@ -123,6 +124,32 @@ fn should_install_dependencies() {
     let workspace_folders = get_all_folders(&workspace);
     let store_files = normalize_store_files_for_snapshot(get_all_files(&store_dir));
     insta::assert_debug_snapshot!((workspace_folders, store_files));
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn install_should_write_modules_manifest_with_pruned_at() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin": "1.0.0",
+            },
+        })
+        .to_string(),
+    )
+    .expect("write package.json");
+
+    pacquet.with_arg("install").assert().success();
+
+    let modules_manifest = fs::read_to_string(workspace.join("node_modules/.modules.yaml"))
+        .expect("read modules yaml");
+    assert!(modules_manifest.contains("prunedAt:"));
 
     drop((root, mock_instance)); // cleanup
 }
@@ -652,7 +679,6 @@ fn no_prefer_frozen_lockfile_flag_should_override_default_true_setting() {
     drop(root); // cleanup
 }
 
-#[test]
 fn should_accept_ignore_scripts_flag() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
@@ -3005,6 +3031,60 @@ fn link_protocol_dependency_should_link_local_package() {
     let lockfile_content =
         fs::read_to_string(app_dir.join("pnpm-lock.yaml")).expect("read app lockfile");
     assert!(lockfile_content.contains("version: link:../src"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn link_protocol_dependency_should_install_with_symlinked_node_modules() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let lib_dir = workspace.join("local-pkg");
+    let shared_node_modules = workspace.join("shared-node_modules");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create local-pkg dir");
+    fs::create_dir_all(&shared_node_modules).expect("create shared node_modules dir");
+    symlink_dir(&shared_node_modules, &app_dir.join("node_modules"))
+        .expect("symlink app node_modules to shared directory");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "local-pkg",
+            "version": "1.0.0",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write linked package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'linked';\n").expect("write source file");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "local-pkg": "link:../local-pkg"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let linked_dep = app_dir.join("node_modules/local-pkg");
+    assert!(linked_dep.exists());
+    assert!(is_symlink_or_junction(&linked_dep).unwrap());
+    assert_eq!(
+        fs::read_to_string(linked_dep.join("index.js")).expect("read linked file"),
+        "module.exports = 'linked';\n"
+    );
+
+    let lockfile_content =
+        fs::read_to_string(app_dir.join("pnpm-lock.yaml")).expect("read app lockfile");
+    assert!(lockfile_content.contains("specifier: link:../local-pkg"));
+    assert!(lockfile_content.contains("version: link:../local-pkg"));
 
     drop(root); // cleanup
 }

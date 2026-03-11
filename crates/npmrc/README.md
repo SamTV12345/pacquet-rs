@@ -15,12 +15,12 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 |------|-----------------------|-------------------------------------|
 | ✅    | store_dir             |                                     |
 | ✅    | modules_dir           |                                     |
-| ~    | node_linker           | `hoisted` root hoist is wired; `pnp` now suppresses root node_modules hoists |
+| ~    | node_linker           | `hoisted` root hoist is wired; `pnp` now suppresses root node_modules hoists and writes a `.pnp.cjs` manifest |
 | ~    | symlink               | `false` avoids root links for isolated linker, clears hoist/public-hoist patterns, and still copies with hoisted linker |
 | ✅    | virtual_store_dir     |                                     |
 | ~    | package_import_method | `auto`, `copy`, `hardlink`, `clone`, and `clone-or-copy` wired for store imports plus local directory materialization/relink; local source `node_modules` is ignored during import (`clone` depends on reflink support) |
 | ~    | disable_relink_local_dir_deps | skips refreshing/relinking already-installed local directory dependencies on reinstall, including injected workspace deps, hardlinked local dirs, and frozen installs |
-| ~    | modules_cache_max_age | stale orphan virtual-store entries are pruned based on age |
+| ~    | modules_cache_max_age | stale orphan virtual-store entries are pruned using pnpm-like `node_modules/.modules.yaml` `prunedAt` age gating |
 
 # Lockfile Settings
 
@@ -51,7 +51,7 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 | ~    | proxy / https_proxy | pnpm-style proxy derivation is parsed from `.npmrc` and wired into install/store/env HTTP clients |
 | ~    | no_proxy / noproxy  | pnpm-style `noproxy` normalization and bypass list wiring are in place across install/store/env HTTP clients |
 | ~    | cafile / ca         | PEM CA bundle is read from `.npmrc` and wired into install/store/env HTTP clients |
-| ~    | `<URL>:ca/cert/key` | inline per-registry TLS config is parsed and selected by request URL across install/store/env HTTP clients |
+| ~    | `<URL>:ca/cert/key` | inline per-registry TLS config plus pnpm-style `:cafile/:certfile/:keyfile` are parsed and selected by request URL across install/store/env HTTP clients |
 
 # Peer Dependency Settings
 

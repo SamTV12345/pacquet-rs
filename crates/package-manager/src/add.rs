@@ -354,6 +354,7 @@ fn resolve_local_path_spec(
     } else {
         let separator = std::path::MAIN_SEPARATOR.to_string();
         let normalized = path_str.replace(['/', '\\'], &separator);
+        let normalized = normalized.strip_prefix(&format!(".{separator}")).unwrap_or(&normalized);
         format!("{protocol}{normalized}")
     };
     Ok(Some((name, spec)))
@@ -469,9 +470,29 @@ mod tests {
             .expect("local path should resolve")
             .expect("local path should be detected");
         assert_eq!(result.0, "pkg");
-        #[cfg(windows)]
-        assert_eq!(result.1, r"file:.\pkg");
-        #[cfg(not(windows))]
-        assert_eq!(result.1, "file:./pkg");
+        assert_eq!(result.1, "file:pkg");
+    }
+
+    #[test]
+    fn resolve_local_link_protocol_path_strips_current_dir_prefix() {
+        let root = tempdir().unwrap();
+        let app = root.path().join("app");
+        let pkg = app.join("pkg");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            serde_json::json!({
+                "name": "pkg",
+                "version": "1.0.0"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let result = resolve_local_path_spec(&app, "link:./pkg")
+            .expect("local path should resolve")
+            .expect("local path should be detected");
+        assert_eq!(result.0, "pkg");
+        assert_eq!(result.1, "link:pkg");
     }
 }

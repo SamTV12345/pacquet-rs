@@ -2,7 +2,7 @@ use crate::{
     InstallFrozenLockfile, InstallWithLockfile, InstallWithoutLockfile, ResolvedPackages,
     WorkspacePackages, collect_runtime_lockfile_config, get_outdated_lockfile_setting,
     hoist_virtual_store_packages, link_bins_for_manifest, progress_reporter,
-    satisfies_package_manifest,
+    satisfies_package_manifest, write_modules_manifest_pruned_at, write_pnp_manifest_if_needed,
 };
 use pacquet_lockfile::{Lockfile, RootProjectSnapshot};
 use pacquet_network::ThrottledClient;
@@ -123,10 +123,11 @@ where
                     dependency_groups.iter().copied(),
                 );
 
-                if lockfile_is_reusable
-                    && config.prefer_frozen_lockfile
-                    && !has_local_directory_dependency_specs
-                {
+                if should_prefer_frozen_lockfile_path(
+                    lockfile_is_reusable,
+                    config.prefer_frozen_lockfile,
+                    has_local_directory_dependency_specs,
+                ) {
                     if !lockfile_only {
                         InstallFrozenLockfile {
                             http_client,
@@ -255,6 +256,10 @@ where
                 validate_strict_peer_dependencies(config, lockfile_dir)?;
             }
             link_bins_for_manifest(config, manifest, dependency_groups.iter().copied())?;
+            write_modules_manifest_pruned_at(&config.modules_dir)
+                .map_err(|error| miette::miette!("write node_modules/.modules.yaml: {error}"))?;
+            write_pnp_manifest_if_needed(&config.node_linker, lockfile_dir)
+                .map_err(|error| miette::miette!("write .pnp.cjs: {error}"))?;
         }
 
         Ok(())
@@ -444,13 +449,23 @@ fn manifest_has_local_directory_dependency(
     })
 }
 
+fn should_prefer_frozen_lockfile_path(
+    lockfile_is_reusable: bool,
+    prefer_frozen_lockfile: bool,
+    has_local_directory_dependency_specs: bool,
+) -> bool {
+    lockfile_is_reusable && prefer_frozen_lockfile && !has_local_directory_dependency_specs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pacquet_npmrc::Npmrc;
     use pacquet_package_manifest::{DependencyGroup, PackageManifest};
     use pacquet_registry_mock::AutoMockInstance;
-    use pacquet_testing_utils::fs::{get_all_folders, is_symlink_or_junction};
+    use pacquet_testing_utils::fs::{
+        get_all_folders, get_filenames_in_folder, is_symlink_or_junction,
+    };
     use std::{fs, path::Path};
     use tempfile::tempdir;
 
@@ -526,6 +541,72 @@ mod tests {
         insta::assert_debug_snapshot!(get_all_folders(&project_root));
 
         drop((dir, mock_instance)); // cleanup
+    }
+
+    #[test]
+    fn pnp_node_linker_should_write_pnp_manifest_and_skip_root_dependency_links() {
+        let mock_instance = AutoMockInstance::load_or_init();
+
+        let dir = tempdir().expect("tempdir");
+        let store_dir = dir.path().join("pacquet-store");
+        let project_root = dir.path().join("project");
+        let modules_dir = project_root.join("node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
+
+        let manifest_path = project_root.join("package.json");
+        fs::create_dir_all(&project_root).expect("create project root");
+        let mut manifest = PackageManifest::create_if_needed(manifest_path).expect("manifest");
+        manifest
+            .add_dependency("@pnpm.e2e/hello-world-js-bin", "1.0.0", DependencyGroup::Prod)
+            .expect("add dependency");
+        manifest.save().expect("save manifest");
+
+        let mut config = Npmrc::new();
+        config.store_dir = store_dir.into();
+        config.modules_dir = modules_dir.clone();
+        config.virtual_store_dir = virtual_store_dir.clone();
+        config.registry = mock_instance.url();
+        config.node_linker = pacquet_npmrc::NodeLinker::Pnp;
+        config.symlink = false;
+        let config = config.leak();
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime")
+            .block_on(async {
+                Install {
+                    tarball_mem_cache: &Default::default(),
+                    http_client: &Default::default(),
+                    config,
+                    manifest: &manifest,
+                    lockfile: None,
+                    lockfile_dir: project_root.as_path(),
+                    lockfile_importer_id: ".",
+                    workspace_packages: &Default::default(),
+                    dependency_groups: [
+                        DependencyGroup::Prod,
+                        DependencyGroup::Dev,
+                        DependencyGroup::Optional,
+                    ],
+                    frozen_lockfile: false,
+                    lockfile_only: false,
+                    force: false,
+                    prefer_offline: false,
+                    offline: false,
+                    resolved_packages: &Default::default(),
+                }
+                .run()
+                .await
+                .expect("run install");
+            });
+
+        assert!(project_root.join(".pnp.cjs").exists());
+        assert_eq!(get_filenames_in_folder(&modules_dir), [".bin", ".modules.yaml", ".pnpm"]);
+        assert!(!modules_dir.join("@pnpm.e2e").exists());
+        assert!(virtual_store_dir.join("@pnpm.e2e+hello-world-js-bin@1.0.0").exists());
+
+        drop((dir, mock_instance));
     }
 
     #[test]
@@ -755,6 +836,16 @@ mod tests {
         );
 
         assert!(!manifest_has_local_directory_dependency(&manifest, [DependencyGroup::Prod]));
+    }
+
+    #[test]
+    fn should_prefer_frozen_lockfile_path_allows_linked_dependencies() {
+        assert!(should_prefer_frozen_lockfile_path(true, true, false));
+    }
+
+    #[test]
+    fn should_prefer_frozen_lockfile_path_disables_headless_for_local_file_directories() {
+        assert!(!should_prefer_frozen_lockfile_path(true, true, true));
     }
 
     fn load_manifest(dir: &Path, value: serde_json::Value) -> PackageManifest {

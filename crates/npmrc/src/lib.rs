@@ -8,7 +8,12 @@ use pipe_trait::Pipe;
 use serde::Deserialize;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
-use std::{collections::HashMap, fs, path::PathBuf, process::Command};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 use url::Url;
 
 use crate::custom_deserializer::{
@@ -433,8 +438,15 @@ fn get_process_env(name: &str) -> Option<String> {
         .or_else(|| std::env::var(name.to_lowercase()).ok())
 }
 
+fn read_tls_file_setting(base_dir: Option<&Path>, value: &str) -> Option<String> {
+    let path = PathBuf::from(value);
+    let path = if path.is_absolute() { path } else { base_dir?.join(path) };
+    fs::read_to_string(path).ok()
+}
+
 fn ssl_configs_from_settings(
     settings: &HashMap<String, String>,
+    base_dir: Option<&Path>,
 ) -> HashMap<String, RegistrySslConfig> {
     let mut configs = HashMap::<String, RegistrySslConfig>::new();
     for (key, value) in settings {
@@ -447,8 +459,11 @@ fn ssl_configs_from_settings(
         let entry = configs.entry(uri).or_default();
         match config_type {
             "ca" => entry.ca = Some(unescape_npmrc_newlines(value)),
+            "cafile" => entry.ca = read_tls_file_setting(base_dir, value),
             "cert" => entry.cert = Some(unescape_npmrc_newlines(value)),
+            "certfile" => entry.cert = read_tls_file_setting(base_dir, value),
             "key" => entry.key = Some(unescape_npmrc_newlines(value)),
+            "keyfile" => entry.key = read_tls_file_setting(base_dir, value),
             _ => {}
         }
     }
@@ -554,9 +569,11 @@ impl Npmrc {
         let home_content = home_dir.as_ref().and_then(load_content);
         let current_content = current_dir.as_ref().and_then(load_content);
 
-        let mut merged_raw = read_npmrc_raw(home_dir.clone());
-        merged_raw.extend(read_npmrc_raw(current_dir.clone()));
-        let user_raw = read_npmrc_raw(current_dir.clone());
+        let home_raw = read_npmrc_raw(home_dir.clone());
+        let current_raw = read_npmrc_raw(current_dir.clone());
+        let mut merged_raw = home_raw.clone();
+        merged_raw.extend(current_raw.clone());
+        let user_raw = current_raw.clone();
 
         let mut config = match (&home_content, &current_content) {
             (Some(home), Some(current)) => parse(&format!("{home}\n{current}"))
@@ -574,6 +591,23 @@ impl Npmrc {
             config.raw_settings.insert("registry".to_string(), config.registry.clone());
         }
         config.recompute_tls_settings();
+        let mut ssl_configs = ssl_configs_from_settings(&home_raw, home_dir.as_deref())
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        for (uri, source_config) in ssl_configs_from_settings(&current_raw, current_dir.as_deref())
+        {
+            let entry = ssl_configs.entry(uri).or_default();
+            if source_config.ca.is_some() {
+                entry.ca = source_config.ca;
+            }
+            if source_config.cert.is_some() {
+                entry.cert = source_config.cert;
+            }
+            if source_config.key.is_some() {
+                entry.key = source_config.key;
+            }
+        }
+        config.ssl_configs = ssl_configs;
         config.recompute_request_settings();
         config.recompute_auth_headers()?;
         Ok(config)
@@ -614,7 +648,7 @@ impl Npmrc {
         {
             self.ca = vec![content];
         }
-        self.ssl_configs = ssl_configs_from_settings(&self.raw_settings);
+        self.ssl_configs = ssl_configs_from_settings(&self.raw_settings, None);
     }
 
     fn recompute_request_settings(&mut self) {
@@ -873,6 +907,31 @@ mod tests {
                 key: Some(
                     "-----BEGIN PRIVATE KEY-----\nMII-KEY\n-----END PRIVATE KEY-----".to_string()
                 ),
+            })
+        );
+    }
+
+    #[test]
+    pub fn current_reads_registry_scoped_ssl_files_from_npmrc() {
+        let project = tempdir().unwrap();
+        fs::write(project.path().join("ca.pem"), "CA-FILE").expect("write ca.pem");
+        fs::write(project.path().join("cert.pem"), "CERT-FILE").expect("write cert.pem");
+        fs::write(project.path().join("key.pem"), "KEY-FILE").expect("write key.pem");
+        fs::write(
+            project.path().join(".npmrc"),
+            "//registry.example.com/:cafile=ca.pem\n//registry.example.com/:certfile=cert.pem\n//registry.example.com/:keyfile=key.pem\n",
+        )
+        .expect("write npmrc");
+
+        let config =
+            Npmrc::current(|| Ok::<_, ()>(project.path().to_path_buf()), || None, Npmrc::new)
+                .expect("load npmrc");
+        assert_eq!(
+            config.ssl_configs.get("//registry.example.com/"),
+            Some(&RegistrySslConfig {
+                ca: Some("CA-FILE".to_string()),
+                cert: Some("CERT-FILE".to_string()),
+                key: Some("KEY-FILE".to_string()),
             })
         );
     }

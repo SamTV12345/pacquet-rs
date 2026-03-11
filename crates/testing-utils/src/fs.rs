@@ -1,4 +1,7 @@
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 use walkdir::WalkDir;
 
 pub fn get_filenames_in_folder(path: &Path) -> Vec<String> {
@@ -56,6 +59,18 @@ pub fn is_symlink_or_junction(path: &Path) -> io::Result<bool> {
     return Ok(path.is_symlink());
 }
 
+pub fn symlink_or_junction_target(path: &Path) -> io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        junction::get_target(path)
+    }
+
+    #[cfg(not(windows))]
+    {
+        fs::read_link(path)
+    }
+}
+
 /// Check if a file is executable.
 #[cfg(unix)]
 pub fn is_path_executable(path: &Path) -> bool {
@@ -80,5 +95,17 @@ mod tests {
         fs::create_dir(&plain).expect("create plain dir");
 
         assert!(!is_symlink_or_junction(&plain).expect("check plain dir"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn symlink_or_junction_target_returns_created_junction_target() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let target = dir.path().join("target");
+        let link = dir.path().join("link");
+        fs::create_dir(&target).expect("create target dir");
+        junction::create(&target, &link).expect("create junction");
+
+        assert_eq!(symlink_or_junction_target(&link).expect("read target"), target);
     }
 }
