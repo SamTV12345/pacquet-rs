@@ -47,6 +47,7 @@ pub struct ExecuteLifecycleScript<'a> {
     pub script_name: &'a str,
     pub script: &'a str,
     pub args: &'a [String],
+    pub extra_env: &'a [(OsString, OsString)],
     pub script_shell: Option<&'a str>,
     pub shell_emulator: bool,
     pub init_cwd: &'a Path,
@@ -199,7 +200,7 @@ fn build_common_env(
     opts: &ExecuteLifecycleScript<'_>,
 ) -> Result<Vec<(OsString, OsString)>, ExecutorError> {
     let path_var = prepend_node_modules_bin_paths(opts.pkg_root)?;
-    Ok(vec![
+    let mut env = vec![
         (OsString::from("PATH"), path_var),
         (OsString::from("INIT_CWD"), opts.init_cwd.as_os_str().to_os_string()),
         (OsString::from("PNPM_SCRIPT_SRC_DIR"), opts.pkg_root.as_os_str().to_os_string()),
@@ -207,7 +208,9 @@ fn build_common_env(
         (OsString::from("npm_lifecycle_script"), OsString::from(opts.script)),
         (OsString::from("npm_package_json"), opts.package_json_path.as_os_str().to_os_string()),
         (OsString::from("npm_command"), OsString::from("run-script")),
-    ])
+    ];
+    env.extend_from_slice(opts.extra_env);
+    Ok(env)
 }
 
 fn apply_common_env(command: &mut Command, pkg_root: &Path, common_env: &[(OsString, OsString)]) {
@@ -440,6 +443,7 @@ fn shell_quote_posix(input: &str) -> String {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    use tempfile::tempdir;
 
     #[test]
     fn posix_quoting_keeps_safe_chars() {
@@ -482,5 +486,30 @@ mod tests {
         assert_eq!(split_env_assignment_token("-A=b"), None);
         assert_eq!(split_env_assignment_token("A"), None);
         assert_eq!(split_env_assignment_token("A=b"), Some(("A", "b")));
+    }
+
+    #[test]
+    fn build_common_env_appends_extra_env_entries() {
+        let dir = tempdir().expect("tempdir");
+        let package_json_path = dir.path().join("package.json");
+        fs::write(&package_json_path, "{}").expect("write package.json");
+        let extra_env =
+            vec![(OsString::from("NODE_PATH"), OsString::from("/tmp/node_modules_extra"))];
+        let opts = ExecuteLifecycleScript {
+            pkg_root: dir.path(),
+            package_json_path: &package_json_path,
+            script_name: "build",
+            script: "echo hi",
+            args: &[],
+            extra_env: &extra_env,
+            script_shell: None,
+            shell_emulator: false,
+            init_cwd: dir.path(),
+        };
+
+        let common_env = build_common_env(&opts).expect("build common env");
+        assert!(common_env.iter().any(|(key, value)| {
+            key == OsStr::new("NODE_PATH") && value == OsStr::new("/tmp/node_modules_extra")
+        }));
     }
 }

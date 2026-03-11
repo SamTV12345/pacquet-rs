@@ -1611,6 +1611,7 @@ dependencies = [
  "miette 7.6.0",
  "serde_json",
  "shlex",
+ "tempfile",
 ]
 
 [[package]]

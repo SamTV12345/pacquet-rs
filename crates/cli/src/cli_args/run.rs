@@ -10,7 +10,9 @@ use pacquet_package_manifest::PackageManifest;
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-    env as std_env, fs,
+    env as std_env,
+    ffi::OsString,
+    fs,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -356,12 +358,14 @@ fn execute_script_with_output_mode(
         return Ok(LifecycleScriptOutput::default());
     }
 
+    let extra_env = script_extra_env(ctx.config, ctx.package_dir);
     let opts = ExecuteLifecycleScript {
         pkg_root: ctx.package_dir,
         package_json_path: ctx.manifest_path,
         script_name,
         script,
         args,
+        extra_env: &extra_env,
         script_shell: ctx.config.script_shell.as_deref(),
         shell_emulator: ctx.config.shell_emulator,
         init_cwd: ctx.init_cwd,
@@ -376,6 +380,33 @@ fn execute_script_with_output_mode(
             .wrap_err_with(|| format!("executing script `{script_name}`"))?,
     };
     Ok(output)
+}
+
+fn script_extra_env(config: &Npmrc, package_dir: &Path) -> Vec<(OsString, OsString)> {
+    #[cfg(windows)]
+    let (_, _) = (config, package_dir);
+
+    let env = vec![
+        (OsString::from("npm_config_verify_deps_before_run"), OsString::from("false")),
+        (OsString::from("pnpm_config_verify_deps_before_run"), OsString::from("false")),
+    ];
+
+    #[cfg(not(windows))]
+    if config.prefer_symlinked_executables_enabled() {
+        let mut env = env;
+        let virtual_store_dir = if config.virtual_store_dir.is_absolute() {
+            config.virtual_store_dir.clone()
+        } else {
+            package_dir.join(&config.virtual_store_dir)
+        };
+        env.push((
+            OsString::from("NODE_PATH"),
+            virtual_store_dir.join("node_modules").into_os_string(),
+        ));
+        return env;
+    }
+
+    env
 }
 
 #[derive(Debug)]
@@ -1735,4 +1766,55 @@ fn collect_package_json_paths(workspace_root: &Path) -> Vec<PathBuf> {
     let mut result = Vec::new();
     walk(workspace_root, &mut result);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use tempfile::tempdir;
+
+    #[test]
+    fn script_extra_env_always_disables_verify_deps_before_run() {
+        let dir = tempdir().expect("tempdir");
+        let config = Npmrc::new();
+
+        let env = script_extra_env(&config, dir.path());
+        assert!(env.iter().any(|(key, value)| {
+            key == OsStr::new("npm_config_verify_deps_before_run") && value == OsStr::new("false")
+        }));
+        assert!(env.iter().any(|(key, value)| {
+            key == OsStr::new("pnpm_config_verify_deps_before_run") && value == OsStr::new("false")
+        }));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn script_extra_env_sets_node_path_when_prefer_symlinked_executables_is_enabled() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = Npmrc::new();
+        config.prefer_symlinked_executables = Some(true);
+        config.virtual_store_dir = dir.path().join("node_modules/.pnpm");
+
+        let env = script_extra_env(&config, dir.path());
+        assert!(env.iter().any(|(key, value)| {
+            key == OsStr::new("NODE_PATH")
+                && value == config.virtual_store_dir.join("node_modules").as_os_str()
+        }));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn script_extra_env_uses_custom_virtual_store_dir_for_node_path() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = Npmrc::new();
+        config.prefer_symlinked_executables = Some(true);
+        config.virtual_store_dir = PathBuf::from("/foo/bar");
+
+        let env = script_extra_env(&config, dir.path());
+        assert!(env.iter().any(|(key, value)| {
+            key == OsStr::new("NODE_PATH")
+                && value == Path::new("/foo/bar/node_modules").as_os_str()
+        }));
+    }
 }

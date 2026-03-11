@@ -171,7 +171,12 @@ pub fn symlink_package(
     #[cfg(unix)]
     let symlink_target = symlink_path.parent().map_or_else(
         || symlink_target.to_path_buf(),
-        |parent| relative_path(symlink_target, parent),
+        |parent| {
+            let relative_base = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+            let relative_target =
+                fs::canonicalize(symlink_target).unwrap_or_else(|_| symlink_target.to_path_buf());
+            relative_path(&relative_target, &relative_base)
+        },
     );
     #[cfg(windows)]
     let symlink_target = symlink_target.to_path_buf();
@@ -354,6 +359,8 @@ fn import_dir_recursive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use pacquet_fs::symlink_dir;
     use tempfile::tempdir;
 
     #[test]
@@ -408,5 +415,29 @@ mod tests {
 
         assert!(destination.join("index.js").exists());
         assert!(!destination.join("node_modules").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_package_uses_real_parent_when_destination_parent_is_symlink() {
+        let dir = tempdir().expect("tempdir");
+        let source = dir.path().join("local-pkg");
+        let real_parent = dir.path().join("shared-node_modules");
+        let symlinked_parent = dir.path().join("app/node_modules");
+        let link_path = symlinked_parent.join("local-pkg");
+
+        fs::create_dir_all(&source).expect("create source dir");
+        fs::write(source.join("index.js"), "module.exports = 'linked';\n")
+            .expect("write source file");
+        fs::create_dir_all(real_parent.parent().expect("shared parent")).expect("create parent");
+        fs::create_dir_all(symlinked_parent.parent().expect("app parent")).expect("create app dir");
+        symlink_dir(&real_parent, &symlinked_parent).expect("symlink node_modules parent");
+
+        symlink_package(&source, &link_path).expect("create package symlink");
+
+        assert_eq!(
+            fs::read_to_string(link_path.join("index.js")).expect("read through symlink"),
+            "module.exports = 'linked';\n"
+        );
     }
 }

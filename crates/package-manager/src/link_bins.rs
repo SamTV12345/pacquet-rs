@@ -138,6 +138,7 @@ fn write_bin_wrapper(
     Ok(())
 }
 
+#[cfg(any(test, unix))]
 fn config_prefers_symlinked_executables(config: &Npmrc) -> bool {
     config.prefer_symlinked_executables_enabled()
 }
