@@ -28,13 +28,6 @@ fn discover_package_dirs(virtual_store_dir: &Path) -> Vec<PathBuf> {
         };
         for store_entry in store_entries.flatten() {
             let store_path = store_entry.path();
-            let Ok(store_file_type) = store_entry.file_type() else {
-                continue;
-            };
-            if !store_file_type.is_dir() {
-                continue;
-            }
-
             let name = store_entry.file_name().to_string_lossy().to_string();
             if name.starts_with('@') {
                 let Ok(scoped) = fs::read_dir(store_path) else {
@@ -42,10 +35,7 @@ fn discover_package_dirs(virtual_store_dir: &Path) -> Vec<PathBuf> {
                 };
                 for scoped_entry in scoped.flatten() {
                     let scoped_path = scoped_entry.path();
-                    let Ok(scoped_type) = scoped_entry.file_type() else {
-                        continue;
-                    };
-                    if scoped_type.is_dir() && scoped_path.join("package.json").is_file() {
+                    if scoped_path.join("package.json").is_file() {
                         package_dirs.push(scoped_path);
                     }
                 }
@@ -176,6 +166,12 @@ pub(crate) fn hoist_virtual_store_packages(config: &Npmrc) -> miette::Result<()>
         return Ok(());
     }
 
+    let shared_modules_dir = config
+        .virtual_store_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| config.modules_dir.clone());
+
     if config.shamefully_hoist {
         let selected = select_packages_by_patterns(&config.virtual_store_dir, &[], true);
         let virtual_hoisted_root = config.virtual_store_dir.join("node_modules");
@@ -185,7 +181,7 @@ pub(crate) fn hoist_virtual_store_packages(config: &Npmrc) -> miette::Result<()>
     match config.node_linker {
         NodeLinker::Hoisted => {
             let selected = select_packages_by_patterns(&config.virtual_store_dir, &[], true);
-            hoist_selected_packages(config.symlink, &config.modules_dir, selected)?;
+            hoist_selected_packages(config.symlink, &shared_modules_dir, selected)?;
         }
         NodeLinker::Pnp => {}
         _ if config.hoist || config.shamefully_hoist => {
@@ -207,6 +203,8 @@ pub(crate) fn hoist_virtual_store_packages(config: &Npmrc) -> miette::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use pacquet_fs::symlink_dir;
     use pacquet_testing_utils::fs::is_symlink_or_junction;
     use tempfile::tempdir;
 
@@ -226,6 +224,72 @@ mod tests {
             .to_string(),
         )
         .expect("write package manifest");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = modules_dir.clone();
+        config.virtual_store_dir = virtual_store_dir;
+        config.node_linker = NodeLinker::Hoisted;
+        config.shamefully_hoist = false;
+
+        hoist_virtual_store_packages(&config).expect("hoist should succeed");
+
+        let link_path = modules_dir.join("dep");
+        assert!(link_path.exists());
+        assert!(is_symlink_or_junction(&link_path).expect("read link metadata"));
+    }
+
+    #[test]
+    fn hoisted_node_linker_should_hoist_to_shared_root_modules_dir() {
+        let dir = tempdir().expect("tempdir");
+        let shared_modules_dir = dir.path().join("workspace/node_modules");
+        let project_modules_dir = dir.path().join("workspace/packages/app/node_modules");
+        let virtual_store_dir = shared_modules_dir.join(".pnpm");
+        let package_dir = virtual_store_dir.join("dep@1.0.0/node_modules/dep");
+        fs::create_dir_all(&package_dir).expect("create virtual store package dir");
+        fs::write(
+            package_dir.join("package.json"),
+            serde_json::json!({
+                "name": "dep",
+                "version": "1.0.0"
+            })
+            .to_string(),
+        )
+        .expect("write package manifest");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = project_modules_dir.clone();
+        config.virtual_store_dir = virtual_store_dir;
+        config.node_linker = NodeLinker::Hoisted;
+        config.shamefully_hoist = false;
+
+        hoist_virtual_store_packages(&config).expect("hoist should succeed");
+
+        assert!(shared_modules_dir.join("dep").exists());
+        assert!(!project_modules_dir.join("dep").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hoisted_node_linker_should_discover_symlinked_virtual_store_packages() {
+        let dir = tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("project/node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
+        let package_root = virtual_store_dir.join("dep@1.0.0/node_modules");
+        let real_package_dir = dir.path().join("store/dep");
+        let linked_package_dir = package_root.join("dep");
+
+        fs::create_dir_all(&package_root).expect("create package root");
+        fs::create_dir_all(&real_package_dir).expect("create real package dir");
+        fs::write(
+            real_package_dir.join("package.json"),
+            serde_json::json!({
+                "name": "dep",
+                "version": "1.0.0"
+            })
+            .to_string(),
+        )
+        .expect("write package manifest");
+        symlink_dir(&real_package_dir, &linked_package_dir).expect("create package symlink");
 
         let mut config = Npmrc::new();
         config.modules_dir = modules_dir.clone();
