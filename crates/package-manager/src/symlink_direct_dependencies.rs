@@ -205,17 +205,14 @@ fn materialize_virtual_store_package(
 
         import_local_package_dir(import_method, &source_package_dir, destination_package_dir)?;
 
-        let Some(virtual_node_modules_dir) = source_package_dir.ancestors().find(|ancestor| {
-            ancestor.file_name().and_then(|name| name.to_str()) == Some("node_modules")
-        }) else {
+        let virtual_node_modules_dir = source_package_dir.join("node_modules");
+        if !virtual_node_modules_dir.is_dir() {
             return Ok(());
-        };
+        }
         let virtual_store_dir = source_package_dir
             .ancestors()
             .find(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some(".pnpm"))
-            .unwrap_or_else(|| {
-                virtual_node_modules_dir.parent().unwrap_or(virtual_node_modules_dir)
-            });
+            .unwrap_or_else(|| source_package_dir.parent().unwrap_or(source_package_dir.as_path()));
         let entries = match fs::read_dir(virtual_node_modules_dir) {
             Ok(entries) => entries,
             Err(_) => return Ok(()),
