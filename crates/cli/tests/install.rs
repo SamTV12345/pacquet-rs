@@ -2118,9 +2118,18 @@ fn workspace_injected_dependency_should_snapshot_nested_workspace_dependency_wit
 
 #[test]
 fn workspace_injected_dependency_should_only_dedupe_matching_transitive_peer_context() {
-    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
-        CommandTempCwd::init().add_mocked_registry();
-    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    let store_dir = root.path().join("pacquet-store");
+    let cache_dir = root.path().join("pacquet-cache");
+    fs::write(
+        workspace.join(".npmrc"),
+        format!(
+            "registry=https://registry.npmjs.org/\nstore-dir={}\ncache-dir={}\nfetch-timeout=1000\n",
+            store_dir.display(),
+            cache_dir.display()
+        ),
+    )
+    .expect("write .npmrc");
 
     let project_1_dir = workspace.join("packages/project-1");
     let project_2_dir = workspace.join("packages/project-2");
@@ -2262,15 +2271,23 @@ fn workspace_injected_dependency_should_only_dedupe_matching_transitive_peer_con
     assert!(!lockfile_content.contains("project-2@file:packages/project-2(is-positive@1.0.0):"));
     assert!(!lockfile_content.contains("project-4@file:packages/project-4(is-positive@1.0.0):"));
 
-    drop(mock_instance);
     drop(root); // cleanup
 }
 
 #[test]
 fn frozen_workspace_injected_dependency_should_keep_deduped_multilevel_transitive_peer_context() {
-    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
-        CommandTempCwd::init().add_mocked_registry();
-    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+    let store_dir = root.path().join("pacquet-store");
+    let cache_dir = root.path().join("pacquet-cache");
+    fs::write(
+        workspace.join(".npmrc"),
+        format!(
+            "registry=https://registry.npmjs.org/\nstore-dir={}\ncache-dir={}\nfetch-timeout=1000\n",
+            store_dir.display(),
+            cache_dir.display()
+        ),
+    )
+    .expect("write .npmrc");
 
     let project_1_dir = workspace.join("packages/project-1");
     let project_2_dir = workspace.join("packages/project-2");
@@ -2368,7 +2385,6 @@ fn frozen_workspace_injected_dependency_should_keep_deduped_multilevel_transitiv
     assert!(is_symlink_or_junction(&project_5_dep).expect("read project-5 dep metadata"));
     assert!(project_5_dep.join("node_modules/project-2").exists());
 
-    drop(mock_instance);
     drop(root); // cleanup
 }
 

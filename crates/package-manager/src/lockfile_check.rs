@@ -121,6 +121,14 @@ pub(crate) fn satisfies_package_manifest(
     strict_specifier_match: bool,
 ) -> Result<(), String> {
     let mut manifest = extract_manifest(manifest);
+    let importer_dep_names = project_snapshot
+        .dependencies
+        .iter()
+        .chain(project_snapshot.optional_dependencies.iter())
+        .chain(project_snapshot.dev_dependencies.iter())
+        .flat_map(|map| map.keys().map(ToString::to_string))
+        .chain(project_snapshot.specifiers.iter().flat_map(|map| map.keys().cloned()))
+        .collect::<std::collections::HashSet<_>>();
 
     let mut existing_deps = merge_maps(&[
         &manifest.dev_dependencies,
@@ -131,14 +139,19 @@ pub(crate) fn satisfies_package_manifest(
     if auto_install_peers {
         let mut dependencies_with_auto_peers = HashMap::<String, String>::new();
         for (name, specifier) in &manifest.peer_dependencies {
-            if !existing_deps.contains_key(name) {
+            if !existing_deps.contains_key(name) && importer_dep_names.contains(name) {
                 dependencies_with_auto_peers.insert(name.clone(), specifier.clone());
             }
         }
         dependencies_with_auto_peers.extend(manifest.dependencies.clone());
         manifest.dependencies = dependencies_with_auto_peers;
 
-        let mut deps_with_peers = manifest.peer_dependencies.clone();
+        let mut deps_with_peers = manifest
+            .peer_dependencies
+            .iter()
+            .filter(|(name, _)| importer_dep_names.contains(*name))
+            .map(|(name, specifier)| (name.clone(), specifier.clone()))
+            .collect::<HashMap<_, _>>();
         deps_with_peers.extend(existing_deps);
         existing_deps = deps_with_peers;
     }
@@ -726,6 +739,28 @@ mod tests {
         };
 
         assert!(satisfies_package_manifest(&snapshot, &manifest, false, false, false).is_ok());
+    }
+
+    #[test]
+    fn auto_install_peers_allows_peer_only_importer_without_lockfile_specifiers() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = load_manifest_from_json(
+            dir.path(),
+            serde_json::json!({
+                "peerDependencies": { "is-positive": ">=1.0.0" }
+            }),
+        );
+
+        let snapshot = ProjectSnapshot {
+            specifiers: None,
+            dependencies: None,
+            optional_dependencies: None,
+            dev_dependencies: None,
+            dependencies_meta: None,
+            publish_directory: None,
+        };
+
+        assert!(satisfies_package_manifest(&snapshot, &manifest, true, false, true).is_ok());
     }
 
     #[test]
