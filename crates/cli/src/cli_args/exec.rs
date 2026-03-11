@@ -90,7 +90,7 @@ impl ExecArgs {
             filter,
             fail_if_no_match,
             parallel,
-            reporter_hide_prefix,
+            reporter_hide_prefix: _reporter_hide_prefix,
             no_reporter_hide_prefix,
             workspace_concurrency,
             sequential,
@@ -163,7 +163,7 @@ impl ExecArgs {
         } else {
             effective_workspace_concurrency(parallel, workspace_concurrency, ordered.len())
         };
-        let show_prefix = no_reporter_hide_prefix || (!reporter_hide_prefix && false);
+        let show_prefix = no_reporter_hide_prefix;
         let capture_output = parallel || show_prefix;
 
         let mut first_error = None;
