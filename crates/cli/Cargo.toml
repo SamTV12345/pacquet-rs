@@ -52,3 +52,4 @@ insta             = { workspace = true }
 pretty_assertions = { workspace = true }
 serde_json        = { workspace = true }
 walkdir           = { workspace = true }
+same-file         = { workspace = true }

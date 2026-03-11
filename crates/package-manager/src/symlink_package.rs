@@ -1,6 +1,8 @@
+use crate::{LinkFileError, link_file};
 use derive_more::{Display, Error};
 use miette::Diagnostic;
 use pacquet_fs::symlink_dir;
+use pacquet_npmrc::PackageImportMethod;
 use std::{
     fs,
     io::{self, ErrorKind},
@@ -104,6 +106,14 @@ pub enum SymlinkPackageError {
         #[error(source)]
         error: io::Error,
     },
+
+    #[display("Failed to import local file from {from:?} to {to:?}: {error}")]
+    ImportLocalFile {
+        from: PathBuf,
+        to: PathBuf,
+        #[error(source)]
+        error: Box<LinkFileError>,
+    },
 }
 
 /// Link package from `symlink_target` to `symlink_path`.
@@ -119,6 +129,28 @@ pub fn link_package(
     }
 
     copy_package_dir(symlink_target, symlink_path)
+}
+
+pub fn import_local_package_dir(
+    import_method: PackageImportMethod,
+    source: &Path,
+    destination: &Path,
+) -> Result<(), SymlinkPackageError> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| SymlinkPackageError::CreateParentDir {
+            dir: parent.to_path_buf(),
+            error,
+        })?;
+    }
+
+    if destination.exists() {
+        remove_existing_path(destination)?;
+    }
+
+    let source = fs::canonicalize(source).map_err(|error| {
+        SymlinkPackageError::CanonicalizePath { path: source.to_path_buf(), error }
+    })?;
+    import_dir_recursive(import_method, &source, destination)
 }
 
 /// Create symlink for a package.
@@ -267,24 +299,14 @@ fn rename_existing_path(path: &Path) -> Result<(), io::Error> {
 }
 
 fn copy_package_dir(source: &Path, destination: &Path) -> Result<(), SymlinkPackageError> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|error| SymlinkPackageError::CreateParentDir {
-            dir: parent.to_path_buf(),
-            error,
-        })?;
-    }
-
-    if destination.exists() {
-        remove_existing_path(destination)?;
-    }
-
-    let source = fs::canonicalize(source).map_err(|error| {
-        SymlinkPackageError::CanonicalizePath { path: source.to_path_buf(), error }
-    })?;
-    copy_dir_recursive(&source, destination)
+    import_local_package_dir(PackageImportMethod::Copy, source, destination)
 }
 
-fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), SymlinkPackageError> {
+fn import_dir_recursive(
+    import_method: PackageImportMethod,
+    source: &Path,
+    destination: &Path,
+) -> Result<(), SymlinkPackageError> {
     fs::create_dir_all(destination).map_err(|error| SymlinkPackageError::CreateDestinationDir {
         path: destination.to_path_buf(),
         error,
@@ -308,14 +330,16 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), SymlinkPa
         let canonical_from =
             if file_type.is_symlink() { fs::canonicalize(&from).ok() } else { None };
         if file_type.is_dir() || canonical_from.as_ref().is_some_and(|target| target.is_dir()) {
-            copy_dir_recursive(canonical_from.as_deref().unwrap_or(&from), &to)?;
+            import_dir_recursive(import_method, canonical_from.as_deref().unwrap_or(&from), &to)?;
             continue;
         }
-        let copy_from = canonical_from.as_deref().unwrap_or(&from);
-        fs::copy(copy_from, &to).map_err(|error| SymlinkPackageError::CopyFile {
-            from: copy_from.to_path_buf(),
-            to: to.clone(),
-            error,
+        let import_from = canonical_from.as_deref().unwrap_or(&from);
+        link_file(import_method, import_from, &to).map_err(|error| {
+            SymlinkPackageError::ImportLocalFile {
+                from: import_from.to_path_buf(),
+                to: to.clone(),
+                error: Box::new(error),
+            }
         })?;
     }
 
@@ -344,5 +368,22 @@ mod tests {
         let metadata = fs::symlink_metadata(&destination).expect("read destination metadata");
         assert!(metadata.is_dir());
         assert!(!metadata.file_type().is_symlink());
+    }
+
+    #[test]
+    fn import_local_package_dir_with_hardlink_links_files() {
+        let dir = tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        let destination = dir.path().join("node_modules/pkg");
+        fs::create_dir_all(&source).expect("create source dir");
+        fs::write(source.join("index.js"), "module.exports = 1;").expect("write source file");
+
+        import_local_package_dir(PackageImportMethod::Hardlink, &source, &destination)
+            .expect("import local package");
+
+        assert!(
+            same_file::is_same_file(source.join("index.js"), destination.join("index.js"))
+                .expect("compare physical files")
+        );
     }
 }

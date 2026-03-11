@@ -1,4 +1,6 @@
-use crate::{CreateVirtualDirBySnapshot, CreateVirtualDirError, link_package, progress_reporter};
+use crate::{
+    CreateVirtualDirBySnapshot, CreateVirtualDirError, import_local_package_dir, progress_reporter,
+};
 use derive_more::{Display, Error};
 use miette::Diagnostic;
 use pacquet_lockfile::{DependencyPath, LockfileResolution, PackageSnapshot, PkgNameVerPeer};
@@ -101,9 +103,10 @@ impl<'a> InstallPackageBySnapshot<'a> {
                         )
                     });
                 }
-                link_package(false, source, &save_path).map_err(|error| {
-                    InstallPackageBySnapshotError::CopyLocalDir(error.to_string())
-                })?;
+                import_local_package_dir(config.package_import_method, source, &save_path)
+                    .map_err(|error| {
+                        InstallPackageBySnapshotError::CopyLocalDir(error.to_string())
+                    })?;
                 progress_reporter::linked();
                 return Ok(true);
             }

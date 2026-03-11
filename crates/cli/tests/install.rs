@@ -63,6 +63,28 @@ fn wait_for_path(path: &Path, timeout: Duration) -> bool {
     }
 }
 
+fn same_physical_file(left: &Path, right: &Path) -> bool {
+    same_file::is_same_file(left, right).unwrap_or(false)
+}
+
+fn find_virtual_store_file(
+    project_dir: &Path,
+    package_name: &str,
+    file_name: &str,
+) -> std::path::PathBuf {
+    let suffix = format!("node_modules/{package_name}/{file_name}",).replace('\\', "/");
+    walkdir::WalkDir::new(project_dir.join("node_modules/.pnpm"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            let entry_path = entry.path();
+            let normalized = entry_path.to_string_lossy().replace('\\', "/");
+            (entry.file_type().is_file() && normalized.ends_with(&suffix))
+                .then(|| entry_path.to_path_buf())
+        })
+        .unwrap_or_else(|| panic!("find virtual store file for {package_name}/{file_name}"))
+}
+
 fn pacquet_command(workspace: &Path) -> Command {
     #[allow(deprecated)]
     Command::cargo_bin("pacquet").expect("find pacquet binary").with_current_dir(workspace)
@@ -2445,6 +2467,70 @@ fn workspace_injected_dependency_should_refresh_on_reinstall_by_default() {
 }
 
 #[test]
+fn workspace_injected_dependency_should_relink_hardlinked_files_on_reinstall() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app package dir");
+    fs::create_dir_all(&lib_dir).expect("create lib package dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(app_dir.join(".npmrc"), "package-import-method=hardlink\n").expect("write app npmrc");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.2.3",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write lib package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'v1';\n").expect("write lib entrypoint");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "workspace:*"
+            },
+            "dependenciesMeta": {
+                "@repo/lib": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let installed_file = app_dir.join("node_modules/@repo/lib/index.js");
+    let virtual_store_file = find_virtual_store_file(&app_dir, "@repo/lib", "index.js");
+    assert!(same_physical_file(&installed_file, &virtual_store_file));
+
+    fs::remove_file(&installed_file).expect("remove installed file to break hardlink");
+    fs::write(&installed_file, "module.exports = 'broken';\n").expect("rewrite installed file");
+    assert!(!same_physical_file(&installed_file, &virtual_store_file));
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(&installed_file).expect("read reinstalled file"),
+        "module.exports = 'v1';\n"
+    );
+    assert!(same_physical_file(&installed_file, &virtual_store_file));
+
+    drop(root); // cleanup
+}
+
+#[test]
 fn disable_relink_local_dir_deps_should_keep_existing_workspace_injected_dependency_contents() {
     let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
 
@@ -2507,6 +2593,74 @@ fn disable_relink_local_dir_deps_should_keep_existing_workspace_injected_depende
             .expect("read injected dependency file"),
         "module.exports = 'v1';\n"
     );
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn disable_relink_local_dir_deps_should_not_relink_hardlinked_workspace_injected_dependency() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    fs::create_dir_all(&app_dir).expect("create app package dir");
+    fs::create_dir_all(&lib_dir).expect("create lib package dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        app_dir.join(".npmrc"),
+        "package-import-method=hardlink\ndisable-relink-local-dir-deps=true\n",
+    )
+    .expect("write app npmrc");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.2.3",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write lib package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'v1';\n").expect("write lib entrypoint");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "workspace:*"
+            },
+            "dependenciesMeta": {
+                "@repo/lib": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let installed_file = app_dir.join("node_modules/@repo/lib/index.js");
+    let virtual_store_file = find_virtual_store_file(&app_dir, "@repo/lib", "index.js");
+    assert!(same_physical_file(&installed_file, &virtual_store_file));
+
+    fs::remove_file(&installed_file).expect("remove installed file to break hardlink");
+    fs::write(&installed_file, "module.exports = 'broken';\n").expect("rewrite installed file");
+    assert!(!same_physical_file(&installed_file, &virtual_store_file));
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(&installed_file).expect("read unrelinked file"),
+        "module.exports = 'broken';\n"
+    );
+    assert!(!same_physical_file(&installed_file, &virtual_store_file));
 
     drop(root); // cleanup
 }
@@ -2704,6 +2858,63 @@ fn reinstall_should_refresh_file_protocol_dependency_contents() {
         fs::read_to_string(materialized_dep.join("index.js")).expect("read installed file"),
         "module.exports = 'v2';\n"
     );
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn file_protocol_dependency_should_relink_hardlinked_files_on_reinstall() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let lib_dir = workspace.join("src");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create src dir");
+    fs::write(app_dir.join(".npmrc"), "package-import-method=hardlink\n").expect("write app npmrc");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.0.0",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write file package manifest");
+    fs::write(lib_dir.join("index.js"), "module.exports = 'v1';\n").expect("write source file");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "file:../src"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    let installed_file = app_dir.join("node_modules/@repo/lib/index.js");
+    let virtual_store_file = find_virtual_store_file(&app_dir, "@repo/lib", "index.js");
+    assert!(same_physical_file(&installed_file, &virtual_store_file));
+
+    fs::remove_file(&installed_file).expect("remove installed file to break hardlink");
+    fs::write(&installed_file, "module.exports = 'broken';\n").expect("rewrite installed file");
+    assert!(!same_physical_file(&installed_file, &virtual_store_file));
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(&installed_file).expect("read reinstalled file"),
+        "module.exports = 'v1';\n"
+    );
+    assert!(same_physical_file(&installed_file, &virtual_store_file));
 
     drop(root); // cleanup
 }

@@ -1,9 +1,12 @@
-use crate::{SymlinkPackageError, link_package, should_materialize_root_links, symlink_package};
+use crate::{
+    SymlinkPackageError, import_local_package_dir, link_package, should_materialize_root_links,
+    symlink_package,
+};
 use pacquet_lockfile::{
     DependencyPath, PackageSnapshot, PkgName, PkgNameVerPeer, ProjectSnapshot,
     ResolvedDependencyVersion,
 };
-use pacquet_npmrc::Npmrc;
+use pacquet_npmrc::{Npmrc, PackageImportMethod};
 use pacquet_package_manifest::DependencyGroup;
 use rayon::prelude::*;
 use serde_yaml::Value as YamlValue;
@@ -107,9 +110,17 @@ where
                             || spec.specifier.starts_with("file:");
                         if should_materialize_local_copy {
                             if materialize_virtual_store_tree {
-                                materialize_virtual_store_package(&symlink_target, &dependency_path)
+                                materialize_virtual_store_package(
+                                    config.package_import_method,
+                                    &symlink_target,
+                                    &dependency_path,
+                                )
                             } else {
-                                link_package(false, &symlink_target, &dependency_path)
+                                import_local_package_dir(
+                                    config.package_import_method,
+                                    &symlink_target,
+                                    &dependency_path,
+                                )
                             }
                         } else {
                             if !config.symlink {
@@ -157,10 +168,12 @@ fn local_link_target(
 }
 
 fn materialize_virtual_store_package(
+    import_method: PackageImportMethod,
     source_package_dir: &Path,
     destination_package_dir: &Path,
 ) -> Result<(), SymlinkPackageError> {
     fn inner(
+        import_method: PackageImportMethod,
         source_package_dir: &Path,
         destination_package_dir: &Path,
         seen: &mut HashSet<PathBuf>,
@@ -172,7 +185,7 @@ fn materialize_virtual_store_package(
             return Ok(());
         }
 
-        link_package(false, &source_package_dir, destination_package_dir)?;
+        import_local_package_dir(import_method, &source_package_dir, destination_package_dir)?;
 
         let Some(virtual_node_modules_dir) = source_package_dir.ancestors().find(|ancestor| {
             ancestor.file_name().and_then(|name| name.to_str()) == Some("node_modules")
@@ -205,7 +218,7 @@ fn materialize_virtual_store_package(
                     }
                     let destination_dependency_dir =
                         destination_package_dir.join("node_modules").join(scoped_target_name);
-                    inner(&scoped_source_dir, &destination_dependency_dir, seen)?;
+                    inner(import_method, &scoped_source_dir, &destination_dependency_dir, seen)?;
                 }
                 continue;
             }
@@ -216,13 +229,13 @@ fn materialize_virtual_store_package(
             }
             let destination_dependency_dir =
                 destination_package_dir.join("node_modules").join(&file_name);
-            inner(&source_dependency_dir, &destination_dependency_dir, seen)?;
+            inner(import_method, &source_dependency_dir, &destination_dependency_dir, seen)?;
         }
 
         Ok(())
     }
 
-    inner(source_package_dir, destination_package_dir, &mut HashSet::new())
+    inner(import_method, source_package_dir, destination_package_dir, &mut HashSet::new())
 }
 
 fn should_materialize_workspace_dependency(

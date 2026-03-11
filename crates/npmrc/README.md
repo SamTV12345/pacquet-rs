@@ -18,8 +18,8 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 | ~    | node_linker           | `hoisted` root hoist is wired; `pnp` now suppresses root node_modules hoists |
 | ~    | symlink               | `false` avoids root links for isolated linker, clears hoist/public-hoist patterns, and still copies with hoisted linker |
 | ✅    | virtual_store_dir     |                                     |
-| ~    | package_import_method | `auto`, `copy`, `hardlink`, `clone`, and `clone-or-copy` wired (`clone` depends on reflink support) |
-| ~    | disable_relink_local_dir_deps | skips refreshing already-installed local directory dependencies on reinstall, including injected workspace deps and frozen installs |
+| ~    | package_import_method | `auto`, `copy`, `hardlink`, `clone`, and `clone-or-copy` wired for store imports plus local directory materialization/relink (`clone` depends on reflink support) |
+| ~    | disable_relink_local_dir_deps | skips refreshing/relinking already-installed local directory dependencies on reinstall, including injected workspace deps, hardlinked local dirs, and frozen installs |
 | ~    | modules_cache_max_age | stale orphan virtual-store entries are pruned based on age |
 
 # Lockfile Settings

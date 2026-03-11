@@ -92,8 +92,12 @@ impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
                         } else {
                             project_dir.join(file_target)
                         };
-                        crate::link_package(false, &file_target, &config.modules_dir.join(name))
-                            .expect("materialize local file dependency");
+                        crate::import_local_package_dir(
+                            config.package_import_method,
+                            &file_target,
+                            &config.modules_dir.join(name),
+                        )
+                        .expect("materialize local file dependency");
                         return;
                     }
                     let resolved_range = apply_workspace_root_peer_override(
