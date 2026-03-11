@@ -1,15 +1,41 @@
 use crate::{DependencyPath, PkgNameVerPeer, PkgVerPeer};
 use derive_more::{Display, From, TryInto};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
 /// Value of [`PackageSnapshot::dependencies`](crate::PackageSnapshot::dependencies).
-#[derive(Debug, Display, Clone, PartialEq, Eq, From, TryInto, Deserialize, Serialize)]
-#[serde(untagged)]
+#[derive(Debug, Display, Clone, PartialEq, Eq, From, TryInto, Serialize)]
 pub enum PackageSnapshotDependency {
     PkgVerPeer(PkgVerPeer),
     DependencyPath(DependencyPath),
     PkgNameVerPeer(PkgNameVerPeer),
     Link(String),
+}
+
+impl<'de> Deserialize<'de> for PackageSnapshotDependency {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+
+        if value.starts_with("file:") || value.starts_with("link:") {
+            return Ok(Self::Link(value));
+        }
+
+        if let Ok(pkg_ver_peer) = value.parse::<PkgVerPeer>() {
+            return Ok(Self::PkgVerPeer(pkg_ver_peer));
+        }
+
+        if let Ok(dependency_path) = value.parse::<DependencyPath>() {
+            return Ok(Self::DependencyPath(dependency_path));
+        }
+
+        if let Ok(pkg_name_ver_peer) = value.parse::<PkgNameVerPeer>() {
+            return Ok(Self::PkgNameVerPeer(pkg_name_ver_peer));
+        }
+
+        Err(de::Error::custom(format!("invalid package snapshot dependency: {value}")))
+    }
 }
 
 #[cfg(test)]
@@ -42,6 +68,8 @@ mod tests {
         case!("debug@4.4.3(supports-color@8.1.1)" => PkgNameVerPeer);
         case!("file:../local-pkg" => Link);
         case!("link:../local-pkg" => Link);
+        case!("file:packages/project-1(peer-provider@file:packages/peer-provider)" => Link);
+        case!("link:../project-1(peer-provider@file:../peer-provider)" => Link);
         case!("/react-json-view@1.21.3(@types/react@17.0.49)(react-dom@17.0.2)(react@17.0.2)" => DependencyPath);
         case!("/react-json-view@1.21.3(react@17.0.2)" => DependencyPath);
         case!("/react-json-view@1.21.3-rc.0(react@17.0.2)" => DependencyPath);
@@ -81,6 +109,8 @@ mod tests {
         case("debug@4.4.3(supports-color@8.1.1)");
         case("file:../local-pkg");
         case("link:../local-pkg");
+        case("file:packages/project-1(peer-provider@file:packages/peer-provider)");
+        case("link:../project-1(peer-provider@file:../peer-provider)");
         case("/react-json-view@1.21.3(@types/react@17.0.49)(react-dom@17.0.2)(react@17.0.2)");
         case("/react-json-view@1.21.3(react@17.0.2)");
         case("/react-json-view@1.21.3-rc.0(react@17.0.2)");
