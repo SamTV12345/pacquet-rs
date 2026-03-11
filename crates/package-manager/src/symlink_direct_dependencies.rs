@@ -385,13 +385,16 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let virtual_store_dir = dir.path().join(".pnpm");
         let nested_pkg = virtual_store_dir.join("project-1@file+pkg/node_modules/project-1");
+        let nested_container_dir = nested_pkg.parent().expect("nested container").to_path_buf();
         let source_package_dir =
             virtual_store_dir.join("project-2@file+pkg/node_modules/project-2");
         let source_container_dir =
             source_package_dir.parent().expect("source container").to_path_buf();
         let destination_package_dir = dir.path().join("project/node_modules/project-2");
 
-        fs::create_dir_all(nested_pkg.join("node_modules/is-number")).expect("create nested pkg");
+        fs::create_dir_all(&nested_pkg).expect("create nested package");
+        fs::create_dir_all(nested_container_dir.join("is-number"))
+            .expect("create transitive dependency");
         fs::create_dir_all(&source_package_dir).expect("create source package");
         fs::write(
             nested_pkg.join("package.json"),
@@ -399,7 +402,7 @@ mod tests {
         )
         .expect("write nested package manifest");
         fs::write(
-            nested_pkg.join("node_modules/is-number/package.json"),
+            nested_container_dir.join("is-number/package.json"),
             "{\"name\":\"is-number\",\"version\":\"7.0.0\"}",
         )
         .expect("write transitive package manifest");
