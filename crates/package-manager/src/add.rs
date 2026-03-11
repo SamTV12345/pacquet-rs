@@ -143,6 +143,18 @@ async fn resolve_package_spec(
     save_exact: bool,
     workspace_only: bool,
 ) -> Result<(String, String), AddError> {
+    if let Some((alias_name, target_name, target_requested_spec)) = parse_npm_alias_spec(package) {
+        let resolved_spec = resolve_npm_alias_target_spec(
+            config,
+            http_client,
+            target_name,
+            target_requested_spec,
+            save_exact,
+        )
+        .await?;
+        return Ok((alias_name.to_string(), format!("npm:{target_name}@{resolved_spec}")));
+    }
+
     let (package_name, requested_spec) = split_package_spec(package);
     if let Some(spec) = requested_spec
         && is_git_spec(spec)
@@ -171,18 +183,6 @@ async fn resolve_package_spec(
         let normalized_spec = normalize_git_spec(package).unwrap_or_else(|| package.to_string());
         return Ok((package_version.name, normalized_spec));
     }
-    if let Some((alias_name, target_name, target_requested_spec)) = parse_npm_alias_spec(package) {
-        let resolved_spec = resolve_npm_alias_target_spec(
-            config,
-            http_client,
-            target_name,
-            target_requested_spec,
-            save_exact,
-        )
-        .await?;
-        return Ok((alias_name.to_string(), format!("npm:{target_name}@{resolved_spec}")));
-    }
-
     if let Some(spec) = requested_spec
         && spec.starts_with("workspace:")
     {
@@ -442,6 +442,14 @@ mod tests {
         assert_eq!(
             parse_npm_alias_spec("@scope/alias@npm:@scope/pkg@^1.0.0"),
             Some(("@scope/alias", "@scope/pkg", Some("^1.0.0")))
+        );
+        assert_eq!(
+            parse_npm_alias_spec("hello-alias@npm:@pnpm.e2e/hello-world-js-bin@1.0.0"),
+            Some(("hello-alias", "@pnpm.e2e/hello-world-js-bin", Some("1.0.0")))
+        );
+        assert_eq!(
+            parse_npm_alias_spec("hello-alias@npm:@pnpm.e2e/hello-world-js-bin"),
+            Some(("hello-alias", "@pnpm.e2e/hello-world-js-bin", None))
         );
     }
 

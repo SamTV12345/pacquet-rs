@@ -26,6 +26,7 @@ fn normalize_repo(repo: &str) -> String {
 fn is_github_shorthand_spec(spec: &str) -> bool {
     if spec.starts_with('@')
         || spec.contains("://")
+        || spec.contains(':')
         || spec.starts_with('.')
         || spec.starts_with('/')
     {
@@ -120,6 +121,10 @@ mod tests {
         assert!(is_git_spec("https://github.com/pnpm/pnpm.git#main"));
         assert!(is_git_spec("git+ssh://git@github.com:pnpm/pnpm.git#main"));
         assert!(!is_git_spec("fastify@^4.0.0"));
+        assert!(!is_git_spec("npm:@pnpm.e2e/hello-world-js-bin@1.0.0"));
+        assert!(!is_git_spec("workspace:*"));
+        assert!(!is_git_spec("file:../pkg"));
+        assert!(!is_git_spec("link:../pkg"));
     }
 
     #[test]
