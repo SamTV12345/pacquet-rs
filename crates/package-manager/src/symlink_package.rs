@@ -137,10 +137,7 @@ pub fn import_local_package_dir(
     destination: &Path,
 ) -> Result<(), SymlinkPackageError> {
     if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|error| SymlinkPackageError::CreateParentDir {
-            dir: parent.to_path_buf(),
-            error,
-        })?;
+        ensure_parent_dir(parent)?;
     }
 
     if destination.exists() {
@@ -163,10 +160,7 @@ pub fn symlink_package(
     symlink_path: &Path,
 ) -> Result<(), SymlinkPackageError> {
     if let Some(parent) = symlink_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| SymlinkPackageError::CreateParentDir {
-            dir: parent.to_path_buf(),
-            error,
-        })?;
+        ensure_parent_dir(parent)?;
     }
     #[cfg(unix)]
     let symlink_target = symlink_path.parent().map_or_else(
@@ -185,6 +179,23 @@ pub fn symlink_package(
     let symlink_target = symlink_target.to_path_buf();
 
     force_symlink(&symlink_target, symlink_path, false)
+}
+
+fn ensure_parent_dir(parent: &Path) -> Result<(), SymlinkPackageError> {
+    match fs::create_dir_all(parent) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error.kind() == ErrorKind::AlreadyExists
+                && fs::symlink_metadata(parent)
+                    .map(|metadata| metadata.is_dir() || metadata.file_type().is_symlink())
+                    .unwrap_or(false) =>
+        {
+            Ok(())
+        }
+        Err(error) => {
+            Err(SymlinkPackageError::CreateParentDir { dir: parent.to_path_buf(), error })
+        }
+    }
 }
 
 fn force_symlink(
