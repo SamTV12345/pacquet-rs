@@ -2139,6 +2139,144 @@ fn workspace_injected_dependency_should_snapshot_nested_workspace_dependency_wit
 }
 
 #[test]
+fn workspace_injected_dependency_should_not_modify_source_manifest() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let project_1_dir = workspace.join("packages/project-1");
+    let project_2_dir = workspace.join("packages/project-2");
+    fs::create_dir_all(&project_1_dir).expect("create project-1 dir");
+    fs::create_dir_all(&project_2_dir).expect("create project-2 dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+
+    let project_1_manifest = serde_json::json!({
+        "name": "project-1",
+        "version": "1.0.0",
+        "dependencies": {
+            "is-positive": "1.0.0"
+        },
+        "peerDependencies": {
+            "is-positive": ">=1.0.0"
+        }
+    });
+    fs::write(project_1_dir.join("package.json"), project_1_manifest.to_string())
+        .expect("write project-1 manifest");
+    fs::write(
+        project_2_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-2",
+            "version": "1.0.0",
+            "dependencies": {
+                "project-1": "workspace:*"
+            },
+            "devDependencies": {
+                "is-positive": "1.0.0"
+            },
+            "dependenciesMeta": {
+                "project-1": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-2 manifest");
+
+    let before = fs::read_to_string(project_1_dir.join("package.json"))
+        .expect("read source project manifest before install");
+
+    pacquet.with_args(["-C", workspace.to_str().unwrap(), "install", "-r"]).assert().success();
+
+    let after = fs::read_to_string(project_1_dir.join("package.json"))
+        .expect("read source project manifest after install");
+    assert_eq!(after, before);
+
+    let parsed_after: serde_json::Value =
+        serde_json::from_str(&after).expect("parse source project manifest");
+    assert_eq!(parsed_after, project_1_manifest);
+
+    drop(mock_instance);
+    drop(root); // cleanup
+}
+
+#[test]
+fn peer_dependency_of_injected_workspace_project_should_resolve_to_workspace_link() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let project_1_dir = workspace.join("packages/project-1");
+    let project_2_dir = workspace.join("packages/project-2");
+    let project_3_dir = workspace.join("packages/project-3");
+    fs::create_dir_all(&project_1_dir).expect("create project-1 dir");
+    fs::create_dir_all(&project_2_dir).expect("create project-2 dir");
+    fs::create_dir_all(&project_3_dir).expect("create project-3 dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(workspace.join(".npmrc"), "node-linker=hoisted\ndedupe-injected-deps=false\n")
+        .expect("write workspace npmrc");
+    fs::write(
+        project_1_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-1",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write project-1 manifest");
+    fs::write(
+        project_2_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-2",
+            "version": "1.0.0",
+            "devDependencies": {
+                "project-1": "workspace:*"
+            },
+            "peerDependencies": {
+                "project-1": "workspace:^1.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-2 manifest");
+    fs::write(
+        project_3_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-3",
+            "version": "1.0.0",
+            "dependencies": {
+                "project-1": "workspace:*",
+                "project-2": "workspace:*"
+            },
+            "dependenciesMeta": {
+                "project-2": {
+                    "injected": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-3 manifest");
+
+    pacquet.with_args(["-C", workspace.to_str().unwrap(), "install", "-r"]).assert().success();
+
+    let injected_dep = project_3_dir.join("node_modules/project-2");
+    assert!(injected_dep.exists());
+    assert!(injected_dep.join("node_modules/project-1").exists());
+    assert!(is_symlink_or_junction(&injected_dep.join("node_modules/project-1")).unwrap());
+
+    let lockfile_content =
+        fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read workspace lockfile");
+    assert!(
+        lockfile_content
+            .contains("project-2@file:packages/project-2(project-1@packages/project-1):")
+    );
+    assert!(lockfile_content.contains("project-1: link:packages/project-1"));
+
+    drop(root); // cleanup
+}
+
+#[test]
 fn workspace_injected_dependency_should_only_dedupe_matching_transitive_peer_context() {
     let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
     let store_dir = root.path().join("pacquet-store");
@@ -3022,6 +3160,93 @@ fn reinstall_should_refresh_file_protocol_dependency_contents() {
         "module.exports = 'v2';\n"
     );
 
+    drop(root); // cleanup
+}
+
+#[test]
+fn reinstall_should_refresh_file_protocol_dependency_snapshot_and_lockfile() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let app_dir = workspace.join("app");
+    let lib_dir = workspace.join("src");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::create_dir_all(&lib_dir).expect("create src dir");
+    fs::write(app_dir.join(".npmrc"), format!("registry={}\n", mock_instance.url()))
+        .expect("write app npmrc");
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write file package manifest");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@repo/lib": "file:../src"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write app package manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
+
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.0.0",
+            "dependencies": {
+                "is-positive": "1.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("update source package with dependency");
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install"])
+        .assert()
+        .success();
+
+    assert!(app_dir.join("node_modules/.pnpm/is-positive@1.0.0").exists());
+    let mut lockfile_content =
+        fs::read_to_string(app_dir.join("pnpm-lock.yaml")).expect("read lockfile after add");
+    assert!(lockfile_content.contains("'@repo/lib@file:../src':"));
+    assert!(lockfile_content.contains("is-positive: 1.0.0"));
+
+    fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "1.0.0",
+            "dependencies": {
+                "is-positive": "2.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("update source dependency version");
+
+    pacquet_command(&workspace)
+        .with_args(["-C", app_dir.to_str().unwrap(), "install"])
+        .assert()
+        .success();
+
+    assert!(app_dir.join("node_modules/.pnpm/is-positive@2.0.0").exists());
+    lockfile_content =
+        fs::read_to_string(app_dir.join("pnpm-lock.yaml")).expect("read lockfile after update");
+    assert!(lockfile_content.contains("is-positive: 2.0.0"));
+
+    drop(mock_instance);
     drop(root); // cleanup
 }
 

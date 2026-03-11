@@ -10,30 +10,40 @@ use std::{thread, time::Duration};
 pub fn create_symlink_layout(
     dependencies: &HashMap<PkgName, PackageSnapshotDependency>,
     virtual_root: &Path,
+    lockfile_dir: &Path,
     virtual_node_modules_dir: &Path,
     symlink: bool,
 ) {
     for (alias, spec) in dependencies {
-        let (virtual_store_name, target_package_name) = match spec {
+        let symlink_target = match spec {
             PackageSnapshotDependency::PkgVerPeer(ver_peer) => {
                 let package_specifier = PkgNameVerPeer::new(alias.clone(), ver_peer.clone()); // TODO: remove copying here
-                (package_specifier.to_virtual_store_name(), alias.to_string())
+                virtual_root
+                    .join(package_specifier.to_virtual_store_name())
+                    .join("node_modules")
+                    .join(alias.to_string())
             }
-            PackageSnapshotDependency::PkgNameVerPeer(package_specifier) => {
-                (package_specifier.to_virtual_store_name(), package_specifier.name.to_string())
-            }
-            PackageSnapshotDependency::DependencyPath(dependency_path) => (
-                dependency_path.to_virtual_store_name(),
-                dependency_path.package_name().to_string(),
-            ),
+            PackageSnapshotDependency::PkgNameVerPeer(package_specifier) => virtual_root
+                .join(package_specifier.to_virtual_store_name())
+                .join("node_modules")
+                .join(package_specifier.name.to_string()),
+            PackageSnapshotDependency::DependencyPath(dependency_path) => virtual_root
+                .join(dependency_path.to_virtual_store_name())
+                .join("node_modules")
+                .join(dependency_path.package_name().to_string()),
             PackageSnapshotDependency::Link(link) => {
-                let virtual_store_name = local_file_virtual_store_name(alias, link);
-                (virtual_store_name, alias.to_string())
+                if link.starts_with("file:") {
+                    virtual_root
+                        .join(local_file_virtual_store_name(alias, link))
+                        .join("node_modules")
+                        .join(alias.to_string())
+                } else {
+                    let relative = link.strip_prefix("link:").unwrap_or(link);
+                    lockfile_dir.join(relative)
+                }
             }
         };
         let alias_str = alias.to_string();
-        let symlink_target =
-            virtual_root.join(virtual_store_name).join("node_modules").join(target_package_name);
         let symlink_path = virtual_node_modules_dir.join(alias_str);
         if path_points_to_target(&symlink_target, &symlink_path) {
             continue;

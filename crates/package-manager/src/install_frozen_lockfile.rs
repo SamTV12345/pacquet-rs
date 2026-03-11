@@ -242,10 +242,14 @@ fn importer_dependencies_ready(
         for (alias, dependency_spec) in dependencies {
             let dependency_path =
                 dependency_path_from_snapshot_dependency(&alias, &dependency_spec);
-            if resolve_package_snapshot_deduped(packages, &dependency_path).is_none() {
+            if dependency_path.as_ref().is_some_and(|dependency_path| {
+                resolve_package_snapshot_deduped(packages, dependency_path).is_none()
+            }) {
                 return false;
             }
-            queue.push(dependency_path);
+            if let Some(dependency_path) = dependency_path {
+                queue.push(dependency_path);
+            }
         }
     }
 
@@ -262,20 +266,21 @@ fn dependency_links_ready(
 fn dependency_path_from_snapshot_dependency(
     alias: &PkgName,
     dependency_spec: &PackageSnapshotDependency,
-) -> DependencyPath {
+) -> Option<DependencyPath> {
     match dependency_spec {
-        PackageSnapshotDependency::PkgVerPeer(ver_peer) => {
-            DependencyPath::registry(None, PkgNameVerPeer::new(alias.clone(), ver_peer.clone()))
-        }
+        PackageSnapshotDependency::PkgVerPeer(ver_peer) => Some(DependencyPath::registry(
+            None,
+            PkgNameVerPeer::new(alias.clone(), ver_peer.clone()),
+        )),
         PackageSnapshotDependency::PkgNameVerPeer(package_specifier) => {
-            DependencyPath::registry(None, package_specifier.clone())
+            Some(DependencyPath::registry(None, package_specifier.clone()))
         }
-        PackageSnapshotDependency::DependencyPath(path) => path.clone(),
+        PackageSnapshotDependency::DependencyPath(path) => Some(path.clone()),
         PackageSnapshotDependency::Link(link) => {
             if link.starts_with("file:") {
-                DependencyPath::local_file(alias.clone(), link.clone())
+                Some(DependencyPath::local_file(alias.clone(), link.clone()))
             } else {
-                panic!("link: dependencies are not supported in package snapshots")
+                None
             }
         }
     }

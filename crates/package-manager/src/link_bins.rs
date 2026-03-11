@@ -25,6 +25,9 @@ pub fn link_bins_for_manifest(
         }
 
         let package_manifest_path = package_dir.join("package.json");
+        if !package_manifest_path.is_file() {
+            continue;
+        }
         let package_manifest = PackageManifest::from_path(package_manifest_path.clone())
             .wrap_err_with(|| format!("load {}", package_manifest_path.display()))?;
 

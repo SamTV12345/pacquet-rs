@@ -504,6 +504,15 @@ where
             .and_then(|manifest| manifest.value().get("name"))
             .and_then(|value| value.as_str())
             .unwrap_or(dependency_name);
+        let local_dependency_entries = local_manifest
+            .as_ref()
+            .map(|manifest| {
+                manifest
+                    .dependencies([DependencyGroup::Prod, DependencyGroup::Optional])
+                    .map(|(name, version_range)| (name.to_string(), version_range.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let peer_dependencies = local_manifest
             .as_ref()
             .and_then(|manifest| json_string_map(manifest.value().get("peerDependencies")));
@@ -551,9 +560,7 @@ where
         }
 
         if let Some(local_manifest) = &local_manifest {
-            for (child_name, child_version_range) in
-                local_manifest.dependencies([DependencyGroup::Prod, DependencyGroup::Optional])
-            {
+            for (child_name, child_version_range) in &local_dependency_entries {
                 if let Some((resolved_local, local_child_path, should_symlink)) =
                     resolve_local_dependency(local_manifest.path(), child_version_range)
                 {
@@ -721,6 +728,17 @@ where
         let available_specs = read_dependency_specs(current_manifest_path);
         let requested_range =
             available_specs.get(name).map(String::as_str).unwrap_or(version_range);
+
+        if available_specs.contains_key(name)
+            && let Some(workspace_package) =
+                resolve_workspace_dependency(workspace_packages, name, requested_range)
+        {
+            let relative = to_relative_path(lockfile_dir, &workspace_package.root_dir);
+            return Some(ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
+                "link:{}",
+                relative.replace('\\', "/")
+            ))));
+        }
 
         if let Some((_, local_dep_path, should_symlink)) =
             resolve_local_dependency(current_manifest_path, requested_range)
@@ -1511,7 +1529,9 @@ fn append_peer_suffix_to_local_reference(
             ResolvedDependencyVersion::PkgNameVerPeer(name_ver_peer) => {
                 format!("{}@{}", name_ver_peer.name, name_ver_peer.suffix)
             }
-            ResolvedDependencyVersion::Link(link) => format!("{peer_name}@{link}"),
+            ResolvedDependencyVersion::Link(link) => {
+                format!("{peer_name}@{}", link.strip_prefix("link:").unwrap_or(link))
+            }
         };
         suffixed.push('(');
         suffixed.push_str(&peer_repr);
@@ -2102,6 +2122,19 @@ mod tests {
         assert_eq!(
             append_peer_suffix_to_local_reference("file:../src", &resolved_peers),
             "file:../src(is-even@1.0.0)(is-number@7.0.0)"
+        );
+    }
+
+    #[test]
+    fn append_peer_suffix_to_local_reference_strips_link_prefix_from_workspace_peer() {
+        let resolved_peers = BTreeMap::from([(
+            "project-1".to_string(),
+            ResolvedDependencyVersion::Link("link:packages/project-1".to_string()),
+        )]);
+
+        assert_eq!(
+            append_peer_suffix_to_local_reference("file:packages/project-2", &resolved_peers),
+            "file:packages/project-2(project-1@packages/project-1)"
         );
     }
 

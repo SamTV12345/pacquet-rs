@@ -118,7 +118,15 @@ where
                         .is_ok()
                 });
 
-                if lockfile_is_reusable && config.prefer_frozen_lockfile {
+                let has_local_directory_dependency_specs = manifest_has_local_directory_dependency(
+                    manifest,
+                    dependency_groups.iter().copied(),
+                );
+
+                if lockfile_is_reusable
+                    && config.prefer_frozen_lockfile
+                    && !has_local_directory_dependency_specs
+                {
                     if !lockfile_only {
                         InstallFrozenLockfile {
                             http_client,
@@ -425,6 +433,17 @@ fn peer_version_satisfies(version: &str, range: &str) -> bool {
     version.satisfies(&range)
 }
 
+fn manifest_has_local_directory_dependency(
+    manifest: &PackageManifest,
+    dependency_groups: impl IntoIterator<Item = DependencyGroup>,
+) -> bool {
+    manifest.dependencies(dependency_groups).any(|(_, specifier)| {
+        specifier
+            .strip_prefix("file:")
+            .is_some_and(|target| !(target.ends_with(".tgz") || target.ends_with(".tar.gz")))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,6 +451,7 @@ mod tests {
     use pacquet_package_manifest::{DependencyGroup, PackageManifest};
     use pacquet_registry_mock::AutoMockInstance;
     use pacquet_testing_utils::fs::{get_all_folders, is_symlink_or_junction};
+    use std::{fs, path::Path};
     use tempfile::tempdir;
 
     #[test]
@@ -697,5 +717,49 @@ mod tests {
         let error = validate_strict_peer_dependencies(&config, &workspace_root)
             .expect_err("peer from workspace root should not be used when disabled");
         assert!(error.to_string().contains("peer-a"));
+    }
+
+    #[test]
+    fn manifest_has_local_directory_dependency_ignores_registry_and_tarball_specs() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = load_manifest(
+            dir.path(),
+            serde_json::json!({
+                "name": "app",
+                "version": "1.0.0",
+                "dependencies": {
+                    "registry-dep": "1.0.0",
+                    "tarball-dep": "file:../pkg.tgz",
+                    "local-dir-dep": "file:../pkg"
+                }
+            }),
+        );
+
+        assert!(manifest_has_local_directory_dependency(&manifest, [DependencyGroup::Prod]));
+    }
+
+    #[test]
+    fn manifest_has_local_directory_dependency_returns_false_without_file_directory_specs() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = load_manifest(
+            dir.path(),
+            serde_json::json!({
+                "name": "app",
+                "version": "1.0.0",
+                "dependencies": {
+                    "registry-dep": "1.0.0",
+                    "linked-dep": "link:../pkg",
+                    "tarball-dep": "file:../pkg.tgz"
+                }
+            }),
+        );
+
+        assert!(!manifest_has_local_directory_dependency(&manifest, [DependencyGroup::Prod]));
+    }
+
+    fn load_manifest(dir: &Path, value: serde_json::Value) -> PackageManifest {
+        let manifest_path = dir.join("package.json");
+        fs::write(&manifest_path, value.to_string()).expect("write package.json");
+        PackageManifest::from_path(manifest_path).expect("load manifest")
     }
 }

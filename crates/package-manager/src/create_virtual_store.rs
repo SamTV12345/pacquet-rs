@@ -101,6 +101,7 @@ impl<'a> CreateVirtualStore<'a> {
             create_symlink_layout(
                 &dependencies,
                 &config.virtual_store_dir,
+                lockfile_dir,
                 &virtual_node_modules_dir,
                 config.symlink,
             );

@@ -739,6 +739,43 @@ fn should_add_local_absolute_path_dependency() {
 }
 
 #[test]
+fn should_add_file_protocol_directory_without_package_json() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let pkg_dir = app_dir.join("pkg");
+    std::fs::create_dir_all(&pkg_dir).expect("create pkg directory");
+    std::fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+    std::fs::write(pkg_dir.join("index.js"), "module.exports = 'pkg';\n").expect("write pkg file");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "add", "file:./pkg"]).assert().success();
+
+    let app_manifest = PackageManifest::from_path(app_dir.join("package.json")).unwrap();
+    let dep = app_manifest
+        .dependencies([DependencyGroup::Prod])
+        .find(|(name, _)| *name == "pkg")
+        .map(|(_, spec)| spec.to_string())
+        .expect("local dependency spec");
+    #[cfg(windows)]
+    assert_eq!(dep, r"file:.\pkg");
+    #[cfg(not(windows))]
+    assert_eq!(dep, "file:./pkg");
+
+    assert!(app_dir.join("node_modules/pkg").exists());
+    assert!(app_dir.join("pnpm-lock.yaml").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
 fn should_add_npm_alias_dependency() {
     let (root, dir, anchor) =
         exec_pacquet_in_temp_cwd(["add", "hello-alias@npm:@pnpm.e2e/hello-world-js-bin@1.0.0"]);

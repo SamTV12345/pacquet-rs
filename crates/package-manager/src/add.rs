@@ -315,33 +315,48 @@ fn resolve_local_path_spec(
     project_dir: &Path,
     package: &str,
 ) -> Result<Option<(String, String)>, AddError> {
-    let path = Path::new(package);
+    let (protocol, path_str) = if let Some(path) = package.strip_prefix("file:") {
+        ("file:", path)
+    } else if let Some(path) = package.strip_prefix("link:") {
+        ("link:", path)
+    } else {
+        ("link:", package)
+    };
+
+    let path = Path::new(path_str);
     let candidate = if path.is_absolute() { path.to_path_buf() } else { project_dir.join(path) };
     if !candidate.exists() {
         return Ok(None);
     }
 
     let manifest_path = candidate.join("package.json");
-    if !manifest_path.is_file() {
-        return Err(AddError::LocalDependencyPathNotFound { path: package.to_string() });
-    }
-    let manifest = PackageManifest::from_path(manifest_path.clone()).map_err(|error| {
-        AddError::LoadLocalDependencyManifest(manifest_path.display().to_string(), error)
-    })?;
-    let Some(name) = manifest.value().get("name").and_then(|value| value.as_str()) else {
-        return Err(AddError::LocalDependencyManifestNameMissing {
-            path: manifest_path.display().to_string(),
-        });
+    let name = if manifest_path.is_file() {
+        let manifest = PackageManifest::from_path(manifest_path.clone()).map_err(|error| {
+            AddError::LoadLocalDependencyManifest(manifest_path.display().to_string(), error)
+        })?;
+        let Some(name) = manifest.value().get("name").and_then(|value| value.as_str()) else {
+            return Err(AddError::LocalDependencyManifestNameMissing {
+                path: manifest_path.display().to_string(),
+            });
+        };
+        name.to_string()
+    } else {
+        candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| AddError::LocalDependencyPathNotFound { path: package.to_string() })?
+            .to_string()
     };
 
     let spec = if path.is_absolute() {
-        format!("link:{}", candidate.to_string_lossy().replace('\\', "/"))
+        format!("{protocol}{}", candidate.to_string_lossy().replace('\\', "/"))
     } else {
         let separator = std::path::MAIN_SEPARATOR.to_string();
-        let normalized = package.replace(['/', '\\'], &separator);
-        format!("link:{normalized}")
+        let normalized = path_str.replace(['/', '\\'], &separator);
+        format!("{protocol}{normalized}")
     };
-    Ok(Some((name.to_string(), spec)))
+    Ok(Some((name, spec)))
 }
 
 fn split_package_spec(package: &str) -> (&str, Option<&str>) {
@@ -440,5 +455,23 @@ mod tests {
         assert_eq!(result.1, r"link:..\lib");
         #[cfg(not(windows))]
         assert_eq!(result.1, "link:../lib");
+    }
+
+    #[test]
+    fn resolve_local_file_protocol_path_without_manifest_uses_directory_name() {
+        let root = tempdir().unwrap();
+        let app = root.path().join("app");
+        let pkg = app.join("pkg");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("index.js"), "module.exports = 'pkg';\n").unwrap();
+
+        let result = resolve_local_path_spec(&app, "file:./pkg")
+            .expect("local path should resolve")
+            .expect("local path should be detected");
+        assert_eq!(result.0, "pkg");
+        #[cfg(windows)]
+        assert_eq!(result.1, r"file:.\pkg");
+        #[cfg(not(windows))]
+        assert_eq!(result.1, "file:./pkg");
     }
 }

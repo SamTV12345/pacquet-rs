@@ -30,7 +30,7 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 | ✅    | prefer_frozen_lockfile       |       |
 | ✅    | lockfile_include_tarball_url |       |
 | ✅    | exclude_links_from_lockfile  | excludes external `link:` specs from importer snapshot while keeping `workspace:` links |
-| ~    | inject_workspace_packages    | workspace protocol dependencies are materialized instead of symlinked during install; `dependenciesMeta.<dep>.injected=true` is honored for workspace deps, including nested workspace children and transitive peer-context snapshots |
+| ~    | inject_workspace_packages    | workspace protocol dependencies are materialized instead of symlinked during install; `dependenciesMeta.<dep>.injected=true` is honored for workspace deps, including nested workspace children, transitive peer-context snapshots, and peer workspace deps that stay linked inside injected snapshots when pnpm does |
 | ~    | dedupe_injected_deps         | injected workspace deps can be rewritten back to `link:` when an already-installed workspace importer provides the same direct dependency set; distinct transitive peer-context local snapshot variants are preserved and only matching variants are deduped |
 
 # Registry & Authentication Settings
