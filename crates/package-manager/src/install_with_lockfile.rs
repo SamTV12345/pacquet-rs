@@ -665,41 +665,36 @@ where
             Self::parse_pkg_name(package_name),
             normalized_ref_with_peers.clone(),
         );
-        let virtual_store_name = dependency_path.to_virtual_store_name();
-
-        if resolved_packages.insert(virtual_store_name) {
-            package_snapshots.insert(
-                dependency_path,
-                PackageSnapshot {
-                    resolution: LockfileResolution::Directory(DirectoryResolution {
-                        directory: normalized_ref
-                            .strip_prefix("file:")
-                            .unwrap_or(normalized_ref)
-                            .to_string(),
-                    }),
-                    id: None,
-                    name: None,
-                    version: None,
-                    engines: None,
-                    cpu: None,
-                    os: None,
-                    libc: None,
-                    deprecated: None,
-                    has_bin: None,
-                    prepare: None,
-                    requires_build: None,
-                    bundled_dependencies: None,
-                    peer_dependencies,
-                    peer_dependencies_meta: None,
-                    dependencies: (!snapshot_dependencies.is_empty())
-                        .then_some(snapshot_dependencies),
-                    optional_dependencies: None,
-                    transitive_peer_dependencies: None,
-                    dev: None,
-                    optional: None,
-                },
-            );
-        }
+        package_snapshots.insert(
+            dependency_path,
+            PackageSnapshot {
+                resolution: LockfileResolution::Directory(DirectoryResolution {
+                    directory: normalized_ref
+                        .strip_prefix("file:")
+                        .unwrap_or(normalized_ref)
+                        .to_string(),
+                }),
+                id: None,
+                name: None,
+                version: None,
+                engines: None,
+                cpu: None,
+                os: None,
+                libc: None,
+                deprecated: None,
+                has_bin: None,
+                prepare: None,
+                requires_build: None,
+                bundled_dependencies: None,
+                peer_dependencies,
+                peer_dependencies_meta: None,
+                dependencies: (!snapshot_dependencies.is_empty()).then_some(snapshot_dependencies),
+                optional_dependencies: None,
+                transitive_peer_dependencies: None,
+                dev: None,
+                optional: None,
+            },
+        );
 
         ResolvedPackage {
             version: ResolvedDependencyVersion::Link(normalized_ref_with_peers.to_string()),
@@ -1044,6 +1039,7 @@ fn dedupe_injected_dependency_map(
         };
 
         if !local_directory_snapshot_is_subset_of_project(
+            ctx,
             &candidate_snapshot,
             target_project_snapshot,
         ) {
@@ -1090,6 +1086,7 @@ fn project_snapshot_by_importer<'a>(
 }
 
 fn local_directory_snapshot_is_subset_of_project(
+    ctx: &DedupeInjectedContext<'_>,
     snapshot: &PackageSnapshot,
     project_snapshot: &ProjectSnapshot,
 ) -> bool {
@@ -1098,10 +1095,55 @@ fn local_directory_snapshot_is_subset_of_project(
     };
     let project_dependencies = project_snapshot_dependency_map(project_snapshot);
     snapshot_dependencies.iter().all(|(alias, dependency)| {
-        project_dependencies
-            .get(alias)
-            .is_some_and(|project_dependency| project_dependency == dependency)
+        project_dependencies.get(alias).is_some_and(|project_dependency| {
+            project_dependency == dependency
+                || local_snapshot_dependency_matches_project_dependency(
+                    ctx,
+                    alias,
+                    dependency,
+                    project_dependency,
+                )
+        })
     })
+}
+
+fn local_snapshot_dependency_matches_project_dependency(
+    ctx: &DedupeInjectedContext<'_>,
+    alias: &PkgName,
+    dependency: &PackageSnapshotDependency,
+    project_dependency: &PackageSnapshotDependency,
+) -> bool {
+    let (
+        PackageSnapshotDependency::Link(candidate_link),
+        PackageSnapshotDependency::Link(project_link),
+    ) = (dependency, project_dependency)
+    else {
+        return false;
+    };
+    if !candidate_link.starts_with("file:") || !project_link.starts_with("link:") {
+        return false;
+    }
+
+    let alias_name = alias.to_string();
+    let Some(workspace_package) = ctx.workspace_packages.get(&alias_name) else {
+        return false;
+    };
+    let Some(candidate_snapshot) = resolve_local_directory_snapshot_by_link(
+        ctx.package_snapshots,
+        candidate_link,
+        ctx.lockfile_dir,
+        &workspace_package.root_dir,
+    ) else {
+        return false;
+    };
+    let importer_id = to_lockfile_importer_id(ctx.lockfile_dir, &workspace_package.root_dir);
+    let Some(target_project_snapshot) =
+        project_snapshot_by_importer(ctx.existing_lockfile, &importer_id)
+    else {
+        return false;
+    };
+
+    local_directory_snapshot_is_subset_of_project(ctx, &candidate_snapshot, target_project_snapshot)
 }
 
 fn project_snapshot_dependency_map(
