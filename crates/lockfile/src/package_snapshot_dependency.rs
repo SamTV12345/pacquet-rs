@@ -1,14 +1,23 @@
 use crate::{DependencyPath, PkgNameVerPeer, PkgVerPeer};
 use derive_more::{Display, From, TryInto};
-use serde::{Deserialize, Deserializer, Serialize, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// Value of [`PackageSnapshot::dependencies`](crate::PackageSnapshot::dependencies).
-#[derive(Debug, Display, Clone, PartialEq, Eq, From, TryInto, Serialize)]
+#[derive(Debug, Display, Clone, PartialEq, Eq, From, TryInto)]
 pub enum PackageSnapshotDependency {
     PkgVerPeer(PkgVerPeer),
     DependencyPath(DependencyPath),
     PkgNameVerPeer(PkgNameVerPeer),
     Link(String),
+}
+
+impl Serialize for PackageSnapshotDependency {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
 }
 
 impl<'de> Deserialize<'de> for PackageSnapshotDependency {
@@ -127,5 +136,12 @@ mod tests {
         case("/@docusaurus/react-loadable@5.5.2");
         case("registry.npmjs.com/@docusaurus/react-loadable@5.5.2(react@17.0.2)");
         case("registry.npmjs.com/@docusaurus/react-loadable@5.5.2");
+    }
+
+    #[test]
+    fn serialize_link_without_yaml_tag() {
+        let value = PackageSnapshotDependency::Link("link:packages/project-1".to_string());
+        let serialized = serde_yaml::to_string(&value).expect("serialize yaml");
+        assert_eq!(serialized.trim(), "link:packages/project-1");
     }
 }

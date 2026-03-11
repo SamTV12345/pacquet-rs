@@ -2,6 +2,7 @@ use crate::{
     SymlinkPackageError, import_local_package_dir, link_package, should_materialize_root_links,
     symlink_package,
 };
+use pacquet_fs::is_symlink_or_junction;
 use pacquet_lockfile::{
     DependencyPath, PackageSnapshot, PkgName, PkgNameVerPeer, ProjectSnapshot,
     ResolvedDependencyVersion,
@@ -218,6 +219,10 @@ fn materialize_virtual_store_package(
                     }
                     let destination_dependency_dir =
                         destination_package_dir.join("node_modules").join(scoped_target_name);
+                    if is_symlink_or_junction(&scoped_source_dir).unwrap_or(false) {
+                        symlink_package(&scoped_source_dir, &destination_dependency_dir)?;
+                        continue;
+                    }
                     inner(import_method, &scoped_source_dir, &destination_dependency_dir, seen)?;
                 }
                 continue;
@@ -229,6 +234,10 @@ fn materialize_virtual_store_package(
             }
             let destination_dependency_dir =
                 destination_package_dir.join("node_modules").join(&file_name);
+            if is_symlink_or_junction(&source_dependency_dir).unwrap_or(false) {
+                symlink_package(&source_dependency_dir, &destination_dependency_dir)?;
+                continue;
+            }
             inner(import_method, &source_dependency_dir, &destination_dependency_dir, seen)?;
         }
 
@@ -267,4 +276,45 @@ fn project_snapshot_dependency_meta_injected(
         .and_then(|value| value.get("injected"))
         .and_then(YamlValue::as_bool)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pacquet_fs::symlink_dir;
+    use tempfile::tempdir;
+
+    #[test]
+    fn materialize_virtual_store_package_preserves_workspace_links() {
+        let dir = tempdir().expect("tempdir");
+        let workspace_dep = dir.path().join("packages/project-1");
+        let source_package_dir = dir.path().join(".pnpm/project-2@file+pkg/node_modules/project-2");
+        let destination_package_dir = dir.path().join("project/node_modules/project-2");
+
+        fs::create_dir_all(&workspace_dep).expect("create workspace dependency");
+        fs::create_dir_all(source_package_dir.join("node_modules")).expect("create source package");
+        fs::write(
+            workspace_dep.join("package.json"),
+            "{\"name\":\"project-1\",\"version\":\"1.0.0\"}",
+        )
+        .expect("write workspace dep manifest");
+        fs::write(
+            source_package_dir.join("package.json"),
+            "{\"name\":\"project-2\",\"version\":\"1.0.0\"}",
+        )
+        .expect("write source package manifest");
+        symlink_dir(&workspace_dep, &source_package_dir.join("node_modules/project-1"))
+            .expect("create workspace link");
+
+        materialize_virtual_store_package(
+            PackageImportMethod::Copy,
+            &source_package_dir,
+            &destination_package_dir,
+        )
+        .expect("materialize package");
+
+        let destination_dep = destination_package_dir.join("node_modules/project-1");
+        assert!(destination_dep.exists());
+        assert!(is_symlink_or_junction(&destination_dep).expect("check destination link"));
+    }
 }
