@@ -321,6 +321,9 @@ mod tests {
     fn string_bin_uses_unscoped_package_name() {
         let dir = tempdir().expect("tempdir");
         let manifest_path = dir.path().join("package.json");
+        fs::create_dir_all(dir.path().join("bin")).expect("create bin dir");
+        fs::write(dir.path().join("bin/hello.js"), "console.log('hello')\n")
+            .expect("write hello.js");
         fs::write(
             &manifest_path,
             serde_json::json!({
@@ -342,6 +345,11 @@ mod tests {
     fn object_bin_preserves_all_entries() {
         let dir = tempdir().expect("tempdir");
         let manifest_path = dir.path().join("package.json");
+        fs::create_dir_all(dir.path().join("bin")).expect("create bin dir");
+        fs::write(dir.path().join("bin/hello.js"), "console.log('hello')\n")
+            .expect("write hello.js");
+        fs::write(dir.path().join("bin/alt.js"), "console.log('hello-alt')\n")
+            .expect("write alt.js");
         fs::write(
             &manifest_path,
             serde_json::json!({
