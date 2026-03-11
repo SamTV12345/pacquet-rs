@@ -444,6 +444,7 @@ mod tests {
         fs::write(source.join("index.js"), "module.exports = 'linked';\n")
             .expect("write source file");
         fs::create_dir_all(real_parent.parent().expect("shared parent")).expect("create parent");
+        fs::create_dir_all(&real_parent).expect("create real node_modules dir");
         fs::create_dir_all(symlinked_parent.parent().expect("app parent")).expect("create app dir");
         symlink_dir(&real_parent, &symlinked_parent).expect("symlink node_modules parent");
 
