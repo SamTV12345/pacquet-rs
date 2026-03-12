@@ -40,7 +40,7 @@ fn why_should_fail_without_package_name() {
 }
 
 #[test]
-fn why_json_should_show_reverse_dependency_chain() {
+fn why_json_should_match_pnpm_dependency_tree_shape() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
     let AddMockedRegistry { mock_instance, .. } = npmrc_info;
@@ -66,34 +66,31 @@ fn why_json_should_show_reverse_dependency_chain() {
         .assert()
         .success();
     let value = parse_json_output(&assert.get_output().stdout);
-    let first_result =
-        value.as_array().and_then(|items| items.first()).expect("at least one match");
+    let first_result = value.as_array().and_then(|items| items.first()).expect("one project root");
     assert_eq!(
         first_result.get("name").and_then(Value::as_str),
-        Some("@pnpm.e2e/hello-world-js-bin"),
+        Some("workspace"),
     );
     let first_dependent = first_result
-        .get("dependents")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .expect("package should have dependents");
+        .get("dependencies")
+        .and_then(|deps| deps.get("@pnpm.e2e/hello-world-js-bin-parent"))
+        .expect("package should keep matching dependency path");
     assert_eq!(
-        first_dependent.get("name").and_then(Value::as_str),
+        first_dependent.get("from").and_then(Value::as_str),
         Some("@pnpm.e2e/hello-world-js-bin-parent"),
     );
-    let importer_leaf = first_dependent
-        .get("dependents")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .expect("transitive importer leaf should be present");
-    assert_eq!(importer_leaf.get("depField").and_then(Value::as_str), Some("dependencies"),);
+    let nested_match = first_dependent
+        .get("dependencies")
+        .and_then(|deps| deps.get("@pnpm.e2e/hello-world-js-bin"))
+        .expect("matched transitive dependency should be nested under the direct path");
+    assert_eq!(nested_match.get("from").and_then(Value::as_str), Some("@pnpm.e2e/hello-world-js-bin"),);
 
     drop((root, mock_instance));
 }
 
 #[test]
 fn why_should_match_npm_alias_by_alias_name() {
-    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+    let CommandTempCwd { pacquet, root: _root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
     let AddMockedRegistry { mock_instance, .. } = npmrc_info;
     let pacquet_bin = pacquet.get_program().to_os_string();
@@ -118,10 +115,15 @@ fn why_should_match_npm_alias_by_alias_name() {
         .assert()
         .success();
     let value = parse_json_output(&assert.get_output().stdout);
-    let contains_alias_target = value.as_array().into_iter().flatten().any(|item| {
-        item.get("name").and_then(Value::as_str) == Some("@pnpm.e2e/hello-world-js-bin-parent")
-    });
-    assert!(contains_alias_target);
+    let root = value.as_array().and_then(|items| items.first()).expect("one project root");
+    let alias = root
+        .get("dependencies")
+        .and_then(|deps| deps.get("foo"))
+        .expect("alias path should be present");
+    assert_eq!(
+        alias.get("from").and_then(Value::as_str),
+        Some("@pnpm.e2e/hello-world-js-bin-parent"),
+    );
 
     drop((root, mock_instance));
 }

@@ -21,6 +21,13 @@ fn value_to_map(value: Option<&serde_json::Value>) -> Option<HashMap<String, Str
     (!map.is_empty()).then_some(map)
 }
 
+fn value_to_string_vec(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    let values = value?.as_array()?;
+    let values =
+        values.iter().filter_map(|value| value.as_str().map(ToOwned::to_owned)).collect::<Vec<_>>();
+    (!values.is_empty()).then_some(values)
+}
+
 pub(crate) async fn resolve_package_version_from_tarball_spec(
     config: &Npmrc,
     http_client: &ThrottledClient,
@@ -98,6 +105,13 @@ pub(crate) async fn resolve_package_version_from_tarball_spec(
         dev_dependencies: value_to_map(manifest.get("devDependencies")),
         peer_dependencies: value_to_map(manifest.get("peerDependencies")),
         engines: value_to_map(manifest.get("engines")),
+        cpu: value_to_string_vec(manifest.get("cpu")),
+        os: value_to_string_vec(manifest.get("os")),
+        libc: value_to_string_vec(manifest.get("libc")),
+        deprecated: manifest
+            .get("deprecated")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
         bin: manifest.get("bin").cloned(),
     })
 }

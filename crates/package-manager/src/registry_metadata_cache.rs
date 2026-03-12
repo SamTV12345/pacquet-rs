@@ -82,14 +82,63 @@ pub(crate) async fn fetch_package_with_metadata_cache(
         Ok(package) => package,
         Err(error) => {
             if let Some(cached) = cached {
-                tracing::warn!(
-                    target: "pacquet::install",
-                    package = package_name,
-                    "Failed to fetch package metadata from registry, using cached metadata: {error}"
-                );
+                crate::progress_reporter::warn(&format!(
+                    "Failed to fetch package metadata from registry for {package_name}, using cached metadata: {error}"
+                ));
                 return cached;
             }
             panic!("fetch package metadata from registry: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::Server;
+    use pacquet_network::ThrottledClient;
+    use pacquet_npmrc::Npmrc;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn falls_back_to_cached_metadata_when_registry_fetch_fails() {
+        let dir = tempdir().expect("tempdir");
+        let mut server = Server::new_async().await;
+        let _mock = server.mock("GET", "/pkg").with_status(500).create_async().await;
+
+        let mut config = Npmrc::new();
+        config.registry = format!("{}/", server.url());
+        config.cache_dir = dir.path().join("cache");
+
+        let cached = serde_json::from_value::<Package>(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "1.0.0" },
+            "versions": {
+                "1.0.0": {
+                    "name": "pkg",
+                    "version": "1.0.0",
+                    "dist": {
+                        "tarball": "https://registry.example/pkg/-/pkg-1.0.0.tgz"
+                    }
+                }
+            }
+        }))
+        .expect("deserialize cached package");
+        let cache_file = metadata_cache_file(&config, "pkg");
+        std::fs::create_dir_all(cache_file.parent().expect("cache dir")).expect("create cache dir");
+        std::fs::write(&cache_file, serde_json::to_string(&cached).expect("serialize cached"))
+            .expect("write cache");
+
+        let package = fetch_package_with_metadata_cache(
+            &config,
+            &ThrottledClient::new_from_cpu_count(),
+            "pkg",
+            false,
+            false,
+        )
+        .await;
+
+        assert_eq!(package.name, "pkg");
+        assert_eq!(package.latest().version.to_string(), "1.0.0");
     }
 }

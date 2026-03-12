@@ -1,5 +1,7 @@
-use crate::link_package;
+use crate::{collect_bin_entries, link_package, write_bin_wrapper};
+use miette::Context;
 use pacquet_npmrc::{NodeLinker, Npmrc};
+use pacquet_package_manifest::PackageManifest;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -141,7 +143,7 @@ fn select_packages_by_patterns(
 }
 
 fn hoist_selected_packages(
-    symlink: bool,
+    config: &Npmrc,
     root_dir: &Path,
     selected: BTreeMap<String, (node_semver::Version, PathBuf)>,
 ) -> miette::Result<()> {
@@ -154,10 +156,37 @@ fn hoist_selected_packages(
         if link_path.exists() {
             continue;
         }
-        link_package(symlink, &target, &link_path)
+        link_package(config.symlink, &target, &link_path)
             .map_err(|error| miette::miette!("create hoisted package symlink: {error}"))?;
     }
 
+    Ok(())
+}
+
+fn link_bins_for_hoisted_packages(config: &Npmrc, root_dir: &Path) -> miette::Result<()> {
+    let Ok(entries) = fs::read_dir(root_dir) else {
+        return Ok(());
+    };
+    let bin_dir = root_dir.join(".bin");
+    for entry in entries.flatten() {
+        let package_dir = entry.path();
+        let file_name = entry.file_name();
+        if file_name.to_string_lossy() == ".bin" {
+            continue;
+        }
+        let package_manifest_path = package_dir.join("package.json");
+        if !package_manifest_path.is_file() {
+            continue;
+        }
+        let package_manifest = PackageManifest::from_path(package_manifest_path.clone())
+            .wrap_err_with(|| format!("load {}", package_manifest_path.display()))?;
+        for (bin_name, relative_target) in collect_bin_entries(&package_manifest) {
+            let target = package_dir.join(relative_target);
+            write_bin_wrapper(config, &bin_dir, &bin_name, &target).wrap_err_with(|| {
+                format!("link hoisted bin `{bin_name}` from {}", target.display())
+            })?;
+        }
+    }
     Ok(())
 }
 
@@ -172,16 +201,21 @@ pub(crate) fn hoist_virtual_store_packages(config: &Npmrc) -> miette::Result<()>
         .map(Path::to_path_buf)
         .unwrap_or_else(|| config.modules_dir.clone());
 
-    if config.shamefully_hoist {
-        let selected = select_packages_by_patterns(&config.virtual_store_dir, &[], true);
+    if config.hoist || config.shamefully_hoist {
+        let selected = select_packages_by_patterns(
+            &config.virtual_store_dir,
+            &config.hoist_pattern,
+            config.shamefully_hoist,
+        );
         let virtual_hoisted_root = config.virtual_store_dir.join("node_modules");
-        hoist_selected_packages(config.symlink, &virtual_hoisted_root, selected)?;
+        hoist_selected_packages(config, &virtual_hoisted_root, selected)?;
+        link_bins_for_hoisted_packages(config, &virtual_hoisted_root)?;
     }
 
     match config.node_linker {
         NodeLinker::Hoisted => {
             let selected = select_packages_by_patterns(&config.virtual_store_dir, &[], true);
-            hoist_selected_packages(config.symlink, &shared_modules_dir, selected)?;
+            hoist_selected_packages(config, &shared_modules_dir, selected)?;
         }
         NodeLinker::Pnp => {}
         _ if config.hoist || config.shamefully_hoist => {
@@ -191,7 +225,7 @@ pub(crate) fn hoist_virtual_store_packages(config: &Npmrc) -> miette::Result<()>
                 config.shamefully_hoist,
             );
             if !selected.is_empty() {
-                hoist_selected_packages(config.symlink, &config.modules_dir, selected)?;
+                hoist_selected_packages(config, &config.modules_dir, selected)?;
             }
         }
         _ => {}
@@ -330,6 +364,43 @@ mod tests {
         hoist_virtual_store_packages(&config).expect("hoist should succeed");
 
         assert!(!modules_dir.join("dep").exists());
+        assert!(modules_dir.join(".pnpm/node_modules/dep").exists());
+        assert!(
+            is_symlink_or_junction(&modules_dir.join(".pnpm/node_modules/dep")).expect("dep link")
+        );
+    }
+
+    #[test]
+    fn isolated_node_linker_should_create_private_hoist_bin_wrappers() {
+        let dir = tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("project/node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
+        let package_dir = virtual_store_dir.join("dep@1.0.0/node_modules/dep");
+        fs::create_dir_all(package_dir.join("bin")).expect("create virtual store package dir");
+        fs::write(
+            package_dir.join("package.json"),
+            serde_json::json!({
+                "name": "dep",
+                "version": "1.0.0",
+                "bin": {
+                    "dep-cli": "bin/cli.js"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package manifest");
+        fs::write(package_dir.join("bin/cli.js"), "#!/usr/bin/env node\nconsole.log('dep')\n")
+            .expect("write cli.js");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = modules_dir.clone();
+        config.virtual_store_dir = virtual_store_dir;
+        config.node_linker = NodeLinker::Isolated;
+        config.shamefully_hoist = false;
+
+        hoist_virtual_store_packages(&config).expect("hoist should succeed");
+
+        assert!(modules_dir.join(".pnpm/node_modules/.bin/dep-cli").exists());
     }
 
     #[test]

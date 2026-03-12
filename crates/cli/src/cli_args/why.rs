@@ -1,6 +1,7 @@
 use crate::State;
 use clap::Args;
 use pacquet_list::{IncludedDependencies, WhyOptions, WhyReportAs, render_why};
+use std::path::Path;
 
 #[derive(Debug, Args)]
 pub struct WhyArgs {
@@ -86,6 +87,13 @@ impl WhyArgs {
                 lockfile_dir: &state.lockfile_dir,
                 root_importer_id: &state.lockfile_importer_id,
                 modules_dir: &state.config.modules_dir,
+                manifest: &state.manifest,
+                registry: &state.config.registry,
+                project_dir: state
+                    .manifest
+                    .path()
+                    .parent()
+                    .unwrap_or_else(|| Path::new(&state.lockfile_dir)),
                 include,
                 package_queries: &self.package_names,
                 depth: self.depth,

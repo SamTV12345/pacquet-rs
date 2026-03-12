@@ -1,7 +1,8 @@
-use crate::InstallReporter;
 use crate::{
-    Install, ResolvedPackages, WorkspacePackages, is_git_spec, is_tarball_spec, normalize_git_spec,
-    resolve_package_version_from_git_spec, resolve_package_version_from_tarball_spec,
+    Install, InstallReporter, ProgressStats, ResolvedPackages, WorkspacePackages,
+    format_summary_dependency_line, is_git_spec, is_tarball_spec, last_finished_progress_reporter,
+    normalize_git_spec, resolve_package_version_from_git_spec,
+    resolve_package_version_from_tarball_spec,
 };
 use derive_more::{Display, Error};
 use miette::Diagnostic;
@@ -12,6 +13,7 @@ use pacquet_package_manifest::PackageManifestError;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_registry::{Package, PackageTag, PackageVersion, RegistryError};
 use pacquet_tarball::MemCache;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// This subroutine does everything `pacquet add` is supposed to do.
@@ -34,6 +36,8 @@ where
     pub packages: &'a [String],
     pub save_exact: bool, // TODO: add `save-exact` to `.npmrc`, merge configs, and remove this
     pub workspace_only: bool,
+    pub pnpmfile: Option<&'a Path>,
+    pub ignore_pnpmfile: bool,
     pub reporter: InstallReporter,
 }
 
@@ -66,7 +70,8 @@ where
     ListDependencyGroups: Fn() -> DependencyGroupList,
     DependencyGroupList: IntoIterator<Item = DependencyGroup>,
 {
-    pub async fn run(self) -> Result<(), AddError> {
+    pub async fn run(self) -> Result<Vec<String>, AddError> {
+        let start_time = std::time::Instant::now();
         let Add {
             tarball_mem_cache,
             http_client,
@@ -80,26 +85,28 @@ where
             packages,
             save_exact,
             workspace_only,
+            pnpmfile,
+            ignore_pnpmfile,
             reporter,
             resolved_packages,
         } = self;
 
         let mut package_specs = Vec::with_capacity(packages.len());
+        let mut summary_entries = Vec::new();
         let project_dir =
             manifest.path().parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
         for package in packages {
-            package_specs.push(
-                resolve_package_spec(
-                    config,
-                    http_client,
-                    workspace_packages,
-                    &project_dir,
-                    package,
-                    save_exact,
-                    workspace_only,
-                )
-                .await?,
-            );
+            let package_spec = resolve_package_spec(
+                config,
+                http_client,
+                workspace_packages,
+                &project_dir,
+                package,
+                save_exact,
+                workspace_only,
+            )
+            .await?;
+            package_specs.push(package_spec);
         }
 
         for (package_name, version_range) in package_specs {
@@ -107,10 +114,17 @@ where
                 manifest
                     .add_dependency(&package_name, &version_range, dependency_group)
                     .map_err(AddError::AddDependencyToManifest)?;
+                let header = match dependency_group {
+                    DependencyGroup::Prod => "dependencies",
+                    DependencyGroup::Dev => "devDependencies",
+                    DependencyGroup::Optional => "optionalDependencies",
+                    DependencyGroup::Peer => "peerDependencies",
+                };
+                summary_entries.push((header, package_name.clone(), version_range.clone()));
             }
         }
 
-        Install {
+        let skipped = Install {
             tarball_mem_cache,
             http_client,
             config,
@@ -125,8 +139,11 @@ where
             force: false,
             prefer_offline: false,
             offline: false,
+            pnpmfile,
+            ignore_pnpmfile,
+            reporter_prefix: None,
             reporter,
-            print_summary: true,
+            print_summary: false,
             resolved_packages,
         }
         .run()
@@ -134,9 +151,48 @@ where
         .map_err(|error| AddError::InstallDependencies(error.to_string()))?;
 
         manifest.save().map_err(AddError::SaveManifest)?;
+        if reporter != InstallReporter::Silent {
+            print_add_summary(
+                &summary_entries,
+                last_finished_progress_reporter().unwrap_or_default(),
+                start_time.elapsed().as_millis(),
+            );
+        }
 
-        Ok(())
+        Ok(skipped)
     }
+}
+
+fn print_add_summary(
+    entries: &[(&'static str, String, String)],
+    progress: ProgressStats,
+    elapsed_ms: u128,
+) {
+    use std::collections::BTreeMap;
+
+    let mut out = std::io::stdout().lock();
+
+    if progress.added == 0 {
+        let _ = writeln!(out, "Already up to date");
+        let _ = writeln!(out);
+    } else {
+        let _ = writeln!(out, "Packages: +{}", progress.added);
+        let _ = writeln!(out, "{}", "+".repeat(progress.added.min(80)));
+        let _ = writeln!(out);
+    }
+
+    let mut grouped = BTreeMap::<&str, Vec<(&str, &str)>>::new();
+    for (header, name, spec) in entries {
+        grouped.entry(header).or_default().push((name, spec));
+    }
+    for (header, group_entries) in grouped {
+        let _ = writeln!(out, "{header}:");
+        for (name, spec) in group_entries {
+            let _ = writeln!(out, "{}", format_summary_dependency_line(name, spec));
+        }
+        let _ = writeln!(out);
+    }
+    let _ = writeln!(out, "Done in {elapsed_ms}ms using pacquet v{}", env!("CARGO_PKG_VERSION"));
 }
 
 async fn resolve_package_spec(

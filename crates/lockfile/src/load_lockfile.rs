@@ -30,9 +30,8 @@ pub enum LoadLockfileError {
 }
 
 impl Lockfile {
-    /// Load lockfile from a specific directory.
-    pub fn load_from_dir(dir: &Path) -> Result<Option<Self>, LoadLockfileError> {
-        let file_path = dir.join(Lockfile::FILE_NAME);
+    /// Load lockfile from an exact path.
+    pub fn load_from_path(file_path: &Path) -> Result<Option<Self>, LoadLockfileError> {
         let content = match fs::read_to_string(file_path) {
             Ok(content) => content,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -46,9 +45,32 @@ impl Lockfile {
         })
     }
 
+    /// Load lockfile from a specific directory.
+    pub fn load_from_dir(dir: &Path) -> Result<Option<Self>, LoadLockfileError> {
+        Self::load_from_path(&dir.join(Lockfile::FILE_NAME))
+    }
+
     /// Load lockfile from the current directory.
     pub fn load_from_current_dir() -> Result<Option<Self>, LoadLockfileError> {
         let current_dir = env::current_dir().map_err(LoadLockfileError::CurrentDir)?;
         Self::load_from_dir(&current_dir)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Lockfile;
+    use std::fs;
+
+    #[test]
+    fn load_from_path_reads_lockfile_from_exact_location() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("lock.yaml");
+        fs::write(&path, "lockfileVersion: '9.0'\nimporters:\n  .: {}\n").expect("write lockfile");
+
+        let lockfile =
+            Lockfile::load_from_path(&path).expect("load lockfile").expect("lockfile should exist");
+
+        assert_eq!(lockfile.lockfile_version.major, 9);
     }
 }

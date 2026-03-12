@@ -4,11 +4,14 @@ use clap::Args;
 use miette::{Context, IntoDiagnostic};
 use pacquet_lockfile::Lockfile;
 use pacquet_npmrc::Npmrc;
-use pacquet_package_manager::{Install, format_summary_dependency_line_with_prefix};
+use pacquet_package_manager::{
+    Install, current_lockfile_for_installers, format_prefixed_summary_stats,
+    format_summary_dependency_line_with_prefix,
+};
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -62,11 +65,26 @@ pub struct RemoveArgs {
     /// Reporter name.
     #[clap(long)]
     pub reporter: Option<String>,
+    /// Disable pnpm hooks defined in .pnpmfile.cjs.
+    #[clap(long)]
+    pub ignore_pnpmfile: bool,
+    /// Use hooks from the specified pnpmfile instead of <lockfileDir>/.pnpmfile.cjs.
+    #[clap(long)]
+    pub pnpmfile: Option<PathBuf>,
 }
 
 impl RemoveArgs {
     pub async fn run(self, mut state: State) -> miette::Result<()> {
-        let RemoveArgs { packages, dependency_options, filter, recursive, reporter } = self;
+        let start_time = std::time::Instant::now();
+        let RemoveArgs {
+            packages,
+            dependency_options,
+            filter,
+            recursive,
+            reporter,
+            ignore_pnpmfile,
+            pnpmfile,
+        } = self;
         if packages.is_empty() {
             miette::bail!("At least one dependency name should be specified for removal");
         }
@@ -130,6 +148,9 @@ impl RemoveArgs {
                 return Ok(());
             }
 
+            let multiple_targets = targets.len() > 1;
+            let selected_importers = targets.keys().cloned().collect::<HashSet<_>>();
+            let mut skipped_dep_paths = HashSet::<String>::new();
             let mut current_lockfile = lockfile.clone();
             for (importer_id, manifest_path) in targets {
                 let mut target_manifest = PackageManifest::from_path(manifest_path.clone())
@@ -155,7 +176,7 @@ impl RemoveArgs {
                     continue;
                 }
 
-                Install {
+                let skipped = Install {
                     tarball_mem_cache,
                     resolved_packages,
                     http_client,
@@ -175,15 +196,23 @@ impl RemoveArgs {
                     force: false,
                     prefer_offline: false,
                     offline: false,
+                    pnpmfile: pnpmfile.as_deref(),
+                    ignore_pnpmfile,
+                    reporter_prefix: multiple_targets.then_some(importer_id.as_str()),
                     reporter,
                     print_summary: false,
                 }
                 .run()
                 .await
                 .wrap_err("reinstall after removal")?;
+                skipped_dep_paths.extend(skipped);
 
                 if reporter != pacquet_package_manager::InstallReporter::Silent {
-                    print_remove_summary(&removed_entries);
+                    print_remove_summary(
+                        &removed_entries,
+                        start_time.elapsed().as_millis(),
+                        multiple_targets.then_some(importer_id.as_str()),
+                    );
                 }
 
                 current_lockfile = if config.lockfile {
@@ -194,13 +223,27 @@ impl RemoveArgs {
                 };
             }
 
+            if config.lockfile
+                && let Some(lockfile) = current_lockfile.as_ref()
+            {
+                let current_lockfile = current_lockfile_for_installers(
+                    lockfile,
+                    &selected_importers,
+                    &[DependencyGroup::Prod, DependencyGroup::Dev, DependencyGroup::Optional],
+                    &skipped_dep_paths,
+                );
+                current_lockfile
+                    .save_to_path(&config.virtual_store_dir.join("lock.yaml"))
+                    .wrap_err("write node_modules/.pnpm/lock.yaml after remove")?;
+            }
+
             return Ok(());
         }
 
         let removed_entries = collect_removed_entries(manifest, &packages, &groups);
         apply_remove_to_manifest(&packages, &groups, manifest, true, config)?;
 
-        Install {
+        let skipped = Install {
             tarball_mem_cache,
             resolved_packages,
             http_client,
@@ -220,6 +263,9 @@ impl RemoveArgs {
             force: false,
             prefer_offline: false,
             offline: false,
+            pnpmfile: pnpmfile.as_deref(),
+            ignore_pnpmfile,
+            reporter_prefix: None,
             reporter,
             print_summary: false,
         }
@@ -227,8 +273,24 @@ impl RemoveArgs {
         .await
         .wrap_err("reinstall after removal")?;
 
+        if config.lockfile {
+            let current_lockfile =
+                Lockfile::load_from_dir(lockfile_dir).wrap_err("reload lockfile after removal")?;
+            if let Some(lockfile) = current_lockfile.as_ref() {
+                let current_lockfile = current_lockfile_for_installers(
+                    lockfile,
+                    &HashSet::from([lockfile_importer_id.clone()]),
+                    &[DependencyGroup::Prod, DependencyGroup::Dev, DependencyGroup::Optional],
+                    &skipped.into_iter().collect::<HashSet<_>>(),
+                );
+                current_lockfile
+                    .save_to_path(&config.virtual_store_dir.join("lock.yaml"))
+                    .wrap_err("write node_modules/.pnpm/lock.yaml after remove")?;
+            }
+        }
+
         if reporter != pacquet_package_manager::InstallReporter::Silent {
-            print_remove_summary(&removed_entries);
+            print_remove_summary(&removed_entries, start_time.elapsed().as_millis(), None);
         }
         Ok(())
     }
@@ -313,11 +375,21 @@ fn collect_removed_entries(
         .collect()
 }
 
-fn print_remove_summary(entries: &[(&'static str, String, String)]) {
+fn print_remove_summary(
+    entries: &[(&'static str, String, String)],
+    elapsed_ms: u128,
+    reporter_prefix: Option<&str>,
+) {
     use std::collections::BTreeMap;
     use std::io::Write;
 
     if entries.is_empty() {
+        return;
+    }
+
+    if let Some(prefix) = reporter_prefix {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{}", format_prefixed_summary_stats(prefix, 0, entries.len()));
         return;
     }
 
@@ -340,6 +412,8 @@ fn print_remove_summary(entries: &[(&'static str, String, String)]) {
         }
         let _ = writeln!(out);
     }
+
+    let _ = writeln!(out, "Done in {elapsed_ms}ms using pacquet v{}", env!("CARGO_PKG_VERSION"));
 }
 
 fn config_for_project(config: &Npmrc, project_dir: &Path) -> Npmrc {

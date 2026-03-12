@@ -191,7 +191,7 @@ fn hoist_virtual_store_dependencies(
     }
 }
 
-fn select_hoisted_packages(
+pub(crate) fn select_hoisted_packages(
     packages: &HashMap<DependencyPath, PackageSnapshot>,
     dedupe_peer_dependents: bool,
     hoist_patterns: &[String],

@@ -248,3 +248,66 @@ fn workspace_remove_recursive_from_subproject_should_target_all_projects_includi
 
     drop((root, mock_instance)); // cleanup
 }
+
+#[test]
+fn workspace_remove_recursive_should_prefix_hook_and_progress_output() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "workspace-root",
+            "version": "1.0.0",
+            "dependencies": { "left-pad": "1.0.0" }
+        })
+        .to_string(),
+    )
+    .expect("write root manifest");
+    fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/app",
+            "version": "1.0.0",
+            "dependencies": { "left-pad": "1.0.0" }
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+    fs::write(
+        workspace.join(".pnpmfile.cjs"),
+        r#"
+module.exports = {
+  hooks: {
+    readPackage (pkg, ctx) {
+      ctx.log("foo");
+      return pkg;
+    }
+  }
+}
+"#,
+    )
+    .expect("write pnpmfile");
+    let assert = pacquet
+        .with_args(["remove", "left-pad", "--recursive", "--reporter", "append-only"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(!stdout.contains("Packages:"));
+    assert!(stdout.lines().any(|line| line.starts_with(".") && line.contains("-1")));
+    assert!(stdout.lines().any(|line| line.contains("packages/app") && line.contains("-1")));
+    assert!(stderr.lines().any(|line| line.starts_with(".") && line.contains("readPackage: foo")));
+    assert!(
+        stderr.lines().any(|line| line.starts_with(".") && line.contains("Progress: resolved"))
+    );
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.contains("packages/app") && line.contains("Progress: resolved"))
+    );
+    drop(root); // cleanup
+}

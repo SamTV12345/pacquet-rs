@@ -104,9 +104,12 @@ fn fetch_reporter_append_only_should_write_static_progress_lines() {
         .with_args(["fetch", "--reporter", "append-only"])
         .assert()
         .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
-    assert!(stderr.contains("pacquet starting [frozen]"));
-    assert!(stderr.contains("pacquet done [frozen]"));
+    assert!(stdout.contains("Importing packages to virtual store"));
+    assert!(stdout.contains("Already up to date"));
+    assert!(stderr.contains("Progress: resolved "));
+    assert!(stderr.contains(", done"));
     assert!(!stderr.contains("\u{1b}["));
 
     drop((root, mock_instance)); // cleanup

@@ -103,6 +103,10 @@ mod tests {
             dev_dependencies: None,
             peer_dependencies: Some(peer_dependencies),
             engines: None,
+            cpu: None,
+            os: None,
+            libc: None,
+            deprecated: None,
             bin: None,
         };
 
@@ -125,6 +129,10 @@ mod tests {
             dev_dependencies: None,
             peer_dependencies: None,
             engines: None,
+            cpu: None,
+            os: None,
+            libc: None,
+            deprecated: None,
             bin: None,
         };
 

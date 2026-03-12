@@ -11,12 +11,14 @@ mod install_package_by_snapshot;
 mod install_package_from_registry;
 mod install_with_lockfile;
 mod install_without_lockfile;
+mod installability;
 mod link_bins;
 mod link_file;
 mod link_policy;
 mod lockfile_check;
 mod modules_manifest;
 mod pnp_manifest;
+mod pnpmfile;
 mod progress_reporter;
 mod registry_metadata_cache;
 mod symlink_direct_dependencies;
@@ -43,8 +45,11 @@ pub(crate) use link_policy::*;
 pub(crate) use lockfile_check::*;
 pub(crate) use modules_manifest::*;
 pub(crate) use pnp_manifest::*;
+pub(crate) use pnpmfile::*;
 pub use progress_reporter::{
-    InstallReporter, finish as finish_progress_reporter, start as start_progress_reporter,
+    InstallReporter, ProgressStats, finish as finish_progress_reporter,
+    last_finished as last_finished_progress_reporter, start as start_progress_reporter,
+    warn as warn_progress_reporter,
 };
 pub(crate) use registry_metadata_cache::*;
 pub use symlink_direct_dependencies::*;

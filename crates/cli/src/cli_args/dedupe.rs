@@ -78,6 +78,8 @@ impl DedupeArgs {
             lockfile_only,
             force: false,
             resolution_only: false,
+            ignore_pnpmfile: false,
+            pnpmfile: None,
             reporter: Some(
                 match reporter {
                     InstallReporter::Default => "default",

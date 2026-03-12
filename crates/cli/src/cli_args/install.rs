@@ -4,10 +4,13 @@ use miette::{Context, IntoDiagnostic};
 use pacquet_executor::{ExecuteLifecycleScript, execute_lifecycle_script};
 use pacquet_lockfile::Lockfile;
 use pacquet_npmrc::{NodeLinker, Npmrc};
-use pacquet_package_manager::{Install, InstallReporter, WorkspacePackages};
+use pacquet_package_manager::{
+    Install, InstallReporter, WorkspacePackages, current_lockfile_for_installers,
+    warn_progress_reporter,
+};
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_store_dir::StoreDir;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Args)]
@@ -81,6 +84,14 @@ pub struct InstallArgs {
     #[clap(long)]
     pub resolution_only: bool,
 
+    /// Disable pnpm hooks defined in .pnpmfile.cjs.
+    #[clap(long)]
+    pub ignore_pnpmfile: bool,
+
+    /// Use hooks from the specified pnpmfile instead of <lockfileDir>/.pnpmfile.cjs.
+    #[clap(long)]
+    pub pnpmfile: Option<PathBuf>,
+
     /// Reporter name (accepted for compatibility).
     #[clap(long)]
     pub reporter: Option<String>,
@@ -132,6 +143,8 @@ impl InstallArgs {
             lockfile_only,
             force,
             resolution_only,
+            ignore_pnpmfile,
+            pnpmfile,
             reporter,
             use_store_server: _use_store_server,
             shamefully_hoist,
@@ -184,7 +197,18 @@ impl InstallArgs {
             &filter,
         )?;
 
+        let multiple_targets = install_targets.len() > 1;
+        let selected_importers = install_targets.keys().cloned().collect::<HashSet<_>>();
+        let mut skipped_dep_paths = HashSet::<String>::new();
         let mut current_lockfile = lockfile.clone();
+        if lockfile_only
+            && reporter != InstallReporter::Silent
+            && config.virtual_store_dir.join("lock.yaml").exists()
+        {
+            warn_progress_reporter(
+                "`node_modules` is present. Lockfile only installation will make it out-of-date",
+            );
+        }
         for (importer_id, manifest_path) in install_targets {
             let workspace_manifest = if manifest_path == manifest.path() {
                 None
@@ -207,7 +231,7 @@ impl InstallArgs {
             )
             .leak();
 
-            Install {
+            let skipped = Install {
                 tarball_mem_cache,
                 http_client,
                 config: target_config,
@@ -222,12 +246,16 @@ impl InstallArgs {
                 force,
                 prefer_offline,
                 offline,
+                pnpmfile: pnpmfile.as_deref(),
+                ignore_pnpmfile,
+                reporter_prefix: multiple_targets.then_some(importer_id.as_str()),
                 reporter,
                 print_summary: true,
                 resolved_packages,
             }
             .run()
             .await?;
+            skipped_dep_paths.extend(skipped);
 
             if !ignore_scripts && !lockfile_only {
                 run_install_lifecycle_scripts(target_manifest.path().to_path_buf(), target_config)?;
@@ -239,6 +267,21 @@ impl InstallArgs {
             } else {
                 None
             };
+        }
+
+        if config.lockfile
+            && !lockfile_only
+            && let Some(lockfile) = current_lockfile.as_ref()
+        {
+            let current_lockfile = current_lockfile_for_installers(
+                lockfile,
+                &selected_importers,
+                &dependency_groups,
+                &skipped_dep_paths,
+            );
+            current_lockfile
+                .save_to_path(&config.virtual_store_dir.join("lock.yaml"))
+                .wrap_err("write node_modules/.pnpm/lock.yaml")?;
         }
 
         Ok(())

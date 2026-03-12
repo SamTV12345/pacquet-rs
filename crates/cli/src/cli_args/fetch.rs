@@ -59,11 +59,19 @@ pub struct FetchArgs {
     /// Reporter name.
     #[clap(long)]
     reporter: Option<String>,
+    /// Disable pnpm hooks defined in .pnpmfile.cjs.
+    #[clap(long)]
+    ignore_pnpmfile: bool,
+    /// Use hooks from the specified pnpmfile instead of <lockfileDir>/.pnpmfile.cjs.
+    #[clap(long)]
+    pnpmfile: Option<PathBuf>,
 }
 
 impl FetchArgs {
     pub async fn run(self, dir: PathBuf, config: &'static Npmrc) -> miette::Result<()> {
         let reporter = parse_install_reporter(self.reporter.as_deref())?;
+        let ignore_pnpmfile = self.ignore_pnpmfile;
+        let pnpmfile = self.pnpmfile;
         let lockfile_dir = find_workspace_root(&dir).unwrap_or(dir);
         let lockfile = Lockfile::load_from_dir(&lockfile_dir)
             .wrap_err_with(|| format!("load lockfile from {}", lockfile_dir.display()))?
@@ -97,7 +105,11 @@ impl FetchArgs {
         let dependency_groups = self.dependency_options.dependency_groups().collect::<Vec<_>>();
         let direct_dependencies =
             project_snapshot.dependencies_by_groups(dependency_groups.iter().copied()).count();
-        start_progress_reporter(direct_dependencies, true, reporter);
+        if reporter != pacquet_package_manager::InstallReporter::Silent {
+            println!("Importing packages to virtual store");
+            println!("Already up to date");
+        }
+        start_progress_reporter(direct_dependencies, true, reporter, None);
 
         InstallFrozenLockfile {
             http_client: &http_client,
@@ -109,10 +121,12 @@ impl FetchArgs {
             dependency_groups: dependency_groups.iter().copied(),
             offline: false,
             force: false,
+            pnpmfile: pnpmfile.as_deref(),
+            ignore_pnpmfile,
         }
         .run()
         .await;
-        finish_progress_reporter(true);
+        let _ = finish_progress_reporter(true);
 
         Ok(())
     }

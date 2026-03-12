@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{IsTerminal, Write, stderr};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -9,204 +10,388 @@ pub enum InstallReporter {
     Silent,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProgressStats {
+    pub resolved: usize,
+    pub reused: usize,
+    pub downloaded: usize,
+    pub added: usize,
+}
+
 #[derive(Debug)]
 struct State {
-    start: Instant,
     last_draw: Instant,
-    direct_dependencies: usize,
-    frozen_lockfile: bool,
-    resolved: usize,
-    fetched: usize,
-    linked: usize,
-    phase: &'static str,
-    spinner_index: usize,
-    rendered_lines: usize,
+    stats: ProgressStats,
+    rendered: bool,
     reporter: InstallReporter,
+    prefix: Option<String>,
+    deprecations: HashSet<String>,
+    #[allow(dead_code)]
+    shown_warnings: usize,
+    suppressed_warnings: usize,
 }
 
 impl State {
-    fn new(direct_dependencies: usize, frozen_lockfile: bool, reporter: InstallReporter) -> Self {
+    fn new(reporter: InstallReporter, prefix: Option<String>) -> Self {
         let now = Instant::now();
         Self {
-            start: now,
             last_draw: now.checked_sub(Duration::from_millis(200)).unwrap_or(now),
-            direct_dependencies,
-            frozen_lockfile,
-            resolved: 0,
-            fetched: 0,
-            linked: 0,
-            phase: "starting",
-            spinner_index: 0,
-            rendered_lines: 0,
+            stats: ProgressStats::default(),
+            rendered: false,
             reporter,
+            prefix,
+            deprecations: HashSet::new(),
+            shown_warnings: 0,
+            suppressed_warnings: 0,
         }
-    }
-
-    fn mode(&self) -> &'static str {
-        if self.frozen_lockfile { "frozen" } else { "regular" }
     }
 }
 
 static STATE: OnceLock<Mutex<Option<State>>> = OnceLock::new();
+static LAST_FINISHED: OnceLock<Mutex<Option<ProgressStats>>> = OnceLock::new();
 
 fn state_mutex() -> &'static Mutex<Option<State>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
-fn spinner_frame(state: &mut State) -> &'static str {
-    const FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
-    state.spinner_index = (state.spinner_index + 1) % FRAMES.len();
-    FRAMES[state.spinner_index]
+fn last_finished_mutex() -> &'static Mutex<Option<ProgressStats>> {
+    LAST_FINISHED.get_or_init(|| Mutex::new(None))
 }
 
-fn format_elapsed(elapsed: Duration) -> String {
-    let secs = elapsed.as_secs();
-    let minutes = secs / 60;
-    let seconds = secs % 60;
-    format!("{minutes:02}:{seconds:02}")
-}
-
-fn format_rate(value: usize, elapsed_secs: f64) -> String {
-    format!("{:>7.1}/s", value as f64 / elapsed_secs)
-}
-
-fn direct_progress_bar(done: usize, total: usize, width: usize) -> String {
-    if total == 0 {
-        return format!("[{}]", "=".repeat(width));
+fn format_progress(stats: ProgressStats, done: bool) -> String {
+    let mut line = format!(
+        "Progress: resolved {}, reused {}, downloaded {}, added {}",
+        stats.resolved, stats.reused, stats.downloaded, stats.added
+    );
+    if done {
+        line.push_str(", done");
     }
-    let filled = ((done.min(total) as f64 / total as f64) * width as f64).round() as usize;
-    let filled = filled.min(width);
-    format!("[{}{}]", "=".repeat(filled), "-".repeat(width - filled))
+    line
 }
 
-fn render_lines(state: &mut State, phase_label: &str) -> Vec<String> {
-    let elapsed = state.start.elapsed();
-    let elapsed_secs = elapsed.as_secs_f64().max(0.001);
-    let direct_done = state.fetched.min(state.direct_dependencies);
-    let direct_percent = if state.direct_dependencies == 0 {
-        100.0
-    } else {
-        100.0 * direct_done as f64 / state.direct_dependencies as f64
-    };
-    let bar = direct_progress_bar(direct_done, state.direct_dependencies, 26);
-    let spinner = spinner_frame(state);
-
-    vec![
-        format!("pacquet {spinner} {} [{}]", phase_label, state.mode()),
-        format!(
-            "  elapsed {}    direct {:>4}    lockfile {}",
-            format_elapsed(elapsed),
-            state.direct_dependencies,
-            if state.frozen_lockfile { "frozen" } else { "mutable" }
-        ),
-        format!(
-            "  resolved {:>6}    fetched {:>6}    linked {:>6}",
-            state.resolved, state.fetched, state.linked
-        ),
-        format!(
-            "  rates    resolve {}    fetch {}    link {}",
-            format_rate(state.resolved, elapsed_secs),
-            format_rate(state.fetched, elapsed_secs),
-            format_rate(state.linked, elapsed_secs)
-        ),
-        format!("  direct install {bar} {:>5.1}%", direct_percent),
-    ]
+fn format_warn(message: &str) -> String {
+    format!("WARN {message}")
 }
 
-fn draw(state: &mut State, phase_label: &str, force: bool) {
+#[allow(dead_code)]
+fn format_info(message: &str) -> String {
+    format!("info: {message}")
+}
+
+fn format_deprecation_message(
+    is_prefixed: bool,
+    package_name: &str,
+    version: &str,
+    message: &str,
+) -> String {
+    if is_prefixed {
+        return format_warn(&format!("deprecated {package_name}@{version}"));
+    }
+    format_warn(&format!("deprecated {package_name}@{version}: {message}"))
+}
+
+pub fn format_prefix_label(prefix: &str) -> String {
+    const PREFIX_WIDTH: usize = 41;
+    if prefix.len() <= PREFIX_WIDTH {
+        return prefix.to_string();
+    }
+    if let Some((_, last)) = prefix.rsplit_once('/')
+        && last.len() + 4 <= PREFIX_WIDTH
+    {
+        return format!(".../{last}");
+    }
+    format!("...{}", &prefix[prefix.len() - (PREFIX_WIDTH - 3)..])
+}
+
+fn format_with_prefix(prefix: Option<&str>, line: &str) -> String {
+    match prefix {
+        Some(prefix) => format!("{:<41} | {line}", format_prefix_label(prefix)),
+        None => line.to_string(),
+    }
+}
+
+fn draw(state: &mut State, done: bool, force: bool) {
     if !force && state.last_draw.elapsed() < Duration::from_millis(70) {
         return;
     }
     state.last_draw = Instant::now();
-
-    let lines = render_lines(state, phase_label);
     let mut err = stderr();
+    let line = format_with_prefix(state.prefix.as_deref(), &format_progress(state.stats, done));
 
     match state.reporter {
         InstallReporter::Default => {
-            if state.rendered_lines > 0 {
-                let _ = write!(err, "\x1b[{}A", state.rendered_lines);
+            if err.is_terminal() {
+                let _ = write!(err, "\r\x1b[2K{line}");
+                if done {
+                    let _ = writeln!(err);
+                }
+                state.rendered = !done;
+            } else {
+                state.rendered = false;
             }
-
-            for line in &lines {
-                let _ = write!(err, "\r\x1b[2K{line}\n");
-            }
-            state.rendered_lines = lines.len();
         }
         InstallReporter::AppendOnly => {
-            let _ = writeln!(err, "pacquet {phase_label} [{}]", state.mode());
-            state.rendered_lines = 0;
+            let _ = writeln!(err, "{line}");
+            state.rendered = false;
         }
         InstallReporter::Silent => {
-            state.rendered_lines = 0;
+            state.rendered = false;
         }
     }
     let _ = err.flush();
 }
 
-fn update(phase: &'static str, update_counter: impl FnOnce(&mut State)) {
+fn print_message(state: Option<&mut State>, message: &str) {
+    let mut err = stderr();
+    match state {
+        Some(state) => match state.reporter {
+            InstallReporter::Default => {
+                if err.is_terminal() && state.rendered {
+                    let _ = write!(err, "\r\x1b[2K");
+                }
+                let _ = writeln!(err, "{}", format_with_prefix(state.prefix.as_deref(), message));
+                state.rendered = false;
+            }
+            InstallReporter::AppendOnly => {
+                let _ = writeln!(err, "{}", format_with_prefix(state.prefix.as_deref(), message));
+            }
+            InstallReporter::Silent => {}
+        },
+        None => {
+            let _ = writeln!(err, "{message}");
+        }
+    }
+    let _ = err.flush();
+}
+
+fn update(update_counter: impl FnOnce(&mut ProgressStats)) {
     let mutex = state_mutex();
     let mut guard = mutex.lock().expect("progress mutex");
     let Some(state) = guard.as_mut() else {
         return;
     };
-    update_counter(state);
-    state.phase = phase;
-    draw(state, phase, false);
+    update_counter(&mut state.stats);
+    draw(state, false, false);
 }
 
-pub fn start(direct_dependencies: usize, frozen_lockfile: bool, reporter: InstallReporter) {
-    if reporter == InstallReporter::Silent {
-        return;
-    }
-    if reporter == InstallReporter::Default && !stderr().is_terminal() {
-        return;
-    }
+pub fn start(
+    _direct_dependencies: usize,
+    _frozen_lockfile: bool,
+    reporter: InstallReporter,
+    prefix: Option<&str>,
+) {
+    *last_finished_mutex().lock().expect("last finished progress mutex") = None;
     let mutex = state_mutex();
     let mut guard = mutex.lock().expect("progress mutex");
-    *guard = Some(State::new(direct_dependencies, frozen_lockfile, reporter));
-    if let Some(state) = guard.as_mut() {
-        draw(state, "starting", true);
-    }
+    *guard = Some(State::new(reporter, prefix.map(ToOwned::to_owned)));
 }
 
 pub fn resolved() {
-    update("resolving", |state| state.resolved += 1);
+    update(|stats| stats.resolved += 1);
 }
 
-pub fn fetched() {
-    update("fetching", |state| state.fetched += 1);
+pub fn reused() {
+    update(|stats| stats.reused += 1);
 }
 
-pub fn linked() {
-    update("linking", |state| state.linked += 1);
+pub fn downloaded() {
+    update(|stats| stats.downloaded += 1);
 }
 
-pub fn finish(success: bool) {
+pub fn added() {
+    update(|stats| stats.added += 1);
+}
+
+pub fn finish(success: bool) -> Option<ProgressStats> {
     let mutex = state_mutex();
     let mut guard = mutex.lock().expect("progress mutex");
     let Some(state) = guard.as_mut() else {
+        return None;
+    };
+
+    if state.reporter != InstallReporter::AppendOnly && state.suppressed_warnings > 0 {
+        let summary = format_warn(&format!("{} other warnings", state.suppressed_warnings));
+        print_message(Some(state), &summary);
+        state.suppressed_warnings = 0;
+    }
+
+    if success && state.rendered || state.reporter == InstallReporter::AppendOnly {
+        draw(state, true, true);
+    } else if !success && state.reporter == InstallReporter::Default && stderr().is_terminal() {
+        let mut err = stderr();
+        if state.rendered {
+            let _ = writeln!(err);
+        }
+        let _ = err.flush();
+    }
+
+    let stats = state.stats;
+    *last_finished_mutex().lock().expect("last finished progress mutex") = Some(stats);
+    *guard = None;
+    Some(stats)
+}
+
+pub fn last_finished() -> Option<ProgressStats> {
+    *last_finished_mutex().lock().expect("last finished progress mutex")
+}
+
+pub fn log(message: &str) {
+    let mutex = state_mutex();
+    let mut guard = mutex.lock().expect("progress mutex");
+    print_message(guard.as_mut(), message);
+}
+
+#[allow(dead_code)]
+pub fn info(message: &str) {
+    let mutex = state_mutex();
+    let mut guard = mutex.lock().expect("progress mutex");
+    match guard.as_mut() {
+        Some(state) => match state.reporter {
+            InstallReporter::Silent => {}
+            _ => print_message(Some(state), &format_info(message)),
+        },
+        None => print_message(None, &format_info(message)),
+    }
+}
+
+#[allow(dead_code)]
+pub fn warn(message: &str) {
+    const MAX_SHOWN_WARNINGS: usize = 5;
+
+    let mutex = state_mutex();
+    let mut guard = mutex.lock().expect("progress mutex");
+    let Some(state) = guard.as_mut() else {
+        print_message(None, &format_warn(message));
         return;
     };
 
-    let phase = if success { "done" } else { "failed" };
-    draw(state, phase, true);
+    if state.reporter == InstallReporter::AppendOnly || state.shown_warnings < MAX_SHOWN_WARNINGS {
+        state.shown_warnings += 1;
+        print_message(Some(state), &format_warn(message));
+        return;
+    }
 
-    let mut err = stderr();
-    if state.reporter == InstallReporter::Default {
-        let _ = writeln!(err, "\r\x1b[2K");
-        let elapsed = state.start.elapsed().as_secs_f32();
-        let _ = writeln!(
-            err,
-            "pacquet [{}] {phase} | direct: {} | resolved: {} | fetched: {} | linked: {} | {:.1}s",
-            state.mode(),
-            state.direct_dependencies,
-            state.resolved,
-            state.fetched,
-            state.linked,
-            elapsed
+    state.suppressed_warnings += 1;
+}
+
+pub fn deprecation(package_name: &str, version: &str, message: &str) {
+    let key = format!("{package_name}@{version}");
+    let mutex = state_mutex();
+    let mut guard = mutex.lock().expect("progress mutex");
+    let Some(state) = guard.as_mut() else {
+        print_message(None, &format_deprecation_message(false, package_name, version, message));
+        return;
+    };
+    if !state.deprecations.insert(key) {
+        return;
+    }
+    let formatted =
+        format_deprecation_message(state.prefix.is_some(), package_name, version, message);
+    print_message(Some(state), &formatted);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        InstallReporter, deprecation, finish, format_deprecation_message, format_info,
+        format_prefix_label, info, start, state_mutex, warn,
+    };
+
+    #[test]
+    fn format_prefix_label_truncates_long_prefixes_from_the_left() {
+        let formatted = format_prefix_label("loooooooooooooooooooooooooooooooooong-pkg-4");
+        assert_eq!(formatted.len(), 41);
+        assert!(formatted.starts_with("..."));
+        assert!(formatted.ends_with("ong-pkg-4"));
+    }
+
+    #[test]
+    fn format_prefix_label_prefers_last_path_segment_for_long_paths() {
+        let formatted = format_prefix_label("loooooooooooooooooooooooooooooooooong/pkg-3");
+        assert_eq!(formatted, ".../pkg-3");
+    }
+
+    #[test]
+    fn deprecation_messages_are_deduped_per_run() {
+        start(0, false, InstallReporter::AppendOnly, None);
+        deprecation("foo", "1.0.0", "old");
+        deprecation("foo", "1.0.0", "old");
+
+        let guard = state_mutex().lock().expect("progress mutex");
+        let state = guard.as_ref().expect("state");
+        assert_eq!(state.deprecations.len(), 1);
+        drop(guard);
+
+        let _ = finish(true);
+    }
+
+    #[test]
+    fn deprecation_message_includes_reason_for_non_recursive_root_output() {
+        assert_eq!(
+            format_deprecation_message(false, "foo", "1.0.0", "old"),
+            "WARN deprecated foo@1.0.0: old"
         );
     }
-    let _ = err.flush();
-    *guard = None;
+
+    #[test]
+    fn deprecation_message_omits_reason_for_prefixed_recursive_output() {
+        assert_eq!(
+            format_deprecation_message(true, "foo", "1.0.0", "old"),
+            "WARN deprecated foo@1.0.0"
+        );
+    }
+
+    #[test]
+    fn info_message_uses_pnpm_style_prefix() {
+        assert_eq!(
+            format_info("pkg@1.0.0 is an optional dependency and failed compatibility check."),
+            "info: pkg@1.0.0 is an optional dependency and failed compatibility check."
+        );
+    }
+
+    #[test]
+    fn warnings_are_collapsed_after_five_when_not_append_only() {
+        start(0, false, InstallReporter::Default, None);
+        for idx in 0..7 {
+            warn(&format!("issue {idx}"));
+        }
+
+        let guard = state_mutex().lock().expect("progress mutex");
+        let state = guard.as_ref().expect("state");
+        assert_eq!(state.shown_warnings, 5);
+        assert_eq!(state.suppressed_warnings, 2);
+        drop(guard);
+
+        let _ = finish(true);
+    }
+
+    #[test]
+    fn info_does_not_increment_warning_counters() {
+        start(0, false, InstallReporter::Default, None);
+        info("something happened");
+
+        let guard = state_mutex().lock().expect("progress mutex");
+        let state = guard.as_ref().expect("state");
+        assert_eq!(state.shown_warnings, 0);
+        assert_eq!(state.suppressed_warnings, 0);
+        drop(guard);
+
+        let _ = finish(true);
+    }
+
+    #[test]
+    fn append_only_warnings_are_not_collapsed() {
+        start(0, false, InstallReporter::AppendOnly, None);
+        for idx in 0..7 {
+            warn(&format!("issue {idx}"));
+        }
+
+        let guard = state_mutex().lock().expect("progress mutex");
+        let state = guard.as_ref().expect("state");
+        assert_eq!(state.shown_warnings, 7);
+        assert_eq!(state.suppressed_warnings, 0);
+        drop(guard);
+
+        let _ = finish(true);
+    }
 }

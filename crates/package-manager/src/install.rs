@@ -1,10 +1,14 @@
 use crate::{
     InstallFrozenLockfile, InstallWithLockfile, InstallWithoutLockfile, ResolvedPackages,
     WorkspacePackages, collect_runtime_lockfile_config, get_outdated_lockfile_setting,
-    hoist_virtual_store_packages, link_bins_for_manifest, progress_reporter,
-    satisfies_package_manifest, write_modules_manifest_pruned_at, write_pnp_manifest_if_needed,
+    hoist_virtual_store_packages, included_dependencies, link_bins_for_manifest, progress_reporter,
+    read_modules_manifest, satisfies_package_manifest, write_modules_manifest,
+    write_pnp_manifest_if_needed,
 };
-use pacquet_lockfile::{Lockfile, RootProjectSnapshot};
+use pacquet_lockfile::{
+    DependencyPath, Lockfile, PackageSnapshot, PackageSnapshotDependency, PkgName, PkgNameVerPeer,
+    ResolvedDependencyVersion, RootProjectSnapshot,
+};
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
@@ -37,6 +41,9 @@ where
     pub force: bool,
     pub prefer_offline: bool,
     pub offline: bool,
+    pub pnpmfile: Option<&'a Path>,
+    pub ignore_pnpmfile: bool,
+    pub reporter_prefix: Option<&'a str>,
     pub reporter: progress_reporter::InstallReporter,
     pub print_summary: bool,
 }
@@ -46,7 +53,7 @@ where
     DependencyGroupList: IntoIterator<Item = DependencyGroup>,
 {
     /// Execute the subroutine.
-    pub async fn run(self) -> miette::Result<()> {
+    pub async fn run(self) -> miette::Result<Vec<String>> {
         let start_time = std::time::Instant::now();
         let Install {
             tarball_mem_cache,
@@ -64,6 +71,9 @@ where
             force,
             prefer_offline,
             offline,
+            pnpmfile,
+            ignore_pnpmfile,
+            reporter_prefix,
             reporter,
             print_summary,
         } = self;
@@ -74,18 +84,22 @@ where
 
         let dependency_groups = dependency_groups.into_iter().collect::<Vec<_>>();
         let direct_dependencies = manifest.dependencies(dependency_groups.iter().copied()).count();
-        progress_reporter::start(direct_dependencies, frozen_lockfile, reporter);
+        progress_reporter::start(direct_dependencies, frozen_lockfile, reporter, reporter_prefix);
         let project_dir = manifest
             .path()
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| lockfile_dir.to_path_buf());
         config.store_dir.register_project(&project_dir)?;
+        if !lockfile_only {
+            recreate_modules_dir_if_incompatible(config, &dependency_groups)
+                .map_err(|error| miette::miette!("recreate incompatible node_modules: {error}"))?;
+        }
 
         let result = async {
         tracing::info!(target: "pacquet::install", "Start all");
+        let skipped = match (config.lockfile, frozen_lockfile, lockfile) {
 
-        match (config.lockfile, frozen_lockfile, lockfile) {
             (false, _, _) => {
                 InstallWithoutLockfile {
                     tarball_mem_cache,
@@ -93,17 +107,26 @@ where
                     http_client,
                     config,
                     manifest,
+                    lockfile_dir,
                     dependency_groups: dependency_groups.clone(),
                     force,
                     prefer_offline,
                     offline,
+                    pnpmfile,
+                    ignore_pnpmfile,
                 }
                 .run()
                 .await;
+                Vec::new()
             }
             (true, false, Some(lockfile)) => {
-                let runtime_lockfile_config =
-                    collect_runtime_lockfile_config(config, manifest, lockfile_dir);
+                let runtime_lockfile_config = collect_runtime_lockfile_config(
+                    config,
+                    manifest,
+                    lockfile_dir,
+                    pnpmfile,
+                    ignore_pnpmfile,
+                );
                 let maybe_project_snapshot = match &lockfile.project_snapshot {
                     RootProjectSnapshot::Single(snapshot) => Some(snapshot),
                     RootProjectSnapshot::Multi(snapshot) => {
@@ -121,6 +144,12 @@ where
                             lockfile.lockfile_version.major >= 9,
                         )
                         .is_ok()
+                        && persisted_install_state_is_reusable(
+                            lockfile,
+                            config,
+                            lockfile_importer_id,
+                            &dependency_groups,
+                        )
                 });
 
                 let has_local_directory_dependency_specs = manifest_has_local_directory_dependency(
@@ -144,9 +173,13 @@ where
                             dependency_groups: dependency_groups.clone(),
                             offline,
                             force,
+                            pnpmfile,
+                            ignore_pnpmfile,
                         }
                         .run()
-                        .await;
+                        .await
+                    } else {
+                        Vec::new()
                     }
                 } else {
                     InstallWithLockfile {
@@ -164,9 +197,11 @@ where
                         force,
                         prefer_offline,
                         offline,
+                        pnpmfile,
+                        ignore_pnpmfile,
                     }
                     .run()
-                    .await;
+                    .await
                 }
             }
             (true, false, None) => {
@@ -185,9 +220,11 @@ where
                     force,
                     prefer_offline,
                     offline,
+                    pnpmfile,
+                    ignore_pnpmfile,
                 }
                 .run()
-                .await;
+                .await
             }
             (true, true, None) => {
                 miette::bail!(
@@ -214,8 +251,13 @@ where
                     }
                 };
 
-                let runtime_lockfile_config =
-                    collect_runtime_lockfile_config(config, manifest, lockfile_dir);
+                let runtime_lockfile_config = collect_runtime_lockfile_config(
+                    config,
+                    manifest,
+                    lockfile_dir,
+                    pnpmfile,
+                    ignore_pnpmfile,
+                );
                 if let Some(outdated_setting) =
                     get_outdated_lockfile_setting(lockfile, &runtime_lockfile_config)
                 {
@@ -247,47 +289,211 @@ where
                         dependency_groups: dependency_groups.clone(),
                         offline,
                         force,
+                        pnpmfile,
+                        ignore_pnpmfile,
                     }
                     .run()
-                    .await;
+                    .await
+                } else {
+                    Vec::new()
                 }
             }
-        }
+        };
 
         tracing::info!(target: "pacquet::install", "Complete all");
         if !lockfile_only {
+            let direct_dependency_names = manifest
+                .dependencies(dependency_groups.iter().copied())
+                .map(|(name, _)| name.to_string())
+                .collect::<Vec<_>>();
+            let current_lockfile_packages =
+                Lockfile::load_from_path(&lockfile_dir.join("pnpm-lock.yaml"))
+                    .ok()
+                    .flatten()
+                    .map(|lockfile| lockfile.packages);
             hoist_virtual_store_packages(config)?;
             if config.strict_peer_dependencies {
                 validate_strict_peer_dependencies(config, lockfile_dir)?;
             }
             link_bins_for_manifest(config, manifest, dependency_groups.iter().copied())?;
-            write_modules_manifest_pruned_at(&config.modules_dir)
+            write_modules_manifest(
+                &config.modules_dir,
+                config,
+                &dependency_groups,
+                &skipped,
+                current_lockfile_packages.as_ref().and_then(|packages| packages.as_ref()),
+                Some(&direct_dependency_names),
+            )
                 .map_err(|error| miette::miette!("write node_modules/.modules.yaml: {error}"))?;
             write_pnp_manifest_if_needed(&config.node_linker, lockfile_dir)
                 .map_err(|error| miette::miette!("write .pnp.cjs: {error}"))?;
         }
 
-        Ok(())
+        Ok(skipped)
         }
         .await;
 
-        progress_reporter::finish(result.is_ok());
+        let progress = progress_reporter::finish(result.is_ok()).unwrap_or_default();
 
         if result.is_ok() && print_summary && reporter != progress_reporter::InstallReporter::Silent
         {
-            print_pnpm_style_summary(manifest, &dependency_groups, &start_time);
+            print_pnpm_style_summary(
+                manifest,
+                &dependency_groups,
+                &start_time,
+                progress,
+                reporter_prefix,
+            );
         }
 
         result
     }
 }
 
+pub fn current_lockfile_for_installers(
+    lockfile: &Lockfile,
+    importer_ids: &std::collections::HashSet<String>,
+    dependency_groups: &[DependencyGroup],
+    skipped: &std::collections::HashSet<String>,
+) -> Lockfile {
+    let project_snapshot = match &lockfile.project_snapshot {
+        RootProjectSnapshot::Single(snapshot) => RootProjectSnapshot::Single(snapshot.clone()),
+        RootProjectSnapshot::Multi(snapshot) => {
+            RootProjectSnapshot::Multi(pacquet_lockfile::MultiProjectSnapshot {
+                importers: snapshot
+                    .importers
+                    .iter()
+                    .filter(|(importer_id, _)| importer_ids.contains(*importer_id))
+                    .map(|(importer_id, snapshot)| (importer_id.clone(), snapshot.clone()))
+                    .collect(),
+            })
+        }
+    };
+
+    let Some(packages) = lockfile.packages.as_ref() else {
+        return Lockfile { project_snapshot, packages: None, ..lockfile.clone() };
+    };
+
+    let mut queue = direct_dependency_paths(&project_snapshot, packages, dependency_groups);
+    let mut seen = std::collections::HashSet::<DependencyPath>::new();
+    let mut filtered_packages = HashMap::<DependencyPath, PackageSnapshot>::new();
+    while let Some(candidate_path) = queue.pop() {
+        let Some((resolved_path, package_snapshot)) =
+            resolve_package_snapshot(packages, &candidate_path)
+        else {
+            continue;
+        };
+        if skipped.contains(&resolved_path.to_string()) || !seen.insert(resolved_path.clone()) {
+            continue;
+        }
+        filtered_packages.insert(resolved_path.clone(), package_snapshot.clone());
+        for (alias, dependency_spec) in crate::package_dependency_map(package_snapshot) {
+            if let Some(path) = dependency_path_from_snapshot_dependency(&alias, &dependency_spec) {
+                queue.push(path);
+            }
+        }
+    }
+
+    Lockfile { project_snapshot, packages: Some(filtered_packages), ..lockfile.clone() }
+}
+
+fn direct_dependency_paths(
+    project_snapshot: &RootProjectSnapshot,
+    packages: &HashMap<DependencyPath, PackageSnapshot>,
+    dependency_groups: &[DependencyGroup],
+) -> Vec<DependencyPath> {
+    match project_snapshot {
+        RootProjectSnapshot::Single(snapshot) => snapshot
+            .dependencies_by_groups(dependency_groups.iter().copied())
+            .filter_map(|(alias, spec)| direct_dependency_path(alias, &spec.version, packages))
+            .collect(),
+        RootProjectSnapshot::Multi(snapshot) => snapshot
+            .importers
+            .values()
+            .flat_map(|project| project.dependencies_by_groups(dependency_groups.iter().copied()))
+            .filter_map(|(alias, spec)| direct_dependency_path(alias, &spec.version, packages))
+            .collect(),
+    }
+}
+
+fn direct_dependency_path(
+    alias: &PkgName,
+    resolved_version: &ResolvedDependencyVersion,
+    packages: &HashMap<DependencyPath, PackageSnapshot>,
+) -> Option<DependencyPath> {
+    let dependency_path = match resolved_version {
+        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
+            DependencyPath::registry(None, PkgNameVerPeer::new(alias.clone(), ver_peer.clone()))
+        }
+        ResolvedDependencyVersion::PkgNameVerPeer(specifier) => {
+            DependencyPath::registry(None, specifier.clone())
+        }
+        ResolvedDependencyVersion::Link(link) => {
+            if !link.starts_with("file:") {
+                return None;
+            }
+            DependencyPath::local_file(alias.clone(), link.clone())
+        }
+    };
+    resolve_package_snapshot(packages, &dependency_path).map(|(resolved_path, _)| resolved_path)
+}
+
+fn dependency_path_from_snapshot_dependency(
+    alias: &PkgName,
+    dependency_spec: &PackageSnapshotDependency,
+) -> Option<DependencyPath> {
+    match dependency_spec {
+        PackageSnapshotDependency::PkgVerPeer(ver_peer) => Some(DependencyPath::registry(
+            None,
+            PkgNameVerPeer::new(alias.clone(), ver_peer.clone()),
+        )),
+        PackageSnapshotDependency::PkgNameVerPeer(package_specifier) => {
+            Some(DependencyPath::registry(None, package_specifier.clone()))
+        }
+        PackageSnapshotDependency::DependencyPath(path) => Some(path.clone()),
+        PackageSnapshotDependency::Link(link) => {
+            if link.starts_with("file:") {
+                Some(DependencyPath::local_file(alias.clone(), link.clone()))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn resolve_package_snapshot<'a>(
+    packages: &'a HashMap<DependencyPath, PackageSnapshot>,
+    candidate_path: &DependencyPath,
+) -> Option<(DependencyPath, &'a PackageSnapshot)> {
+    if let Some(snapshot) = packages.get(candidate_path) {
+        return Some((candidate_path.clone(), snapshot));
+    }
+    packages
+        .iter()
+        .find(|(dependency_path, _)| {
+            dependency_path.package_specifier == candidate_path.package_specifier
+        })
+        .map(|(dependency_path, snapshot)| (dependency_path.clone(), snapshot))
+}
+
 fn print_pnpm_style_summary(
     manifest: &PackageManifest,
     dependency_groups: &[DependencyGroup],
     start_time: &std::time::Instant,
+    progress: progress_reporter::ProgressStats,
+    reporter_prefix: Option<&str>,
 ) {
     use std::io::Write;
+
+    if let Some(prefix) = reporter_prefix {
+        if progress.added == 0 {
+            return;
+        }
+
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{}", format_prefixed_summary_stats(prefix, progress.added, 0));
+        return;
+    }
 
     let elapsed = start_time.elapsed();
     let elapsed_ms = elapsed.as_millis();
@@ -312,25 +518,57 @@ fn print_pnpm_style_summary(
         }
     }
 
-    let total_packages: usize = sections.iter().map(|(_, deps)| deps.len()).sum();
-
     let mut out = std::io::stdout().lock();
 
-    if total_packages > 0 {
-        let _ = writeln!(out, "Packages: +{total_packages}");
-        let _ = writeln!(out, "{}", "+".repeat(total_packages.min(80)));
+    if progress.added == 0 {
+        let _ = writeln!(out, "Already up to date");
         let _ = writeln!(out);
-    }
+    } else {
+        let _ = writeln!(out, "Packages: +{}", progress.added);
+        let _ = writeln!(out, "{}", "+".repeat(progress.added.min(80)));
+        let _ = writeln!(out);
 
-    for (header, deps) in &sections {
-        let _ = writeln!(out, "{header}:");
-        for (name, spec) in deps {
-            let _ = writeln!(out, "{}", format_summary_dependency_line(name, spec));
+        for (header, deps) in &sections {
+            let _ = writeln!(out, "{header}:");
+            for (name, spec) in deps {
+                let _ = writeln!(out, "{}", format_summary_dependency_line(name, spec));
+            }
+            let _ = writeln!(out);
         }
-        let _ = writeln!(out);
     }
 
-    let _ = writeln!(out, "Done in {elapsed_ms}ms");
+    let _ = writeln!(out, "Done in {elapsed_ms}ms using pacquet v{}", env!("CARGO_PKG_VERSION"));
+}
+
+pub fn format_prefixed_summary_stats(prefix: &str, added: usize, removed: usize) -> String {
+    let stats = match (added, removed) {
+        (0, 0) => String::new(),
+        (added, 0) => format!("+{added} {}", "+".repeat(added.min(12))),
+        (0, removed) => format!("-{removed} {}", "-".repeat(removed.min(12))),
+        (added, removed) => {
+            let total = added + removed;
+            let plus_count = ((9 * added) / total).max(1);
+            let minus_count = 9usize.saturating_sub(plus_count).max(1);
+            let added_count = format!("+{added}");
+            let removed_count = format!("-{removed}");
+            if added >= removed {
+                format!(
+                    "{added_count} {:>5} {}{}",
+                    removed_count,
+                    "+".repeat(plus_count),
+                    "-".repeat(minus_count)
+                )
+            } else {
+                format!(
+                    "{:>5} {removed_count} {}{}",
+                    added_count,
+                    "+".repeat(plus_count),
+                    "-".repeat(minus_count)
+                )
+            }
+        }
+    };
+    format!("{:<41} | {stats}", progress_reporter::format_prefix_label(prefix))
 }
 
 pub fn format_summary_dependency_line(name: &str, spec: &str) -> String {
@@ -556,16 +794,177 @@ fn should_prefer_frozen_lockfile_path(
     lockfile_is_reusable && prefer_frozen_lockfile && !has_local_directory_dependency_specs
 }
 
+fn persisted_install_state_is_reusable(
+    lockfile: &Lockfile,
+    config: &Npmrc,
+    importer_id: &str,
+    dependency_groups: &[DependencyGroup],
+) -> bool {
+    let modules_manifest = read_modules_manifest(&config.modules_dir);
+    let current_lockfile =
+        Lockfile::load_from_path(&config.virtual_store_dir.join("lock.yaml")).ok().flatten();
+
+    match (modules_manifest, current_lockfile) {
+        (None, None) => false,
+        (Some(modules_manifest), Some(current_lockfile)) => {
+            if !modules_manifest_is_compatible(&modules_manifest, config, dependency_groups) {
+                return false;
+            }
+
+            let expected_current_lockfile = current_lockfile_for_installers(
+                lockfile,
+                &std::collections::HashSet::from([importer_id.to_string()]),
+                dependency_groups,
+                &modules_manifest
+                    .skipped()
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::HashSet<_>>(),
+            );
+
+            current_lockfile_matches_expected(
+                &current_lockfile,
+                &expected_current_lockfile,
+                importer_id,
+            )
+        }
+        _ => false,
+    }
+}
+
+fn recreate_modules_dir_if_incompatible(
+    config: &Npmrc,
+    dependency_groups: &[DependencyGroup],
+) -> std::io::Result<bool> {
+    let Some(modules_manifest) = read_modules_manifest(&config.modules_dir) else {
+        return Ok(false);
+    };
+    if modules_manifest_is_compatible(&modules_manifest, config, dependency_groups) {
+        return Ok(false);
+    }
+
+    let Ok(entries) = fs::read_dir(&config.modules_dir) else {
+        return Ok(false);
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+
+        if name.starts_with('.')
+            && name != ".bin"
+            && name != ".modules.yaml"
+            && path != config.virtual_store_dir
+        {
+            continue;
+        }
+
+        if file_type.is_dir() {
+            let _ = fs::remove_dir_all(&path);
+        } else {
+            let _ = fs::remove_file(&path);
+        }
+    }
+    Ok(true)
+}
+
+fn modules_manifest_is_compatible(
+    modules_manifest: &crate::ModulesManifest,
+    config: &Npmrc,
+    dependency_groups: &[DependencyGroup],
+) -> bool {
+    if modules_manifest.node_linker() != Some(node_linker_name(config)) {
+        return false;
+    }
+    let expected_store_dir =
+        fs::canonicalize(PathBuf::from(config.store_dir.display().to_string()).join("v10"))
+            .unwrap_or_else(|_| PathBuf::from(config.store_dir.display().to_string()).join("v10"))
+            .display()
+            .to_string();
+    if modules_manifest.store_dir() != Some(expected_store_dir.as_str()) {
+        return false;
+    }
+    if modules_manifest.resolved_virtual_store_dir(&config.modules_dir) != config.virtual_store_dir
+    {
+        return false;
+    }
+    if modules_manifest.included() != Some(&included_dependencies(dependency_groups)) {
+        return false;
+    }
+    if modules_manifest.hoist_pattern().unwrap_or(&[]) != config.hoist_pattern {
+        return false;
+    }
+    if modules_manifest.public_hoist_pattern().unwrap_or(&[]) != config.public_hoist_pattern {
+        return false;
+    }
+    modules_manifest.virtual_store_dir_max_length() == crate::DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH
+}
+
+fn current_lockfile_matches_expected(
+    current_lockfile: &Lockfile,
+    expected_current_lockfile: &Lockfile,
+    importer_id: &str,
+) -> bool {
+    current_lockfile.lockfile_version == expected_current_lockfile.lockfile_version
+        && current_lockfile.settings == expected_current_lockfile.settings
+        && current_lockfile.never_built_dependencies
+            == expected_current_lockfile.never_built_dependencies
+        && current_lockfile.ignored_optional_dependencies
+            == expected_current_lockfile.ignored_optional_dependencies
+        && current_lockfile.overrides == expected_current_lockfile.overrides
+        && current_lockfile.package_extensions_checksum
+            == expected_current_lockfile.package_extensions_checksum
+        && current_lockfile.patched_dependencies == expected_current_lockfile.patched_dependencies
+        && current_lockfile.pnpmfile_checksum == expected_current_lockfile.pnpmfile_checksum
+        && current_lockfile.catalogs == expected_current_lockfile.catalogs
+        && current_lockfile.time == expected_current_lockfile.time
+        && current_lockfile.extra_fields == expected_current_lockfile.extra_fields
+        && current_lockfile.packages == expected_current_lockfile.packages
+        && snapshot_importer_count(&current_lockfile.project_snapshot) == 1
+        && snapshot_importer_count(&expected_current_lockfile.project_snapshot) == 1
+        && snapshot_for_importer(&current_lockfile.project_snapshot, importer_id)
+            == snapshot_for_importer(&expected_current_lockfile.project_snapshot, importer_id)
+}
+
+fn snapshot_importer_count(snapshot: &RootProjectSnapshot) -> usize {
+    match snapshot {
+        RootProjectSnapshot::Single(_) => 1,
+        RootProjectSnapshot::Multi(snapshot) => snapshot.importers.len(),
+    }
+}
+
+fn snapshot_for_importer<'a>(
+    snapshot: &'a RootProjectSnapshot,
+    importer_id: &str,
+) -> Option<&'a pacquet_lockfile::ProjectSnapshot> {
+    match snapshot {
+        RootProjectSnapshot::Single(snapshot) => (importer_id == ".").then_some(snapshot),
+        RootProjectSnapshot::Multi(snapshot) => snapshot.importers.get(importer_id),
+    }
+}
+
+fn node_linker_name(config: &Npmrc) -> &'static str {
+    match config.node_linker {
+        pacquet_npmrc::NodeLinker::Hoisted => "hoisted",
+        pacquet_npmrc::NodeLinker::Isolated => "isolated",
+        pacquet_npmrc::NodeLinker::Pnp => "pnp",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pacquet_lockfile::ProjectSnapshot;
     use pacquet_npmrc::Npmrc;
     use pacquet_package_manifest::{DependencyGroup, PackageManifest};
     use pacquet_registry_mock::AutoMockInstance;
     use pacquet_testing_utils::fs::{
         get_all_folders, get_filenames_in_folder, is_symlink_or_junction,
     };
-    use std::{fs, path::Path};
+    use std::{collections::HashMap, fs, path::Path};
     use tempfile::tempdir;
 
     #[test]
@@ -619,6 +1018,9 @@ mod tests {
                     force: false,
                     prefer_offline: false,
                     offline: false,
+                    pnpmfile: None,
+                    ignore_pnpmfile: false,
+                    reporter_prefix: None,
                     reporter: progress_reporter::InstallReporter::Default,
                     print_summary: true,
                     resolved_packages: &Default::default(),
@@ -695,6 +1097,9 @@ mod tests {
                     force: false,
                     prefer_offline: false,
                     offline: false,
+                    pnpmfile: None,
+                    ignore_pnpmfile: false,
+                    reporter_prefix: None,
                     reporter: progress_reporter::InstallReporter::Default,
                     print_summary: true,
                     resolved_packages: &Default::default(),
@@ -953,6 +1358,226 @@ mod tests {
     }
 
     #[test]
+    fn recreate_modules_dir_if_incompatible_removes_pnpm_managed_entries() {
+        let dir = tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
+        fs::create_dir_all(virtual_store_dir.join("dep@1.0.0/node_modules/dep"))
+            .expect("create virtual store package");
+        fs::create_dir_all(modules_dir.join("dep")).expect("create root package");
+        fs::write(modules_dir.join(".keep"), "keep").expect("write keep file");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = modules_dir.clone();
+        config.virtual_store_dir = virtual_store_dir.clone();
+        config.store_dir = pacquet_store_dir::StoreDir::new(dir.path().join("store"));
+        write_modules_manifest(&modules_dir, &config, &[DependencyGroup::Prod], &[], None, None)
+            .expect("write modules manifest");
+
+        config.node_linker = pacquet_npmrc::NodeLinker::Hoisted;
+        assert!(
+            recreate_modules_dir_if_incompatible(&config, &[DependencyGroup::Prod])
+                .expect("recreate modules dir")
+        );
+
+        assert!(modules_dir.join(".keep").exists());
+        assert!(!modules_dir.join(".modules.yaml").exists());
+        assert!(!modules_dir.join("dep").exists());
+        assert!(!virtual_store_dir.exists());
+    }
+
+    #[test]
+    fn recreate_modules_dir_if_incompatible_keeps_compatible_layout() {
+        let dir = tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
+        fs::create_dir_all(virtual_store_dir.join("dep@1.0.0/node_modules/dep"))
+            .expect("create virtual store package");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = modules_dir.clone();
+        config.virtual_store_dir = virtual_store_dir.clone();
+        config.store_dir = pacquet_store_dir::StoreDir::new(dir.path().join("store"));
+        write_modules_manifest(&modules_dir, &config, &[DependencyGroup::Prod], &[], None, None)
+            .expect("write modules manifest");
+
+        assert!(
+            !recreate_modules_dir_if_incompatible(&config, &[DependencyGroup::Prod])
+                .expect("check modules dir compatibility")
+        );
+        assert!(modules_dir.join(".modules.yaml").exists());
+        assert!(virtual_store_dir.exists());
+    }
+
+    #[test]
+    fn recreate_modules_dir_if_incompatible_when_hoist_pattern_changes() {
+        let dir = tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
+        fs::create_dir_all(virtual_store_dir.join("dep@1.0.0/node_modules/dep"))
+            .expect("create virtual store package");
+        fs::create_dir_all(modules_dir.join("dep")).expect("create root package");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = modules_dir.clone();
+        config.virtual_store_dir = virtual_store_dir.clone();
+        config.store_dir = pacquet_store_dir::StoreDir::new(dir.path().join("store"));
+        config.hoist_pattern = vec!["*eslint*".to_string()];
+        write_modules_manifest(&modules_dir, &config, &[DependencyGroup::Prod], &[], None, None)
+            .expect("write modules manifest");
+
+        config.hoist_pattern = vec!["*babel*".to_string()];
+        assert!(
+            recreate_modules_dir_if_incompatible(&config, &[DependencyGroup::Prod])
+                .expect("recreate modules dir")
+        );
+        assert!(!modules_dir.join("dep").exists());
+        assert!(!virtual_store_dir.exists());
+    }
+
+    #[test]
+    fn recreate_modules_dir_if_incompatible_when_registry_config_changes() {
+        let dir = tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
+        fs::create_dir_all(virtual_store_dir.join("dep@1.0.0/node_modules/dep"))
+            .expect("create virtual store package");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = modules_dir.clone();
+        config.virtual_store_dir = virtual_store_dir.clone();
+        config.store_dir = pacquet_store_dir::StoreDir::new(dir.path().join("store"));
+        config.registry = "https://default.example/".to_string();
+        config.set_raw_setting("@foo:registry", "https://foo.example");
+        write_modules_manifest(&modules_dir, &config, &[DependencyGroup::Prod], &[], None, None)
+            .expect("write modules manifest");
+
+        config.set_raw_setting("@foo:registry", "https://bar.example");
+        assert!(
+            !recreate_modules_dir_if_incompatible(&config, &[DependencyGroup::Prod])
+                .expect("recreate modules dir")
+        );
+        assert!(virtual_store_dir.exists());
+    }
+
+    #[test]
+    fn recreate_modules_dir_if_incompatible_when_virtual_store_dir_max_length_changes() {
+        let dir = tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
+        fs::create_dir_all(virtual_store_dir.join("dep@1.0.0/node_modules/dep"))
+            .expect("create virtual store package");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = modules_dir.clone();
+        config.virtual_store_dir = virtual_store_dir.clone();
+        config.store_dir = pacquet_store_dir::StoreDir::new(dir.path().join("store"));
+        write_modules_manifest(&modules_dir, &config, &[DependencyGroup::Prod], &[], None, None)
+            .expect("write modules manifest");
+        let manifest_path = modules_dir.join(".modules.yaml");
+        let content = fs::read_to_string(&manifest_path).expect("read modules manifest");
+        fs::write(
+            &manifest_path,
+            content.replace("virtualStoreDirMaxLength: 120", "virtualStoreDirMaxLength: 64"),
+        )
+        .expect("rewrite modules manifest");
+
+        assert!(
+            recreate_modules_dir_if_incompatible(&config, &[DependencyGroup::Prod])
+                .expect("recreate modules dir")
+        );
+        assert!(!virtual_store_dir.exists());
+    }
+
+    #[test]
+    fn persisted_install_state_is_reusable_when_modules_manifest_and_current_lockfile_match() {
+        let dir = tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
+        fs::create_dir_all(&virtual_store_dir).expect("create virtual store dir");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = modules_dir.clone();
+        config.virtual_store_dir = virtual_store_dir.clone();
+        config.store_dir = pacquet_store_dir::StoreDir::new(dir.path().join("store"));
+
+        let wanted_lockfile_path = dir.path().join("pnpm-lock.yaml");
+        lockfile_with_dependency("dep", DependencyGroup::Prod, false)
+            .save_to_path(&wanted_lockfile_path)
+            .expect("write wanted lockfile");
+        let lockfile = Lockfile::load_from_path(&wanted_lockfile_path)
+            .expect("load wanted lockfile")
+            .expect("wanted lockfile should exist");
+        let current_lockfile = current_lockfile_for_installers(
+            &lockfile,
+            &std::collections::HashSet::from([".".to_string()]),
+            &[DependencyGroup::Prod],
+            &std::collections::HashSet::new(),
+        );
+        current_lockfile
+            .save_to_path(&virtual_store_dir.join("lock.yaml"))
+            .expect("write current lockfile");
+        write_modules_manifest(&modules_dir, &config, &[DependencyGroup::Prod], &[], None, None)
+            .expect("write modules manifest");
+
+        assert!(persisted_install_state_is_reusable(
+            &lockfile,
+            &config,
+            ".",
+            &[DependencyGroup::Prod],
+        ));
+    }
+
+    #[test]
+    fn persisted_install_state_is_not_reusable_when_current_lockfile_differs() {
+        let dir = tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
+        fs::create_dir_all(&virtual_store_dir).expect("create virtual store dir");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = modules_dir.clone();
+        config.virtual_store_dir = virtual_store_dir.clone();
+        config.store_dir = pacquet_store_dir::StoreDir::new(dir.path().join("store"));
+
+        let lockfile = lockfile_with_dependency("dep", DependencyGroup::Prod, false);
+        Lockfile { packages: Some(HashMap::new()), ..lockfile.clone() }
+            .save_to_path(&virtual_store_dir.join("lock.yaml"))
+            .expect("write mismatched current lockfile");
+        write_modules_manifest(&modules_dir, &config, &[DependencyGroup::Prod], &[], None, None)
+            .expect("write modules manifest");
+
+        assert!(!persisted_install_state_is_reusable(
+            &lockfile,
+            &config,
+            ".",
+            &[DependencyGroup::Prod],
+        ));
+    }
+
+    #[test]
+    fn persisted_install_state_is_not_reusable_when_current_lockfile_is_missing() {
+        let dir = tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
+        fs::create_dir_all(&virtual_store_dir).expect("create virtual store dir");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = modules_dir;
+        config.virtual_store_dir = virtual_store_dir;
+        config.store_dir = pacquet_store_dir::StoreDir::new(dir.path().join("store"));
+
+        let lockfile = lockfile_with_dependency("dep", DependencyGroup::Prod, false);
+
+        assert!(!persisted_install_state_is_reusable(
+            &lockfile,
+            &config,
+            ".",
+            &[DependencyGroup::Prod],
+        ));
+    }
+
+    #[test]
     fn summary_line_formats_npm_alias_like_pnpm() {
         assert_eq!(
             format_summary_dependency_line(
@@ -975,9 +1600,131 @@ mod tests {
         assert!(line.contains("local-pkg"));
     }
 
+    #[test]
+    fn prefixed_summary_stats_truncates_long_prefix_like_pnpm() {
+        let line =
+            format_prefixed_summary_stats("loooooooooooooooooooooooooooooooooong-pkg-4", 0, 1);
+        assert!(line.starts_with("..."));
+        assert!(line.contains("ong-pkg-4"));
+        assert!(line.contains("|"));
+    }
+
+    #[test]
+    fn prefixed_summary_stats_caps_single_stat_symbol_bar() {
+        let line = format_prefixed_summary_stats("pkg-1", 190, 0);
+        assert_eq!(line, "pkg-1                                     | +190 ++++++++++++");
+    }
+
+    #[test]
+    fn prefixed_summary_stats_balances_added_and_removed_symbols() {
+        let line = format_prefixed_summary_stats("pkg-1", 100, 1);
+        assert_eq!(line, "pkg-1                                     | +100    -1 ++++++++-");
+    }
+
+    #[test]
+    fn prefixed_summary_stats_right_aligns_small_add_count_when_removed_dominates() {
+        let line = format_prefixed_summary_stats("pkg-1", 1, 100);
+        assert_eq!(line, "pkg-1                                     |    +1 -100 +--------");
+    }
+
+    #[test]
+    fn current_lockfile_for_installers_omits_skipped_packages() {
+        let dependency_path = DependencyPath::registry(
+            None,
+            PkgNameVerPeer::new("opt".parse().expect("name"), "1.0.0".parse().expect("version")),
+        );
+        let lockfile = lockfile_with_dependency("opt", DependencyGroup::Optional, true);
+
+        let filtered = current_lockfile_for_installers(
+            &lockfile,
+            &std::collections::HashSet::from([".".to_string()]),
+            &[DependencyGroup::Optional],
+            &std::collections::HashSet::from([dependency_path.to_string()]),
+        );
+
+        assert!(matches!(filtered.project_snapshot, RootProjectSnapshot::Multi(_)));
+        assert!(filtered.packages.expect("packages").is_empty());
+    }
+
     fn load_manifest(dir: &Path, value: serde_json::Value) -> PackageManifest {
         let manifest_path = dir.join("package.json");
         fs::write(&manifest_path, value.to_string()).expect("write package.json");
         PackageManifest::from_path(manifest_path).expect("load manifest")
+    }
+
+    fn lockfile_with_dependency(
+        name: &str,
+        dependency_group: DependencyGroup,
+        optional: bool,
+    ) -> Lockfile {
+        let pkg_name: PkgName = name.parse().expect("name");
+        let dependency_path = DependencyPath::registry(
+            None,
+            PkgNameVerPeer::new(pkg_name.clone(), "1.0.0".parse().expect("version")),
+        );
+        let resolved_spec = pacquet_lockfile::ResolvedDependencySpec {
+            specifier: "^1.0.0".to_string(),
+            version: ResolvedDependencyVersion::PkgVerPeer("1.0.0".parse().expect("version")),
+        };
+        let importer_snapshot = match dependency_group {
+            DependencyGroup::Prod => ProjectSnapshot {
+                dependencies: Some(HashMap::from([(pkg_name, resolved_spec)])),
+                ..ProjectSnapshot::default()
+            },
+            DependencyGroup::Dev => ProjectSnapshot {
+                dev_dependencies: Some(HashMap::from([(pkg_name, resolved_spec)])),
+                ..ProjectSnapshot::default()
+            },
+            DependencyGroup::Optional => ProjectSnapshot {
+                optional_dependencies: Some(HashMap::from([(pkg_name, resolved_spec)])),
+                ..ProjectSnapshot::default()
+            },
+            DependencyGroup::Peer => ProjectSnapshot::default(),
+        };
+        Lockfile {
+            lockfile_version: pacquet_lockfile::ComVer::new(9, 0),
+            settings: None,
+            never_built_dependencies: None,
+            ignored_optional_dependencies: None,
+            overrides: None,
+            package_extensions_checksum: None,
+            patched_dependencies: None,
+            pnpmfile_checksum: None,
+            catalogs: None,
+            time: None,
+            extra_fields: HashMap::new(),
+            project_snapshot: RootProjectSnapshot::Multi(pacquet_lockfile::MultiProjectSnapshot {
+                importers: HashMap::from([(".".to_string(), importer_snapshot)]),
+            }),
+            packages: Some(HashMap::from([(
+                dependency_path,
+                PackageSnapshot {
+                    resolution: pacquet_lockfile::LockfileResolution::Registry(
+                        pacquet_lockfile::RegistryResolution {
+                            integrity: "sha512-Bw==".parse().expect("integrity"),
+                        },
+                    ),
+                    id: None,
+                    name: None,
+                    version: None,
+                    engines: None,
+                    cpu: None,
+                    os: None,
+                    libc: None,
+                    deprecated: None,
+                    has_bin: None,
+                    prepare: None,
+                    requires_build: None,
+                    bundled_dependencies: None,
+                    peer_dependencies: None,
+                    peer_dependencies_meta: None,
+                    dependencies: None,
+                    optional_dependencies: None,
+                    transitive_peer_dependencies: None,
+                    dev: None,
+                    optional: Some(optional),
+                },
+            )])),
+        }
     }
 }

@@ -68,6 +68,8 @@ impl DlxArgs {
                 packages: &install_packages,
                 save_exact: false,
                 workspace_only: false,
+                pnpmfile: None,
+                ignore_pnpmfile: false,
                 reporter,
             }
             .run()
@@ -198,7 +200,8 @@ fn replace_cache_link(cache_link: &Path, project_dir: &Path) -> miette::Result<(
 
 fn remove_cache_link(cache_link: &Path) -> miette::Result<()> {
     if is_symlink_or_junction(cache_link).unwrap_or(false) {
-        fs::remove_dir(cache_link)
+        fs::remove_file(cache_link)
+            .or_else(|_| fs::remove_dir(cache_link))
             .into_diagnostic()
             .wrap_err_with(|| format!("remove {}", cache_link.display()))?;
         return Ok(());

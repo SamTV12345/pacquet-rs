@@ -37,6 +37,18 @@ fn normalize_store_files(files: &[String]) -> Vec<String> {
     normalized
 }
 
+fn normalize_private_virtual_store_files(files: &[String]) -> Vec<String> {
+    let mut normalized = files
+        .iter()
+        .filter_map(|path| {
+            let path = path.replace('\\', "/");
+            path.split_once("/node_modules/.pnpm/").map(|(_, suffix)| suffix.to_string())
+        })
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized
+}
+
 fn parse_index_payload_file(path: &Path) -> Option<BTreeMap<String, ComparableFileInfo>> {
     let path_str = path.to_string_lossy().replace('\\', "/");
 
@@ -148,6 +160,34 @@ fn normalized_lockfile(lockfile_text: &str) -> serde_json::Value {
         root.remove(&settings_key);
     }
 
+    canonicalize_json(serde_json::to_value(value).expect("convert yaml to json"))
+}
+
+fn normalized_yaml(yaml_text: &str) -> serde_json::Value {
+    fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut sorted = std::collections::BTreeMap::new();
+                for (key, value) in map {
+                    sorted.insert(key, canonicalize_json(value));
+                }
+                let mut canonical = serde_json::Map::new();
+                for (key, value) in sorted {
+                    canonical.insert(key, value);
+                }
+                serde_json::Value::Object(canonical)
+            }
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.into_iter().map(canonicalize_json).collect())
+            }
+            other => other,
+        }
+    }
+
+    let mut value = serde_yaml::from_str::<serde_yaml::Value>(yaml_text).expect("parse yaml");
+    if let Some(root) = value.as_mapping_mut() {
+        root.remove(serde_yaml::Value::String("prunedAt".to_string()));
+    }
     canonicalize_json(serde_json::to_value(value).expect("convert yaml to json"))
 }
 
@@ -526,6 +566,152 @@ fn same_index_file_contents() {
 
     eprintln!("Produce equivalent index payloads");
     assert_eq!(&pacquet_index_file_contents, &pnpm_index_file_contents);
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn same_modules_manifest_content() {
+    let CommandTempCwd { pacquet, pnpm, root, workspace, npmrc_info } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { store_dir, mock_instance, .. } = npmrc_info;
+
+    let modules_dir = workspace.join("node_modules");
+    let modules_manifest_path = modules_dir.join(".modules.yaml");
+    let cleanup = || {
+        eprintln!("Cleaning up...");
+        remove_path_if_exists(&store_dir);
+        remove_path_if_exists(&modules_dir);
+    };
+
+    eprintln!("Creating package.json...");
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    eprintln!("Installing with pacquet...");
+    pacquet.with_arg("install").assert().success();
+    let pacquet_modules_manifest = normalized_yaml(
+        &fs::read_to_string(&modules_manifest_path).expect("read pacquet modules manifest"),
+    );
+
+    cleanup();
+
+    eprintln!("Installing with pnpm...");
+    pnpm.with_args(["install", "--ignore-scripts"]).assert().success();
+    let pnpm_modules_manifest = normalized_yaml(
+        &fs::read_to_string(&modules_manifest_path).expect("read pnpm modules manifest"),
+    );
+
+    cleanup();
+
+    eprintln!("Produce equivalent node_modules/.modules.yaml");
+    assert_eq!(&pacquet_modules_manifest, &pnpm_modules_manifest);
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn same_private_virtual_store_layout() {
+    let CommandTempCwd { pacquet, pnpm, root, workspace, npmrc_info } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { store_dir, mock_instance, .. } = npmrc_info;
+
+    let modules_dir = workspace.join("node_modules");
+    let cleanup = || {
+        eprintln!("Cleaning up...");
+        remove_path_if_exists(&store_dir);
+        remove_path_if_exists(&modules_dir);
+    };
+
+    eprintln!("Creating package.json...");
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    eprintln!("Installing with pacquet...");
+    pacquet.with_arg("install").assert().success();
+    let pacquet_virtual_store_files = normalize_private_virtual_store_files(&get_all_files(
+        &workspace.join("node_modules/.pnpm"),
+    ));
+
+    cleanup();
+
+    eprintln!("Installing with pnpm...");
+    pnpm.with_args(["install", "--ignore-scripts"]).assert().success();
+    let pnpm_virtual_store_files = normalize_private_virtual_store_files(&get_all_files(
+        &workspace.join("node_modules/.pnpm"),
+    ));
+
+    cleanup();
+
+    eprintln!("Produce equivalent node_modules/.pnpm layout");
+    assert_eq!(&pacquet_virtual_store_files, &pnpm_virtual_store_files);
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn second_install_is_noop_like_pnpm() {
+    let CommandTempCwd { root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    eprintln!("Creating package.json...");
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    eprintln!("Priming pacquet install...");
+    std::process::Command::new(assert_cmd::cargo::cargo_bin!("pacquet"))
+        .with_current_dir(&workspace)
+        .with_arg("install")
+        .assert()
+        .success();
+    eprintln!("Priming pnpm install...");
+    std::process::Command::new("pnpm")
+        .with_current_dir(&workspace)
+        .with_args(["install", "--ignore-scripts"])
+        .assert()
+        .success();
+
+    eprintln!("Running second pacquet install...");
+    let pacquet_output = std::process::Command::new(assert_cmd::cargo::cargo_bin!("pacquet"))
+        .with_current_dir(&workspace)
+        .with_arg("install")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let pacquet_stdout = String::from_utf8(pacquet_output).expect("pacquet stdout utf8");
+
+    eprintln!("Running second pnpm install...");
+    let pnpm_output = std::process::Command::new("pnpm")
+        .with_current_dir(&workspace)
+        .with_args(["install", "--ignore-scripts"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let pnpm_stdout = String::from_utf8(pnpm_output).expect("pnpm stdout utf8");
+
+    assert!(pnpm_stdout.contains("Already up to date"));
+    assert!(pacquet_stdout.contains("Already up to date"));
+    assert!(!pacquet_stdout.contains("Packages: +"));
 
     drop((root, mock_instance)); // cleanup
 }

@@ -25,6 +25,8 @@ pub(crate) fn collect_runtime_lockfile_config(
     config: &Npmrc,
     manifest: &PackageManifest,
     lockfile_dir: &Path,
+    pnpmfile: Option<&Path>,
+    ignore_pnpmfile: bool,
 ) -> RuntimeLockfileConfig {
     let workspace_manifest = read_workspace_manifest(lockfile_dir);
     let root_package = read_root_package_json(lockfile_dir, manifest);
@@ -49,7 +51,9 @@ pub(crate) fn collect_runtime_lockfile_config(
         catalogs: extract_catalogs(workspace_manifest.as_ref()),
         overrides,
         package_extensions_checksum: hash_object_nullable_with_prefix(package_extensions.as_ref()),
-        pnpmfile_checksum: calculate_pnpmfile_checksum(lockfile_dir),
+        pnpmfile_checksum: (!ignore_pnpmfile)
+            .then(|| calculate_pnpmfile_checksum(lockfile_dir, pnpmfile))
+            .flatten(),
     }
 }
 
@@ -509,8 +513,13 @@ fn hash_object_nullable_with_prefix(object: Option<&JsonValue>) -> Option<String
     Some(format!("sha256-{}", BASE64.encode(Sha256::digest(raw.as_bytes()))))
 }
 
-fn calculate_pnpmfile_checksum(lockfile_dir: &Path) -> Option<String> {
-    let content = fs::read_to_string(lockfile_dir.join(".pnpmfile.cjs")).ok()?;
+fn calculate_pnpmfile_checksum(lockfile_dir: &Path, pnpmfile: Option<&Path>) -> Option<String> {
+    let pnpmfile_path = crate::resolve_pnpmfile_path(lockfile_dir, pnpmfile);
+    match crate::pnpmfile_exports_value(&pnpmfile_path).ok()? {
+        None | Some(false) => return None,
+        Some(true) => {}
+    }
+    let content = fs::read_to_string(pnpmfile_path).ok()?;
     let normalized = content.replace("\r\n", "\n");
     Some(format!("sha256-{}", BASE64.encode(Sha256::digest(normalized.as_bytes()))))
 }
@@ -598,6 +607,7 @@ mod tests {
             pnpmfile_checksum: None,
             catalogs: None,
             time: None,
+            extra_fields: Default::default(),
             project_snapshot: RootProjectSnapshot::Single(project_snapshot),
             packages: None,
         }
@@ -610,7 +620,8 @@ mod tests {
         let mut lockfile = empty_lockfile(ProjectSnapshot::default());
         lockfile.overrides = Some(HashMap::from([("foo".to_string(), "1.0.0".to_string())]));
 
-        let runtime = collect_runtime_lockfile_config(&Npmrc::new(), &manifest, dir.path());
+        let runtime =
+            collect_runtime_lockfile_config(&Npmrc::new(), &manifest, dir.path(), None, false);
         assert_eq!(get_outdated_lockfile_setting(&lockfile, &runtime), Some("overrides"));
     }
 
@@ -622,7 +633,8 @@ mod tests {
         lockfile.settings =
             Some(LockfileSettings { auto_install_peers: Some(false), ..Default::default() });
 
-        let runtime = collect_runtime_lockfile_config(&Npmrc::new(), &manifest, dir.path());
+        let runtime =
+            collect_runtime_lockfile_config(&Npmrc::new(), &manifest, dir.path(), None, false);
         assert_eq!(
             get_outdated_lockfile_setting(&lockfile, &runtime),
             Some("settings.autoInstallPeers")
@@ -644,8 +656,21 @@ mod tests {
             .expect("parse catalog snapshot"),
         );
 
-        let runtime = collect_runtime_lockfile_config(&Npmrc::new(), &manifest, dir.path());
+        let runtime =
+            collect_runtime_lockfile_config(&Npmrc::new(), &manifest, dir.path(), None, false);
         assert_eq!(get_outdated_lockfile_setting(&lockfile, &runtime), Some("catalogs"));
+    }
+
+    #[test]
+    fn pnpmfile_checksum_is_none_when_pnpmfile_exports_undefined() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join(".pnpmfile.cjs"), "module.exports = undefined;\n")
+            .expect("write pnpmfile");
+        let manifest = load_manifest_from_json(dir.path(), serde_json::json!({}));
+
+        let runtime =
+            collect_runtime_lockfile_config(&Npmrc::new(), &manifest, dir.path(), None, false);
+        assert_eq!(runtime.pnpmfile_checksum, None);
     }
 
     #[test]

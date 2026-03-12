@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Display, Error)]
-pub(crate) enum LockfileFileError {
+pub enum LockfileFileError {
     #[display("Failed to parse lockfile header: {_0}")]
     ParseHeader(#[error(source)] serde_yaml::Error),
 
@@ -18,6 +18,9 @@ pub(crate) enum LockfileFileError {
 
     #[display("Failed to parse lockfile as v9 format: {_0}")]
     ParseV9(#[error(source)] serde_yaml::Error),
+
+    #[display("Failed to parse hook-mutated lockfile as v9 JSON: {_0}")]
+    ParseV9Json(#[error(source)] serde_json::Error),
 
     #[display("Unsupported lockfileVersion: {_0}. Expected major 6 or 9")]
     UnsupportedVersion(#[error(not(source))] ComVer),
@@ -61,6 +64,8 @@ struct LockfileV6File {
     project_snapshot: RootProjectSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     packages: Option<HashMap<DependencyPath, PackageSnapshot>>,
+    #[serde(flatten)]
+    extra_fields: HashMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -89,6 +94,8 @@ struct LockfileV9File {
     packages: Option<HashMap<String, LockfilePackageInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     snapshots: Option<HashMap<String, LockfilePackageSnapshot>>,
+    #[serde(flatten)]
+    extra_fields: HashMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -173,6 +180,7 @@ pub(crate) fn parse_lockfile_content(content: &str) -> Result<Lockfile, Lockfile
                 pnpmfile_checksum: None,
                 catalogs: None,
                 time: None,
+                extra_fields: v6.extra_fields,
                 project_snapshot: v6.project_snapshot,
                 packages: v6.packages,
             })
@@ -191,6 +199,17 @@ pub(crate) fn render_lockfile_content(lockfile: &Lockfile) -> Result<String, ser
     let sorted = to_sorted_v9(&lockfile_file);
     let yaml = serde_yaml::to_string(&sorted)?;
     Ok(postprocess_lockfile_yaml(&yaml))
+}
+
+pub fn lockfile_to_json_value(lockfile: &Lockfile) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(convert_lockfile_to_v9(lockfile))
+}
+
+pub fn lockfile_from_json_value(value: serde_json::Value) -> Result<Lockfile, LockfileFileError> {
+    let bytes = serde_json::to_vec(&value).map_err(LockfileFileError::ParseV9Json)?;
+    let v9: LockfileV9File =
+        serde_json::from_slice(&bytes).map_err(LockfileFileError::ParseV9Json)?;
+    convert_v9_to_lockfile(v9)
 }
 
 /// A mirror of [`LockfileV9File`] that uses [`BTreeMap`] everywhere so that
@@ -222,6 +241,8 @@ struct SortedLockfileV9 {
     packages: Option<BTreeMap<String, serde_yaml::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     snapshots: Option<BTreeMap<String, serde_yaml::Value>>,
+    #[serde(flatten)]
+    extra_fields: BTreeMap<String, serde_yaml::Value>,
 }
 
 fn to_sorted_v9(v9: &LockfileV9File) -> SortedLockfileV9 {
@@ -259,6 +280,11 @@ fn to_sorted_v9(v9: &LockfileV9File) -> SortedLockfileV9 {
         importers: sort_map(&v9.importers),
         packages: sort_map(&v9.packages),
         snapshots: sort_map(&v9.snapshots),
+        extra_fields: v9
+            .extra_fields
+            .iter()
+            .map(|(k, v)| (k.clone(), sort_yaml_value(v.clone())))
+            .collect(),
     }
 }
 
@@ -463,6 +489,7 @@ fn convert_v9_to_lockfile(v9: LockfileV9File) -> Result<Lockfile, LockfileFileEr
         pnpmfile_checksum: v9.pnpmfile_checksum,
         catalogs: v9.catalogs,
         time: v9.time,
+        extra_fields: v9.extra_fields,
         project_snapshot,
         packages: (!packages.is_empty()).then_some(packages),
     })
@@ -500,6 +527,7 @@ fn convert_lockfile_to_v9(lockfile: &Lockfile) -> LockfileV9File {
         importers: Some(root_snapshot_to_file_importers(&lockfile.project_snapshot)),
         packages: (!package_infos.is_empty()).then_some(package_infos),
         snapshots: (!package_snapshots.is_empty()).then_some(package_snapshots),
+        extra_fields: lockfile.extra_fields.clone(),
     }
 }
 

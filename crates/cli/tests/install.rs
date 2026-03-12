@@ -1177,6 +1177,36 @@ fn should_create_lockfile_without_node_modules_with_lockfile_only() {
 }
 
 #[test]
+fn lockfile_only_should_warn_when_current_lockfile_exists() {
+    let CommandTempCwd { root, workspace, .. } = CommandTempCwd::init();
+
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write to package.json");
+    fs::create_dir_all(workspace.join("node_modules/.pnpm")).expect("create virtual store dir");
+    fs::write(
+        workspace.join("node_modules/.pnpm/lock.yaml"),
+        "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
+    )
+    .expect("write current lockfile");
+
+    let assert =
+        pacquet_command(&workspace).with_args(["install", "--lockfile-only"]).assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains(
+        "WARN `node_modules` is present. Lockfile only installation will make it out-of-date"
+    ));
+
+    drop(root); // cleanup
+}
+
+#[test]
 fn should_create_lockfile_without_node_modules_with_resolution_only() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
@@ -1337,13 +1367,272 @@ fn reporter_append_only_should_write_static_progress_lines_to_stderr() {
     let assert = pacquet.with_args(["install", "--reporter", "append-only"]).assert().success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
-    assert!(stdout.contains("Packages: +1"));
-    assert!(stdout.contains("Done in "));
-    assert!(stderr.contains("pacquet starting [regular]"));
-    assert!(stderr.contains("pacquet done [regular]"));
+    assert!(stdout.contains("Packages: +"));
+    assert!(stdout.contains("using pacquet v"));
+    assert!(stderr.contains("Progress: resolved "));
+    assert!(stderr.contains(", done"));
     assert!(!stderr.contains("\u{1b}["));
 
     drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn hook_logs_should_be_printed_by_append_only_reporter() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "workspace",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write package.json");
+    fs::write(
+        workspace.join(".pnpmfile.cjs"),
+        r#"
+module.exports = {
+  hooks: {
+    readPackage (pkg, ctx) {
+      ctx.log("foo");
+      return pkg;
+    }
+  }
+}
+"#,
+    )
+    .expect("write pnpmfile");
+
+    let assert = pacquet.with_args(["install", "--reporter", "append-only"]).assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("readPackage: foo"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn hook_logs_should_be_suppressed_by_silent_reporter() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "workspace",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write package.json");
+    fs::write(
+        workspace.join(".pnpmfile.cjs"),
+        r#"
+module.exports = {
+  hooks: {
+    readPackage (pkg, ctx) {
+      ctx.log("foo");
+      return pkg;
+    }
+  }
+}
+"#,
+    )
+    .expect("write pnpmfile");
+
+    let assert = pacquet.with_args(["install", "--reporter", "silent"]).assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.trim().is_empty());
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn install_should_use_custom_pnpmfile_path() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "workspace",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write package.json");
+    fs::write(
+        workspace.join(".pnpmfile.cjs"),
+        r#"
+module.exports = {
+  hooks: {
+    readPackage (pkg, ctx) {
+      ctx.log("default");
+      return pkg;
+    }
+  }
+}
+"#,
+    )
+    .expect("write default pnpmfile");
+    fs::create_dir_all(workspace.join("hooks")).expect("create hooks dir");
+    fs::write(
+        workspace.join("hooks/custom.cjs"),
+        r#"
+module.exports = {
+  hooks: {
+    readPackage (pkg, ctx) {
+      ctx.log("custom");
+      return pkg;
+    }
+  }
+}
+"#,
+    )
+    .expect("write custom pnpmfile");
+
+    let assert = pacquet
+        .with_args(["install", "--reporter", "append-only", "--pnpmfile", "hooks/custom.cjs"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("readPackage: custom"));
+    assert!(!stderr.contains("readPackage: default"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn recursive_install_should_prefix_hook_and_progress_output() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - '*'\n  - '*/*'\n")
+        .expect("write workspace manifest");
+    fs::create_dir_all(workspace.join("packages/app")).expect("create app dir");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "root",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write root package.json");
+    fs::write(
+        workspace.join("packages/app/package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app package.json");
+    fs::write(
+        workspace.join(".pnpmfile.cjs"),
+        r#"
+module.exports = {
+  hooks: {
+    readPackage (pkg, ctx) {
+      ctx.log("foo");
+      return pkg;
+    }
+  }
+}
+"#,
+    )
+    .expect("write pnpmfile");
+
+    let assert = pacquet
+        .with_args(["install", "--recursive", "--reporter", "append-only"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.lines().any(|line| line.starts_with(".") && line.contains("readPackage: foo")));
+    assert!(
+        stderr.lines().any(|line| line.starts_with(".") && line.contains("Progress: resolved"))
+    );
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.contains("packages/app") && line.contains("Progress: resolved"))
+    );
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn recursive_install_should_not_print_full_noop_summaries() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - '*'\n  - '*/*'\n")
+        .expect("write workspace manifest");
+    fs::create_dir_all(workspace.join("packages/app")).expect("create app dir");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "root",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write root package.json");
+    fs::write(
+        workspace.join("packages/app/package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app package.json");
+
+    let assert = pacquet
+        .with_args(["install", "--recursive", "--reporter", "append-only"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(stdout.trim().is_empty());
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn recursive_install_should_shorten_long_workspace_prefixes_like_pnpm() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - '*'\n  - '*/*'\n")
+        .expect("write workspace manifest");
+    let long_dir = workspace.join("loooooooooooooooooooooooooooooooooong").join("pkg-3");
+    fs::create_dir_all(&long_dir).expect("create long app dir");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "root",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write root package.json");
+    fs::write(
+        long_dir.join("package.json"),
+        serde_json::json!({
+            "name": "pkg-3",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write long package.json");
+
+    let assert = pacquet
+        .with_args(["install", "--recursive", "--reporter", "append-only"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with(".../pkg-3") && line.contains("Progress: resolved"))
+    );
+
+    drop(root); // cleanup
 }
 
 #[test]

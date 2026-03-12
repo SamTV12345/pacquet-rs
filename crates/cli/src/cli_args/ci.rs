@@ -22,6 +22,8 @@ impl CiArgs {
             lockfile_only: false,
             force: false,
             resolution_only: false,
+            ignore_pnpmfile: false,
+            pnpmfile: None,
             reporter: None,
             use_store_server: false,
             shamefully_hoist: false,

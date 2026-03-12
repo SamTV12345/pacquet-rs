@@ -771,6 +771,24 @@ impl Npmrc {
             .unwrap_or_else(|| self.registry.clone())
     }
 
+    pub fn effective_registries(&self) -> HashMap<String, String> {
+        let mut registries = HashMap::from([
+            ("default".to_string(), self.registry.clone()),
+            ("@jsr".to_string(), "https://npm.jsr.io/".to_string()),
+        ]);
+        for (key, value) in &self.raw_settings {
+            let Some(scope) = key.strip_suffix(":registry") else {
+                continue;
+            };
+            registries.insert(scope.to_string(), normalize_registry_url(value));
+        }
+        registries
+    }
+
+    pub fn set_raw_setting(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.raw_settings.insert(key.into(), value.into());
+    }
+
     /// Persist the config data until the program terminates.
     pub fn leak(self) -> &'static mut Self {
         self.pipe(Box::new).pipe(Box::leak)

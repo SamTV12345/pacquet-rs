@@ -1,10 +1,11 @@
-use crate::IncludedDependencies;
+use crate::{IncludedDependencies, ListJsonOptions};
 use glob::Pattern;
 use miette::{Context, IntoDiagnostic};
 use pacquet_lockfile::{
     DependencyPath, Lockfile, PackageSnapshotDependency, PkgName, PkgNameVerPeer, PkgVerPeer,
     ResolvedDependencySpec, ResolvedDependencyVersion, RootProjectSnapshot,
 };
+use pacquet_package_manifest::PackageManifest;
 use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
@@ -25,6 +26,9 @@ pub struct WhyOptions<'a> {
     pub lockfile_dir: &'a Path,
     pub root_importer_id: &'a str,
     pub modules_dir: &'a Path,
+    pub manifest: &'a PackageManifest,
+    pub registry: &'a str,
+    pub project_dir: &'a Path,
     pub include: IncludedDependencies,
     pub package_queries: &'a [String],
     pub depth: Option<usize>,
@@ -146,6 +150,12 @@ impl PackageLookups {
 pub fn render_why(opts: WhyOptions<'_>, report_as: WhyReportAs) -> miette::Result<String> {
     if opts.package_queries.is_empty() {
         miette::bail!("`pacquet why` requires the package name");
+    }
+
+    match report_as {
+        WhyReportAs::Json => return render_json_like_pnpm(opts),
+        WhyReportAs::Parseable => return render_parseable_like_pnpm(opts),
+        WhyReportAs::Tree => {}
     }
 
     let Some(lockfile) = opts.lockfile else {
@@ -416,6 +426,129 @@ pub fn render_why(opts: WhyOptions<'_>, report_as: WhyReportAs) -> miette::Resul
         WhyReportAs::Parseable => Ok(render_parseable(&trees, opts.depth, opts.long)),
         WhyReportAs::Tree => Ok(render_tree(&trees, opts.depth, opts.long)),
     }
+}
+
+fn render_json_like_pnpm(opts: WhyOptions<'_>) -> miette::Result<String> {
+    let root = filtered_root_json(opts)?;
+    serde_json::to_string_pretty(&vec![Value::Object(root)])
+        .into_diagnostic()
+        .wrap_err("serialize `pacquet why --json`")
+}
+
+fn render_parseable_like_pnpm(opts: WhyOptions<'_>) -> miette::Result<String> {
+    let root = filtered_root_json(opts)?;
+    let root_path = root.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
+
+    let mut lines = Vec::<String>::new();
+    if opts.long {
+        let mut first_line = root_path;
+        if let Some(name) = root.get("name").and_then(Value::as_str) {
+            first_line.push(':');
+            first_line.push_str(name);
+            if let Some(version) = root.get("version").and_then(Value::as_str) {
+                first_line.push('@');
+                first_line.push_str(version);
+            }
+            if root.get("private").and_then(Value::as_bool).unwrap_or(false) {
+                first_line.push_str(":PRIVATE");
+            }
+        }
+        lines.push(first_line);
+    } else {
+        lines.push(root_path);
+    }
+
+    let mut nodes = Vec::<super::ParseableNode>::new();
+    let mut seen_paths = BTreeSet::<String>::new();
+    for group_name in ["optionalDependencies", "dependencies", "devDependencies"] {
+        if let Some(group) = root.get(group_name).and_then(Value::as_object) {
+            super::flatten_parseable_group(group, &mut seen_paths, &mut nodes);
+        }
+    }
+    nodes.sort_by(|left, right| left.from.cmp(&right.from));
+
+    for node in nodes {
+        if opts.long {
+            if node.alias != node.from {
+                if node.version.contains('@') {
+                    lines.push(format!("{}:{} {}", node.path, node.alias, node.version));
+                } else {
+                    lines.push(format!(
+                        "{}:{} npm:{}@{}",
+                        node.path, node.alias, node.from, node.version
+                    ));
+                }
+            } else if node.version.contains('@') {
+                lines.push(format!("{}:{}", node.path, node.version));
+            } else {
+                lines.push(format!("{}:{}@{}", node.path, node.from, node.version));
+            }
+        } else {
+            lines.push(node.path);
+        }
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn filtered_root_json(opts: WhyOptions<'_>) -> miette::Result<Map<String, Value>> {
+    let mut root = super::build_root_json(ListJsonOptions {
+        manifest: opts.manifest,
+        lockfile: opts.lockfile,
+        lockfile_importer_id: opts.root_importer_id,
+        project_dir: opts.project_dir,
+        modules_dir: opts.modules_dir,
+        registry: opts.registry,
+        include: opts.include,
+        depth: opts.depth.map_or(i32::MAX, |depth| depth as i32),
+        long: opts.long,
+    })?;
+    let patterns = compile_query_patterns(opts.package_queries);
+    prune_root_json_to_matches(&mut root, &patterns);
+    Ok(root)
+}
+
+fn prune_root_json_to_matches(root: &mut Map<String, Value>, patterns: &[QueryPattern]) {
+    for group_name in ["dependencies", "devDependencies", "optionalDependencies"] {
+        let Some(group) = root.get(group_name).and_then(Value::as_object) else {
+            continue;
+        };
+        let filtered = filter_group_to_matches(group, patterns);
+        if filtered.is_empty() {
+            root.remove(group_name);
+        } else {
+            root.insert(group_name.to_string(), Value::Object(filtered));
+        }
+    }
+}
+
+fn filter_group_to_matches(group: &Map<String, Value>, patterns: &[QueryPattern]) -> Map<String, Value> {
+    let mut filtered = Map::new();
+    for (alias, value) in group {
+        let Some(dep) = value.as_object() else {
+            continue;
+        };
+        let from = dep.get("from").and_then(Value::as_str).unwrap_or(alias);
+        let mut dep = dep.clone();
+        let nested_filtered = dep
+            .get("dependencies")
+            .and_then(Value::as_object)
+            .map(|nested| filter_group_to_matches(nested, patterns))
+            .filter(|nested| !nested.is_empty());
+        let is_match = patterns.iter().any(|pattern| pattern.matches(alias) || pattern.matches(from));
+        match nested_filtered {
+            Some(nested) => {
+                dep.insert("dependencies".to_string(), Value::Object(nested));
+            }
+            None => {
+                dep.remove("dependencies");
+            }
+        }
+        if is_match || dep.get("dependencies").is_some() {
+            filtered.insert(alias.clone(), Value::Object(dep));
+        }
+    }
+    filtered
 }
 
 fn render_json(trees: &[WhyTree], depth: Option<usize>) -> miette::Result<String> {

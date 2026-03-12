@@ -36,10 +36,13 @@ pub struct InstallWithoutLockfile<'a, DependencyGroupList> {
     pub http_client: &'a ThrottledClient,
     pub config: &'static Npmrc,
     pub manifest: &'a PackageManifest,
+    pub lockfile_dir: &'a Path,
     pub dependency_groups: DependencyGroupList,
     pub force: bool,
     pub prefer_offline: bool,
     pub offline: bool,
+    pub pnpmfile: Option<&'a Path>,
+    pub ignore_pnpmfile: bool,
 }
 
 impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
@@ -53,93 +56,125 @@ impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
             http_client,
             config,
             manifest,
+            lockfile_dir,
             dependency_groups,
             resolved_packages,
             force,
             prefer_offline,
             offline,
+            pnpmfile,
+            ignore_pnpmfile,
         } = self;
         let workspace_root_peer_overrides = workspace_root_peer_overrides(manifest.path());
 
-        let _: Vec<()> = manifest
-            .dependencies(dependency_groups.into_iter())
-            .map(|(name, version_range)| {
-                let workspace_root_peer_overrides = workspace_root_peer_overrides.clone();
-                async move {
-                    if let Some(link_target) = version_range.strip_prefix("link:") {
-                        let project_dir =
-                            manifest.path().parent().unwrap_or_else(|| Path::new("."));
-                        let link_target = if Path::new(link_target).is_absolute() {
-                            Path::new(link_target).to_path_buf()
-                        } else {
-                            project_dir.join(link_target)
-                        };
-                        if config.symlink {
-                            crate::link_package(
-                                config.symlink,
-                                &link_target,
-                                &config.modules_dir.join(name),
-                            )
-                            .expect("symlink local link dependency");
+        let hooked_manifest = crate::apply_read_package_hook_to_manifest(
+            lockfile_dir,
+            pnpmfile,
+            ignore_pnpmfile,
+            manifest.value(),
+        )
+        .expect("apply .pnpmfile.cjs readPackage hook to project manifest");
+
+        let _: Vec<()> =
+            crate::dependencies_from_manifest_value_grouped(&hooked_manifest, dependency_groups)
+                .into_iter()
+                .map(|(group, name, version_range)| {
+                    let workspace_root_peer_overrides = workspace_root_peer_overrides.clone();
+                    async move {
+                        if let Some(link_target) = version_range.strip_prefix("link:") {
+                            let project_dir =
+                                manifest.path().parent().unwrap_or_else(|| Path::new("."));
+                            let link_target = if Path::new(link_target).is_absolute() {
+                                Path::new(link_target).to_path_buf()
+                            } else {
+                                project_dir.join(link_target)
+                            };
+                            if config.symlink {
+                                crate::link_package(
+                                    config.symlink,
+                                    &link_target,
+                                    &config.modules_dir.join(&name),
+                                )
+                                .expect("symlink local link dependency");
+                            }
+                            return;
                         }
-                        return;
-                    }
-                    if let Some(file_target) = version_range.strip_prefix("file:") {
-                        let project_dir =
-                            manifest.path().parent().unwrap_or_else(|| Path::new("."));
-                        let file_target = if Path::new(file_target).is_absolute() {
-                            Path::new(file_target).to_path_buf()
-                        } else {
-                            project_dir.join(file_target)
-                        };
-                        crate::import_local_package_dir(
-                            config.package_import_method,
-                            &file_target,
-                            &config.modules_dir.join(name),
+                        if let Some(file_target) = version_range.strip_prefix("file:") {
+                            let project_dir =
+                                manifest.path().parent().unwrap_or_else(|| Path::new("."));
+                            let file_target = if Path::new(file_target).is_absolute() {
+                                Path::new(file_target).to_path_buf()
+                            } else {
+                                project_dir.join(file_target)
+                            };
+                            crate::import_local_package_dir(
+                                config.package_import_method,
+                                &file_target,
+                                &config.modules_dir.join(&name),
+                            )
+                            .expect("materialize local file dependency");
+                            return;
+                        }
+                        let resolved_range = apply_workspace_root_peer_override(
+                            config,
+                            &workspace_root_peer_overrides,
+                            None,
+                            &name,
+                            &version_range,
+                        );
+
+                        let dependency = InstallPackageFromRegistry {
+                            tarball_mem_cache,
+                            http_client,
+                            config,
+                            lockfile_dir,
+                            pnpmfile,
+                            ignore_pnpmfile,
+                            node_modules_dir: &config.modules_dir,
+                            name: &name,
+                            version_range: resolved_range.as_str(),
+                            optional: matches!(group, DependencyGroup::Optional),
+                            prefer_offline,
+                            offline,
+                            force,
+                        }
+                        .run()
+                        .await
+                        .unwrap();
+
+                        if matches!(
+                            crate::installability::check_package_version_installability(
+                                &dependency,
+                                matches!(group, DependencyGroup::Optional)
+                            ),
+                            crate::installability::Installability::SkipOptional
+                        ) {
+                            return;
+                        }
+
+                        InstallWithoutLockfile {
+                            tarball_mem_cache,
+                            http_client,
+                            config,
+                            manifest,
+                            lockfile_dir,
+                            dependency_groups: (),
+                            resolved_packages,
+                            force,
+                            prefer_offline,
+                            offline,
+                            pnpmfile,
+                            ignore_pnpmfile,
+                        }
+                        .install_dependencies_from_registry(
+                            &dependency,
+                            &workspace_root_peer_overrides,
                         )
-                        .expect("materialize local file dependency");
-                        return;
+                        .await;
                     }
-                    let resolved_range = apply_workspace_root_peer_override(
-                        config,
-                        &workspace_root_peer_overrides,
-                        None,
-                        name,
-                        version_range,
-                    );
-
-                    let dependency = InstallPackageFromRegistry {
-                        tarball_mem_cache,
-                        http_client,
-                        config,
-                        node_modules_dir: &config.modules_dir,
-                        name,
-                        version_range: resolved_range.as_str(),
-                        prefer_offline,
-                        offline,
-                        force,
-                    }
-                    .run()
-                    .await
-                    .unwrap();
-
-                    InstallWithoutLockfile {
-                        tarball_mem_cache,
-                        http_client,
-                        config,
-                        manifest,
-                        dependency_groups: (),
-                        resolved_packages,
-                        force,
-                        prefer_offline,
-                        offline,
-                    }
-                    .install_dependencies_from_registry(&dependency, &workspace_root_peer_overrides)
-                    .await;
-                }
-            })
-            .pipe(future::join_all)
-            .await;
+                })
+                .pipe(future::join_all)
+                .await;
     }
 }
 
@@ -155,10 +190,13 @@ impl<'a> InstallWithoutLockfile<'a, ()> {
             tarball_mem_cache,
             http_client,
             config,
+            lockfile_dir,
             resolved_packages,
             force,
             prefer_offline,
             offline,
+            pnpmfile,
+            ignore_pnpmfile,
             ..
         } = self;
 
@@ -176,32 +214,78 @@ impl<'a> InstallWithoutLockfile<'a, ()> {
 
         tracing::info!(target: "pacquet::install", node_modules = ?node_modules_path, "Start subset");
 
-        package
-            .dependencies(self.config.auto_install_peers)
-            .map(|(name, version_range)| async {
-                let version_range = apply_workspace_root_peer_override(
-                    self.config,
-                    workspace_root_peer_overrides,
-                    package.peer_dependencies.as_ref(),
-                    name,
-                    version_range,
-                );
-                let dependency = InstallPackageFromRegistry {
-                    tarball_mem_cache,
-                    http_client,
-                    config,
-                    node_modules_dir: &node_modules_path,
-                    name,
-                    version_range: &version_range,
-                    prefer_offline: *prefer_offline,
-                    offline: *offline,
-                    force: *force,
-                }
-                .run()
-                .await
-                .unwrap(); // TODO: proper error propagation
-                self.install_dependencies_from_registry(&dependency, workspace_root_peer_overrides)
+        let package = crate::apply_read_package_hook_to_package_version(
+            lockfile_dir,
+            *pnpmfile,
+            *ignore_pnpmfile,
+            package,
+        )
+        .unwrap_or_else(|_| package.clone());
+
+        let mut dependencies = package
+            .regular_dependencies()
+            .map(|(name, version_range)| (false, name.to_string(), version_range.to_string()))
+            .collect::<Vec<_>>();
+        dependencies.extend(
+            package
+                .optional_dependencies_iter()
+                .map(|(name, version_range)| (true, name.to_string(), version_range.to_string())),
+        );
+        if self.config.auto_install_peers {
+            dependencies.extend(
+                package.peer_dependencies_iter().map(|(name, version_range)| {
+                    (false, name.to_string(), version_range.to_string())
+                }),
+            );
+        }
+        let peer_dependencies = package.peer_dependencies.clone();
+
+        dependencies
+            .into_iter()
+            .map(|(optional, name, version_range)| {
+                let peer_dependencies = peer_dependencies.clone();
+                let node_modules_path = node_modules_path.clone();
+                async move {
+                    let version_range = apply_workspace_root_peer_override(
+                        self.config,
+                        workspace_root_peer_overrides,
+                        peer_dependencies.as_ref(),
+                        &name,
+                        &version_range,
+                    );
+                    let dependency = InstallPackageFromRegistry {
+                        tarball_mem_cache,
+                        http_client,
+                        config,
+                        lockfile_dir,
+                        pnpmfile: *pnpmfile,
+                        ignore_pnpmfile: *ignore_pnpmfile,
+                        node_modules_dir: &node_modules_path,
+                        name: &name,
+                        version_range: &version_range,
+                        optional,
+                        prefer_offline: *prefer_offline,
+                        offline: *offline,
+                        force: *force,
+                    }
+                    .run()
+                    .await
+                    .unwrap(); // TODO: proper error propagation
+                    if matches!(
+                        crate::installability::check_package_version_installability(
+                            &dependency,
+                            optional
+                        ),
+                        crate::installability::Installability::SkipOptional
+                    ) {
+                        return;
+                    }
+                    self.install_dependencies_from_registry(
+                        &dependency,
+                        workspace_root_peer_overrides,
+                    )
                     .await;
+                }
             })
             .pipe(future::join_all)
             .await;

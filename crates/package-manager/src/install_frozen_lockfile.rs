@@ -33,6 +33,8 @@ where
     pub dependency_groups: DependencyGroupList,
     pub offline: bool,
     pub force: bool,
+    pub pnpmfile: Option<&'a std::path::Path>,
+    pub ignore_pnpmfile: bool,
 }
 
 impl<'a, DependencyGroupList> InstallFrozenLockfile<'a, DependencyGroupList>
@@ -40,7 +42,7 @@ where
     DependencyGroupList: IntoIterator<Item = DependencyGroup>,
 {
     /// Execute the subroutine.
-    pub async fn run(self) {
+    pub async fn run(self) -> Vec<String> {
         let InstallFrozenLockfile {
             http_client,
             resolved_packages,
@@ -51,23 +53,31 @@ where
             dependency_groups,
             offline,
             force,
+            pnpmfile: _pnpmfile,
+            ignore_pnpmfile: _ignore_pnpmfile,
         } = self;
         let dependency_groups = dependency_groups.into_iter().collect::<Vec<_>>();
+        let (filtered_project_snapshot, filtered_packages, skipped) =
+            filter_installable_optional_dependencies(
+                project_snapshot,
+                packages,
+                &dependency_groups,
+            );
 
         // TODO: check if the lockfile is out-of-date
 
         if force
             || !importer_dependencies_ready(
                 config,
-                project_snapshot,
-                packages,
+                &filtered_project_snapshot,
+                filtered_packages.as_ref(),
                 dependency_groups.iter().copied(),
             )
         {
             CreateVirtualStore {
                 http_client,
                 config,
-                packages,
+                packages: filtered_packages.as_ref(),
                 lockfile_dir,
                 resolved_packages: Some(resolved_packages),
                 offline,
@@ -77,15 +87,20 @@ where
             .await;
         }
 
-        let deduped_project_snapshot =
-            dedupe_project_snapshot(project_snapshot, packages, config.dedupe_peer_dependents);
+        let deduped_project_snapshot = dedupe_project_snapshot(
+            &filtered_project_snapshot,
+            filtered_packages.as_ref(),
+            config.dedupe_peer_dependents,
+        );
         SymlinkDirectDependencies {
             config,
             project_snapshot: &deduped_project_snapshot,
-            packages,
+            packages: filtered_packages.as_ref(),
             dependency_groups,
         }
         .run();
+
+        skipped
     }
 }
 
@@ -106,6 +121,86 @@ fn dedupe_project_snapshot(
     dedupe_resolved_dependency_map(snapshot.optional_dependencies.as_mut(), packages);
     dedupe_resolved_dependency_map(snapshot.dev_dependencies.as_mut(), packages);
     snapshot
+}
+
+fn filter_installable_optional_dependencies(
+    project_snapshot: &ProjectSnapshot,
+    packages: Option<&HashMap<DependencyPath, PackageSnapshot>>,
+    dependency_groups: &[DependencyGroup],
+) -> (ProjectSnapshot, Option<HashMap<DependencyPath, PackageSnapshot>>, Vec<String>) {
+    let Some(packages) = packages else {
+        return (project_snapshot.clone(), None, Vec::new());
+    };
+
+    let mut skipped = HashSet::<String>::new();
+    let mut filtered_project_snapshot = project_snapshot.clone();
+    if let Some(optional_dependencies) = filtered_project_snapshot.optional_dependencies.as_mut() {
+        optional_dependencies.retain(|alias, spec| {
+            let Some(path) = direct_dependency_path(alias, &spec.version, packages) else {
+                return true;
+            };
+            let Some((resolved_path, package_snapshot)) = resolve_package_snapshot(packages, &path)
+            else {
+                return true;
+            };
+            let is_skipped = matches!(
+                crate::installability::check_package_snapshot_installability(
+                    &resolved_path.to_string(),
+                    package_snapshot,
+                    true,
+                ),
+                crate::installability::Installability::SkipOptional
+            );
+            if is_skipped {
+                skipped.insert(resolved_path.to_string());
+            }
+            !is_skipped
+        });
+    }
+
+    let mut filtered_packages = HashMap::<DependencyPath, PackageSnapshot>::new();
+    let mut queue = filtered_project_snapshot
+        .dependencies_by_groups(dependency_groups.iter().copied())
+        .filter_map(|(alias, spec)| direct_dependency_path(alias, &spec.version, packages))
+        .collect::<Vec<_>>();
+    let mut seen = HashSet::<DependencyPath>::new();
+
+    while let Some(candidate_path) = queue.pop() {
+        let Some((resolved_path, package_snapshot)) =
+            resolve_package_snapshot(packages, &candidate_path)
+        else {
+            continue;
+        };
+        if !seen.insert(resolved_path.clone()) {
+            continue;
+        }
+        if package_snapshot.optional == Some(true)
+            && matches!(
+                crate::installability::check_package_snapshot_installability(
+                    &resolved_path.to_string(),
+                    package_snapshot,
+                    true,
+                ),
+                crate::installability::Installability::SkipOptional
+            )
+        {
+            skipped.insert(resolved_path.to_string());
+            continue;
+        }
+        filtered_packages.insert(resolved_path.clone(), package_snapshot.clone());
+        let dependencies = package_dependency_map(package_snapshot);
+        for (alias, dependency_spec) in dependencies {
+            if let Some(dependency_path) =
+                dependency_path_from_snapshot_dependency(&alias, &dependency_spec)
+            {
+                queue.push(dependency_path);
+            }
+        }
+    }
+
+    let mut skipped = skipped.into_iter().collect::<Vec<_>>();
+    skipped.sort();
+    (filtered_project_snapshot, Some(filtered_packages), skipped)
 }
 
 fn dedupe_resolved_dependency_map(
@@ -640,5 +735,67 @@ mod tests {
                 .suffix
                 .to_string()
         );
+    }
+
+    #[test]
+    fn filter_installable_optional_dependencies_tracks_skipped_dep_paths() {
+        let alias: PkgName = "opt".parse().expect("alias");
+        let dependency_path = DependencyPath::registry(
+            None,
+            PkgNameVerPeer::new(alias.clone(), "1.0.0".parse().expect("version")),
+        );
+        let snapshot = PackageSnapshot {
+            resolution: pacquet_lockfile::LockfileResolution::Registry(
+                pacquet_lockfile::RegistryResolution {
+                    integrity: "sha512-Bw==".parse().expect("integrity"),
+                },
+            ),
+            id: None,
+            name: None,
+            version: None,
+            engines: None,
+            cpu: None,
+            os: Some(vec!["definitely-not-this-os".to_string()]),
+            libc: None,
+            deprecated: None,
+            has_bin: None,
+            prepare: None,
+            requires_build: None,
+            bundled_dependencies: None,
+            peer_dependencies: None,
+            peer_dependencies_meta: None,
+            dependencies: None,
+            optional_dependencies: None,
+            transitive_peer_dependencies: None,
+            dev: None,
+            optional: Some(true),
+        };
+
+        let mut optional_dependencies = ResolvedDependencyMap::new();
+        optional_dependencies.insert(
+            alias,
+            ResolvedDependencySpec {
+                specifier: "^1.0.0".to_string(),
+                version: ResolvedDependencyVersion::PkgVerPeer("1.0.0".parse().expect("version")),
+            },
+        );
+        let project_snapshot = ProjectSnapshot {
+            optional_dependencies: Some(optional_dependencies),
+            ..ProjectSnapshot::default()
+        };
+        let packages = HashMap::from([(dependency_path.clone(), snapshot)]);
+
+        let (filtered_project_snapshot, filtered_packages, skipped) =
+            filter_installable_optional_dependencies(
+                &project_snapshot,
+                Some(&packages),
+                &[DependencyGroup::Optional],
+            );
+
+        assert!(
+            filtered_project_snapshot.optional_dependencies.as_ref().is_none_or(HashMap::is_empty)
+        );
+        assert!(filtered_packages.expect("filtered packages").is_empty());
+        assert_eq!(skipped, vec![dependency_path.to_string()]);
     }
 }

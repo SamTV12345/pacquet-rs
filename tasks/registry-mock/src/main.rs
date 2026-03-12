@@ -12,8 +12,10 @@ use tokio::time::Duration;
 #[derive(Debug, Parser)]
 enum Cli {
     /// Start a single mocked registry server.
+    #[clap(alias = "prepare")]
     Launch,
     /// Terminate the launched mocked registry server.
+    #[clap(alias = "stop")]
     End,
 }
 

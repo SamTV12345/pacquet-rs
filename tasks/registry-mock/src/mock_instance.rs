@@ -1,6 +1,7 @@
 use crate::{
     PreparedRegistryInfo, RegistryAnchor, RegistryInfo,
-    kill_verdaccio::kill_all_verdaccio_children, node_registry_mock, port_to_url::port_to_url,
+    kill_verdaccio::kill_all_verdaccio_children, node_registry_mock_command,
+    port_to_url::port_to_url,
 };
 use assert_cmd::prelude::*;
 use pipe_trait::Pipe;
@@ -9,7 +10,7 @@ use reqwest::Client;
 use std::{
     fs::File,
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
 };
 use sysinfo::{Pid, Signal};
 use tokio::time::{Duration, sleep, timeout};
@@ -81,8 +82,7 @@ impl<'a> MockInstanceOptions<'a> {
         let port = port.to_string();
 
         eprintln!("Preparing...");
-        node_registry_mock()
-            .pipe(Command::new)
+        node_registry_mock_command()
             .arg("prepare")
             .env("PNPM_REGISTRY_MOCK_PORT", &port)
             .stdin(Stdio::null())
@@ -97,8 +97,7 @@ impl<'a> MockInstanceOptions<'a> {
         let stderr = stderr.map_or_else(Stdio::null, |stderr| {
             File::create(stderr).expect("create file for stderr").into()
         });
-        let process = node_registry_mock()
-            .pipe(Command::new)
+        let process = node_registry_mock_command()
             .env("PNPM_REGISTRY_MOCK_PORT", &port)
             .stdin(Stdio::null())
             .stdout(stdout)

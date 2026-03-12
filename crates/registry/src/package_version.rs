@@ -19,6 +19,14 @@ pub struct PackageVersion {
     #[serde(default)]
     pub engines: Option<HashMap<String, String>>,
     #[serde(default)]
+    pub cpu: Option<Vec<String>>,
+    #[serde(default)]
+    pub os: Option<Vec<String>>,
+    #[serde(default)]
+    pub libc: Option<Vec<String>>,
+    #[serde(default)]
+    pub deprecated: Option<String>,
+    #[serde(default)]
     pub bin: Option<serde_json::Value>,
 }
 
@@ -85,6 +93,24 @@ impl PackageVersion {
             .map(|(name, version)| (name.as_str(), version.as_str()))
     }
 
+    pub fn regular_dependencies(&self) -> impl Iterator<Item = (&'_ str, &'_ str)> {
+        self.dependencies.iter().flatten().map(|(name, version)| (name.as_str(), version.as_str()))
+    }
+
+    pub fn optional_dependencies_iter(&self) -> impl Iterator<Item = (&'_ str, &'_ str)> {
+        self.optional_dependencies
+            .iter()
+            .flatten()
+            .map(|(name, version)| (name.as_str(), version.as_str()))
+    }
+
+    pub fn peer_dependencies_iter(&self) -> impl Iterator<Item = (&'_ str, &'_ str)> {
+        self.peer_dependencies
+            .iter()
+            .flatten()
+            .map(|(name, version)| (name.as_str(), version.as_str()))
+    }
+
     pub fn serialize(&self, save_exact: bool) -> String {
         let prefix = if save_exact { "" } else { "^" };
         format!("{0}{1}", prefix, self.version)
@@ -131,5 +157,20 @@ mod tests {
         .expect("fetch package version with auth header");
 
         assert_eq!(value.name, "pkg");
+    }
+
+    #[test]
+    fn deserializes_deprecated_field() {
+        let value = serde_json::from_value::<PackageVersion>(serde_json::json!({
+            "name": "pkg",
+            "version": "1.0.0",
+            "deprecated": "use something else",
+            "dist": {
+                "tarball": "https://registry.example/pkg/-/pkg-1.0.0.tgz"
+            }
+        }))
+        .expect("deserialize package version");
+
+        assert_eq!(value.deprecated.as_deref(), Some("use something else"));
     }
 }

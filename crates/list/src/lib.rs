@@ -178,35 +178,24 @@ pub fn render_tree(opts: ListJsonOptions<'_>) -> miette::Result<String> {
         return Ok(out);
     }
 
-    out.push('\n');
-    let mut summary_count = 0usize;
+    out.push_str("\n\n");
     for (group_index, (group_name, group)) in groups.iter().enumerate() {
-        out.push_str("│\n");
-        out.push_str(&format!("│   {group_name}:\n"));
+        out.push_str(&format!("{group_name}:\n"));
         let mut aliases = group.keys().cloned().collect::<Vec<_>>();
         aliases.sort();
-        summary_count += aliases.len();
-        for (dep_index, alias) in aliases.iter().enumerate() {
-            let is_last_group = group_index + 1 == groups.len();
-            let is_last_dep = dep_index + 1 == aliases.len();
-            let branch = if is_last_group && is_last_dep { "└── " } else { "├── " };
-            out.push_str(branch);
-            out.push_str(&tree_label(alias, group.get(alias).and_then(Value::as_object)));
+        for alias in aliases.iter() {
+            out.push_str(&plain_label(alias, group.get(alias).and_then(Value::as_object)));
             out.push('\n');
         }
-    }
-
-    out.push('\n');
-    if summary_count == 1 {
-        out.push_str("1 package");
-    } else {
-        out.push_str(&format!("{summary_count} packages"));
+        if group_index + 1 != groups.len() {
+            out.push('\n');
+        }
     }
 
     Ok(out)
 }
 
-fn tree_label(alias: &str, dep: Option<&Map<String, Value>>) -> String {
+fn plain_label(alias: &str, dep: Option<&Map<String, Value>>) -> String {
     let Some(dep) = dep else {
         return alias.to_string();
     };
@@ -219,9 +208,9 @@ fn tree_label(alias: &str, dep: Option<&Map<String, Value>>) -> String {
             format!("{alias} npm:{from}@{version}")
         }
     } else if version.contains('@') {
-        version.to_string()
+        format!("{alias} {version}")
     } else {
-        format!("{from}@{version}")
+        format!("{from} {version}")
     }
 }
 

@@ -50,6 +50,16 @@ impl<'a> InstallPackageBySnapshot<'a> {
         let PackageSnapshot { resolution, .. } = package_snapshot;
         let DependencyPath { custom_registry, package_specifier } = dependency_path;
 
+        if let Some(message) = package_snapshot.deprecated.as_deref()
+            && let Some(registry_specifier) = dependency_path.registry_specifier()
+        {
+            progress_reporter::deprecation(
+                &registry_specifier.name.to_string(),
+                &registry_specifier.suffix.version().to_string(),
+                message,
+            );
+        }
+
         let save_path = config
             .virtual_store_dir
             .join(package_specifier.to_virtual_store_name())
@@ -107,7 +117,7 @@ impl<'a> InstallPackageBySnapshot<'a> {
                     .map_err(|error| {
                         InstallPackageBySnapshotError::CopyLocalDir(error.to_string())
                     })?;
-                progress_reporter::linked();
+                progress_reporter::added();
                 return Ok(true);
             }
             LockfileResolution::Git(_) => {
@@ -140,13 +150,30 @@ impl<'a> InstallPackageBySnapshot<'a> {
 
         // pnpm skips import work when package contents are already present in virtual store.
         // Keep the check cheap by probing a representative file from the store index.
-        if !force
-            && config
-                .store_dir
-                .read_index_file(integrity, &package_id)
-                .is_some_and(|index| package_is_already_imported(&save_path, &index.files))
-        {
-            return Ok(false);
+        if !force && let Some(index) = config.store_dir.read_index_file(integrity, &package_id) {
+            if package_is_already_imported(&save_path, &index.files) {
+                progress_reporter::reused();
+                progress_reporter::added();
+                return Ok(false);
+            }
+
+            if let Some(cas_paths) = crate::install_package_from_registry::cas_paths_from_index(
+                &config.store_dir,
+                &index,
+            ) {
+                progress_reporter::reused();
+                CreateVirtualDirBySnapshot {
+                    virtual_store_dir: &config.virtual_store_dir,
+                    cas_paths: &cas_paths,
+                    import_method: config.package_import_method,
+                    dependency_path,
+                    package_snapshot,
+                }
+                .run()
+                .map_err(InstallPackageBySnapshotError::CreateVirtualDir)?;
+                progress_reporter::added();
+                return Ok(true);
+            }
         }
 
         let cas_paths = DownloadTarballToStore {
@@ -163,7 +190,7 @@ impl<'a> InstallPackageBySnapshot<'a> {
         .run_without_mem_cache()
         .await
         .map_err(InstallPackageBySnapshotError::DownloadTarball)?;
-        progress_reporter::fetched();
+        progress_reporter::downloaded();
 
         CreateVirtualDirBySnapshot {
             virtual_store_dir: &config.virtual_store_dir,
@@ -174,7 +201,7 @@ impl<'a> InstallPackageBySnapshot<'a> {
         }
         .run()
         .map_err(InstallPackageBySnapshotError::CreateVirtualDir)?;
-        progress_reporter::linked();
+        progress_reporter::added();
 
         Ok(true)
     }

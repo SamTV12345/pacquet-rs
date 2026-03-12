@@ -44,6 +44,8 @@ where
     pub force: bool,
     pub prefer_offline: bool,
     pub offline: bool,
+    pub pnpmfile: Option<&'a Path>,
+    pub ignore_pnpmfile: bool,
 }
 
 #[derive(Clone)]
@@ -63,7 +65,7 @@ where
     DependencyGroupList: IntoIterator<Item = DependencyGroup>,
 {
     /// Execute the subroutine.
-    pub async fn run(self) {
+    pub async fn run(self) -> Vec<String> {
         let InstallWithLockfile {
             tarball_mem_cache,
             resolved_packages,
@@ -79,6 +81,8 @@ where
             force,
             prefer_offline,
             offline,
+            pnpmfile,
+            ignore_pnpmfile,
         } = self;
 
         let dependency_groups = dependency_groups.into_iter().collect::<Vec<_>>();
@@ -86,14 +90,25 @@ where
         let mut resolved_direct_dependencies = HashMap::<(String, String), ResolvedPackage>::new();
         let workspace_root_peer_overrides = workspace_root_peer_overrides(manifest.path());
 
-        for (name, version_range) in manifest.dependencies(dependency_groups.iter().copied()) {
+        let hooked_manifest = crate::apply_read_package_hook_to_manifest(
+            lockfile_dir,
+            pnpmfile,
+            ignore_pnpmfile,
+            manifest.value(),
+        )
+        .expect("apply .pnpmfile.cjs readPackage hook to project manifest");
+
+        for (group, name, version_range) in crate::dependencies_from_manifest_value_grouped(
+            &hooked_manifest,
+            dependency_groups.iter().copied(),
+        ) {
             let key = (name.to_string(), version_range.to_string());
             if resolved_direct_dependencies.contains_key(&key) {
                 continue;
             }
 
             if let Some((resolved_package, local_dep_path, should_symlink)) =
-                resolve_local_dependency(manifest.path(), version_range)
+                resolve_local_dependency(manifest.path(), &version_range)
             {
                 if should_symlink {
                     if !lockfile_only {
@@ -116,7 +131,9 @@ where
                     &workspace_root_peer_overrides,
                     manifest.path(),
                     lockfile_dir,
-                    name,
+                    pnpmfile,
+                    ignore_pnpmfile,
+                    &name,
                     &local_dep_path,
                     &normalized_ref,
                     prefer_offline,
@@ -128,50 +145,49 @@ where
             }
 
             if let Some(workspace_package) =
-                resolve_workspace_dependency(workspace_packages, name, version_range)
+                resolve_workspace_dependency(workspace_packages, &name, &version_range)
             {
-                let resolved_package =
-                    if should_inject_workspace_dependency(manifest, name, version_range, config) {
-                        let normalized_ref = normalized_local_file_reference(
-                            lockfile_dir,
-                            &workspace_package.root_dir,
-                        )
-                        .replace('\\', "/");
-                        Self::snapshot_local_directory_package(
-                            resolved_packages,
-                            http_client,
-                            config,
-                            &package_snapshots,
-                            workspace_packages,
-                            &workspace_root_peer_overrides,
-                            manifest.path(),
-                            lockfile_dir,
-                            name,
-                            &workspace_package.root_dir,
-                            &normalized_ref,
-                            prefer_offline,
-                            offline,
-                        )
-                        .await
-                    } else {
-                        if !lockfile_only {
-                            let symlink_path = config.modules_dir.join(name);
-                            link_package(
-                                config.symlink,
-                                &workspace_package.root_dir,
-                                &symlink_path,
-                            )
+                let resolved_package = if should_inject_workspace_dependency(
+                    manifest,
+                    &name,
+                    &version_range,
+                    config,
+                ) {
+                    let normalized_ref =
+                        normalized_local_file_reference(lockfile_dir, &workspace_package.root_dir)
+                            .replace('\\', "/");
+                    Self::snapshot_local_directory_package(
+                        resolved_packages,
+                        http_client,
+                        config,
+                        &package_snapshots,
+                        workspace_packages,
+                        &workspace_root_peer_overrides,
+                        manifest.path(),
+                        lockfile_dir,
+                        pnpmfile,
+                        ignore_pnpmfile,
+                        &name,
+                        &workspace_package.root_dir,
+                        &normalized_ref,
+                        prefer_offline,
+                        offline,
+                    )
+                    .await
+                } else {
+                    if !lockfile_only {
+                        let symlink_path = config.modules_dir.join(name);
+                        link_package(config.symlink, &workspace_package.root_dir, &symlink_path)
                             .expect("symlink workspace package");
-                        }
+                    }
 
-                        let project_dir =
-                            manifest.path().parent().unwrap_or_else(|| Path::new("."));
-                        let relative = to_relative_path(project_dir, &workspace_package.root_dir);
-                        ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
-                            "link:{}",
-                            relative.replace('\\', "/")
-                        )))
-                    };
+                    let project_dir = manifest.path().parent().unwrap_or_else(|| Path::new("."));
+                    let relative = to_relative_path(project_dir, &workspace_package.root_dir);
+                    ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
+                        "link:{}",
+                        relative.replace('\\', "/")
+                    )))
+                };
                 resolved_direct_dependencies.insert(key, resolved_package);
                 continue;
             }
@@ -181,10 +197,14 @@ where
                     resolved_packages,
                     http_client,
                     config,
+                    lockfile_dir,
+                    pnpmfile,
+                    ignore_pnpmfile,
                     &package_snapshots,
                     &workspace_root_peer_overrides,
-                    name,
-                    version_range,
+                    &name,
+                    &version_range,
+                    matches!(group, DependencyGroup::Optional),
                     prefer_offline,
                     offline,
                 )
@@ -195,11 +215,15 @@ where
                     resolved_packages,
                     http_client,
                     config,
+                    lockfile_dir,
+                    pnpmfile,
+                    ignore_pnpmfile,
                     &package_snapshots,
                     &workspace_root_peer_overrides,
                     &config.modules_dir,
-                    name,
-                    version_range,
+                    &name,
+                    &version_range,
+                    matches!(group, DependencyGroup::Optional),
                     offline,
                     prefer_offline,
                     force,
@@ -242,8 +266,13 @@ where
         let project_snapshot =
             ensure_workspace_importers(project_snapshot, lockfile_dir, workspace_packages);
         prune_unreferenced_packages(&project_snapshot, &mut packages);
-        let runtime_lockfile_config =
-            collect_runtime_lockfile_config(config, manifest, lockfile_dir);
+        let runtime_lockfile_config = collect_runtime_lockfile_config(
+            config,
+            manifest,
+            lockfile_dir,
+            pnpmfile,
+            ignore_pnpmfile,
+        );
 
         let lockfile = Lockfile {
             lockfile_version: ComVer::new(9, 0),
@@ -258,9 +287,19 @@ where
             pnpmfile_checksum: runtime_lockfile_config.pnpmfile_checksum,
             catalogs: existing_lockfile.and_then(|lockfile| lockfile.catalogs.clone()),
             time: existing_lockfile.and_then(|lockfile| lockfile.time.clone()),
+            extra_fields: existing_lockfile
+                .map(|lockfile| lockfile.extra_fields.clone())
+                .unwrap_or_default(),
             project_snapshot,
             packages: (!packages.is_empty()).then_some(packages),
         };
+        let lockfile = crate::apply_after_all_resolved_hook(
+            lockfile_dir,
+            pnpmfile,
+            ignore_pnpmfile,
+            &lockfile,
+        )
+        .expect("apply .pnpmfile.cjs afterAllResolved hook to lockfile");
 
         let project_snapshot_for_importer = match &lockfile.project_snapshot {
             RootProjectSnapshot::Single(snapshot) => snapshot.clone(),
@@ -273,7 +312,7 @@ where
 
         if !lockfile_only {
             let relinked_packages = ResolvedPackages::new();
-            crate::InstallFrozenLockfile {
+            return crate::InstallFrozenLockfile {
                 http_client,
                 resolved_packages: &relinked_packages,
                 config,
@@ -283,10 +322,14 @@ where
                 dependency_groups,
                 offline,
                 force,
+                pnpmfile,
+                ignore_pnpmfile,
             }
             .run()
             .await;
         }
+
+        Vec::new()
     }
 
     #[async_recursion]
@@ -295,16 +338,23 @@ where
         resolved_packages: &ResolvedPackages,
         http_client: &ThrottledClient,
         config: &'static Npmrc,
+        lockfile_dir: &Path,
+        pnpmfile: Option<&Path>,
+        ignore_pnpmfile: bool,
         package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
         workspace_root_peer_overrides: &HashMap<String, String>,
         name: &str,
         version_range: &str,
+        optional: bool,
         prefer_offline: bool,
         offline: bool,
     ) -> ResolvedPackage {
         let package_version = resolve_package_version(
             config,
             http_client,
+            lockfile_dir,
+            pnpmfile,
+            ignore_pnpmfile,
             name,
             version_range,
             prefer_offline,
@@ -323,55 +373,58 @@ where
         };
         let dependency_path = Self::to_dependency_path(&package_version);
         let virtual_store_name = package_version.to_virtual_store_name();
+        let skipped_optional = optional
+            && crate::installability::should_skip_optional_package_version(&package_version);
 
         if resolved_packages.insert(virtual_store_name.clone()) {
-            let dependencies = package_version
-                .dependencies(config.auto_install_peers)
-                .map(|(name, version_range)| {
-                    let version_range = apply_workspace_root_peer_override(
-                        config,
-                        workspace_root_peer_overrides,
-                        package_version.peer_dependencies.as_ref(),
-                        name,
-                        version_range,
-                    );
-                    (name.to_string(), version_range)
-                })
-                .collect::<Vec<_>>();
-
             let mut snapshot_dependencies = HashMap::new();
-            for (dependency_name, dependency_version_range) in dependencies {
+            let mut snapshot_optional_dependencies = HashMap::new();
+            for (dependency_optional, dependency_name, dependency_version_range) in
+                package_dependency_entries(&package_version, config.auto_install_peers)
+            {
+                if skipped_optional {
+                    break;
+                }
+                let dependency_version_range = apply_workspace_root_peer_override(
+                    config,
+                    workspace_root_peer_overrides,
+                    package_version.peer_dependencies.as_ref(),
+                    &dependency_name,
+                    &dependency_version_range,
+                );
                 let resolved_dependency = Self::resolve_and_snapshot_package(
                     resolved_packages,
                     http_client,
                     config,
+                    lockfile_dir,
+                    pnpmfile,
+                    ignore_pnpmfile,
                     package_snapshots,
                     workspace_root_peer_overrides,
                     &dependency_name,
                     &dependency_version_range,
+                    dependency_optional,
                     prefer_offline,
                     offline,
                 )
                 .await;
 
-                snapshot_dependencies.insert(
-                    Self::parse_pkg_name(&dependency_name),
-                    match resolved_dependency.version {
-                        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
-                            PackageSnapshotDependency::PkgVerPeer(ver_peer)
-                        }
-                        ResolvedDependencyVersion::PkgNameVerPeer(name_ver_peer) => {
-                            PackageSnapshotDependency::PkgNameVerPeer(name_ver_peer)
-                        }
-                        ResolvedDependencyVersion::Link(_) => {
-                            panic!("workspace links are not supported in transitive dependencies")
-                        }
-                    },
+                insert_snapshot_dependency(
+                    &mut snapshot_dependencies,
+                    &mut snapshot_optional_dependencies,
+                    &dependency_name,
+                    resolved_dependency.version,
+                    dependency_optional,
                 );
             }
 
-            let package_snapshot =
-                Self::to_package_snapshot(config, &package_version, snapshot_dependencies);
+            let package_snapshot = Self::to_package_snapshot(
+                config,
+                &package_version,
+                snapshot_dependencies,
+                snapshot_optional_dependencies,
+                optional,
+            );
             package_snapshots.insert(dependency_path, package_snapshot);
         }
 
@@ -385,11 +438,15 @@ where
         resolved_packages: &ResolvedPackages,
         http_client: &ThrottledClient,
         config: &'static Npmrc,
+        lockfile_dir: &Path,
+        pnpmfile: Option<&Path>,
+        ignore_pnpmfile: bool,
         package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
         workspace_root_peer_overrides: &HashMap<String, String>,
         node_modules_dir: &Path,
         name: &str,
         version_range: &str,
+        optional: bool,
         offline: bool,
         prefer_offline: bool,
         force: bool,
@@ -398,9 +455,13 @@ where
             tarball_mem_cache,
             http_client,
             config,
+            lockfile_dir,
+            pnpmfile,
+            ignore_pnpmfile,
             node_modules_dir,
             name,
             version_range,
+            optional,
             prefer_offline,
             offline,
             force,
@@ -420,61 +481,64 @@ where
         };
         let dependency_path = Self::to_dependency_path(&package_version);
         let virtual_store_name = package_version.to_virtual_store_name();
+        let skipped_optional = optional
+            && crate::installability::should_skip_optional_package_version(&package_version);
 
         if resolved_packages.insert(virtual_store_name.clone()) {
             let virtual_node_modules_dir =
                 config.virtual_store_dir.join(virtual_store_name).join("node_modules");
 
-            let dependencies = package_version
-                .dependencies(config.auto_install_peers)
-                .map(|(name, version_range)| {
-                    let version_range = apply_workspace_root_peer_override(
-                        config,
-                        workspace_root_peer_overrides,
-                        package_version.peer_dependencies.as_ref(),
-                        name,
-                        version_range,
-                    );
-                    (name.to_string(), version_range)
-                })
-                .collect::<Vec<_>>();
-
             let mut snapshot_dependencies = HashMap::new();
-            for (dependency_name, dependency_version_range) in dependencies {
+            let mut snapshot_optional_dependencies = HashMap::new();
+            for (dependency_optional, dependency_name, dependency_version_range) in
+                package_dependency_entries(&package_version, config.auto_install_peers)
+            {
+                if skipped_optional {
+                    break;
+                }
+                let dependency_version_range = apply_workspace_root_peer_override(
+                    config,
+                    workspace_root_peer_overrides,
+                    package_version.peer_dependencies.as_ref(),
+                    &dependency_name,
+                    &dependency_version_range,
+                );
                 let resolved_dependency = Self::install_and_snapshot_package(
                     tarball_mem_cache,
                     resolved_packages,
                     http_client,
                     config,
+                    lockfile_dir,
+                    pnpmfile,
+                    ignore_pnpmfile,
                     package_snapshots,
                     workspace_root_peer_overrides,
                     &virtual_node_modules_dir,
                     &dependency_name,
                     &dependency_version_range,
+                    dependency_optional,
                     offline,
                     prefer_offline,
                     force,
                 )
                 .await;
 
-                snapshot_dependencies.insert(
-                    Self::parse_pkg_name(&dependency_name),
-                    match resolved_dependency.version {
-                        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
-                            PackageSnapshotDependency::PkgVerPeer(ver_peer)
-                        }
-                        ResolvedDependencyVersion::PkgNameVerPeer(name_ver_peer) => {
-                            PackageSnapshotDependency::PkgNameVerPeer(name_ver_peer)
-                        }
-                        ResolvedDependencyVersion::Link(_) => {
-                            panic!("workspace links are not supported in transitive dependencies")
-                        }
-                    },
+                insert_snapshot_dependency(
+                    &mut snapshot_dependencies,
+                    &mut snapshot_optional_dependencies,
+                    &dependency_name,
+                    resolved_dependency.version,
+                    dependency_optional,
                 );
             }
 
-            let package_snapshot =
-                Self::to_package_snapshot(config, &package_version, snapshot_dependencies);
+            let package_snapshot = Self::to_package_snapshot(
+                config,
+                &package_version,
+                snapshot_dependencies,
+                snapshot_optional_dependencies,
+                optional,
+            );
             package_snapshots.insert(dependency_path, package_snapshot);
         }
 
@@ -492,6 +556,8 @@ where
         workspace_root_peer_overrides: &HashMap<String, String>,
         current_manifest_path: &Path,
         lockfile_dir: &Path,
+        pnpmfile: Option<&Path>,
+        ignore_pnpmfile: bool,
         dependency_name: &str,
         local_dep_path: &Path,
         normalized_ref: &str,
@@ -499,23 +565,32 @@ where
         offline: bool,
     ) -> ResolvedPackage {
         let local_manifest = PackageManifest::from_path(local_dep_path.join("package.json")).ok();
-        let package_name = local_manifest
+        let local_manifest_value = local_manifest.as_ref().and_then(|manifest| {
+            crate::apply_read_package_hook_to_manifest(
+                lockfile_dir,
+                pnpmfile,
+                ignore_pnpmfile,
+                manifest.value(),
+            )
+            .ok()
+        });
+        let package_name = local_manifest_value
             .as_ref()
-            .and_then(|manifest| manifest.value().get("name"))
+            .and_then(|manifest| manifest.get("name"))
             .and_then(|value| value.as_str())
             .unwrap_or(dependency_name);
-        let local_dependency_entries = local_manifest
+        let local_dependency_entries = local_manifest_value
             .as_ref()
             .map(|manifest| {
-                manifest
-                    .dependencies([DependencyGroup::Prod, DependencyGroup::Optional])
-                    .map(|(name, version_range)| (name.to_string(), version_range.to_string()))
-                    .collect::<Vec<_>>()
+                crate::dependencies_from_manifest_value(
+                    manifest,
+                    [DependencyGroup::Prod, DependencyGroup::Optional],
+                )
             })
             .unwrap_or_default();
-        let peer_dependencies = local_manifest
+        let peer_dependencies = local_manifest_value
             .as_ref()
-            .and_then(|manifest| json_string_map(manifest.value().get("peerDependencies")));
+            .and_then(|manifest| json_string_map(manifest.get("peerDependencies")));
         let mut resolved_local_peers = BTreeMap::<String, ResolvedDependencyVersion>::new();
         let mut snapshot_dependencies = HashMap::new();
 
@@ -537,6 +612,8 @@ where
                     workspace_root_peer_overrides,
                     current_manifest_path,
                     lockfile_dir,
+                    pnpmfile,
+                    ignore_pnpmfile,
                     peer_name,
                     &resolved_range,
                     prefer_offline,
@@ -584,6 +661,8 @@ where
                         workspace_root_peer_overrides,
                         current_manifest_path,
                         lockfile_dir,
+                        pnpmfile,
+                        ignore_pnpmfile,
                         child_name,
                         &local_child_path,
                         &normalized_child_ref,
@@ -619,6 +698,8 @@ where
                         workspace_root_peer_overrides,
                         current_manifest_path,
                         lockfile_dir,
+                        pnpmfile,
+                        ignore_pnpmfile,
                         child_name,
                         &workspace_package.root_dir,
                         &normalized_child_ref,
@@ -648,10 +729,14 @@ where
                     resolved_packages,
                     http_client,
                     config,
+                    lockfile_dir,
+                    pnpmfile,
+                    ignore_pnpmfile,
                     package_snapshots,
                     workspace_root_peer_overrides,
                     child_name,
                     &resolved_range,
+                    false,
                     prefer_offline,
                     offline,
                 )
@@ -720,6 +805,8 @@ where
         workspace_root_peer_overrides: &HashMap<String, String>,
         current_manifest_path: &Path,
         lockfile_dir: &Path,
+        pnpmfile: Option<&Path>,
+        ignore_pnpmfile: bool,
         name: &str,
         version_range: &str,
         prefer_offline: bool,
@@ -766,6 +853,8 @@ where
                     workspace_root_peer_overrides,
                     current_manifest_path,
                     lockfile_dir,
+                    pnpmfile,
+                    ignore_pnpmfile,
                     name,
                     &local_dep_path,
                     &normalized_ref,
@@ -792,6 +881,8 @@ where
                     workspace_root_peer_overrides,
                     current_manifest_path,
                     lockfile_dir,
+                    pnpmfile,
+                    ignore_pnpmfile,
                     name,
                     &workspace_package.root_dir,
                     &normalized_ref,
@@ -808,10 +899,14 @@ where
                     resolved_packages,
                     http_client,
                     config,
+                    lockfile_dir,
+                    pnpmfile,
+                    ignore_pnpmfile,
                     package_snapshots,
                     workspace_root_peer_overrides,
                     name,
                     requested_range,
+                    false,
                     prefer_offline,
                     offline,
                 )
@@ -900,6 +995,8 @@ where
         config: &'static Npmrc,
         package_version: &PackageVersion,
         dependencies: HashMap<PkgName, PackageSnapshotDependency>,
+        optional_dependencies: HashMap<String, String>,
+        optional: bool,
     ) -> PackageSnapshot {
         let integrity =
             package_version.dist.integrity.clone().expect("registry package has integrity field");
@@ -929,10 +1026,10 @@ where
             name: None,
             version: None,
             engines: package_version.engines.clone(),
-            cpu: None,
-            os: None,
-            libc: None,
-            deprecated: None,
+            cpu: package_version.cpu.clone(),
+            os: package_version.os.clone(),
+            libc: package_version.libc.clone(),
+            deprecated: package_version.deprecated.clone(),
             has_bin: package_version.has_bin().then_some(true),
             prepare: None,
             requires_build: requires_build.then_some(true),
@@ -940,10 +1037,69 @@ where
             peer_dependencies: None,
             peer_dependencies_meta: None,
             dependencies: (!dependencies.is_empty()).then_some(dependencies),
-            optional_dependencies: None,
+            optional_dependencies: (!optional_dependencies.is_empty())
+                .then_some(optional_dependencies),
             transitive_peer_dependencies: None,
             dev: None,
-            optional: None,
+            optional: optional.then_some(true),
+        }
+    }
+}
+
+fn package_dependency_entries(
+    package_version: &PackageVersion,
+    auto_install_peers: bool,
+) -> Vec<(bool, String, String)> {
+    let mut dependencies = package_version
+        .regular_dependencies()
+        .map(|(name, version_range)| (false, name.to_string(), version_range.to_string()))
+        .collect::<Vec<_>>();
+    dependencies.extend(
+        package_version
+            .optional_dependencies_iter()
+            .map(|(name, version_range)| (true, name.to_string(), version_range.to_string())),
+    );
+    if auto_install_peers {
+        dependencies.extend(
+            package_version
+                .peer_dependencies_iter()
+                .map(|(name, version_range)| (false, name.to_string(), version_range.to_string())),
+        );
+    }
+    dependencies
+}
+
+fn insert_snapshot_dependency(
+    dependencies: &mut HashMap<PkgName, PackageSnapshotDependency>,
+    optional_dependencies: &mut HashMap<String, String>,
+    dependency_name: &str,
+    resolved_version: ResolvedDependencyVersion,
+    optional: bool,
+) {
+    match resolved_version {
+        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
+            if optional {
+                optional_dependencies.insert(dependency_name.to_string(), ver_peer.to_string());
+            } else {
+                dependencies.insert(
+                    dependency_name.parse().expect("registry package name"),
+                    PackageSnapshotDependency::PkgVerPeer(ver_peer),
+                );
+            }
+        }
+        ResolvedDependencyVersion::PkgNameVerPeer(name_ver_peer) => {
+            if optional {
+                optional_dependencies
+                    .insert(dependency_name.to_string(), name_ver_peer.to_string());
+            } else {
+                dependencies.insert(
+                    dependency_name.parse().expect("registry package name"),
+                    PackageSnapshotDependency::PkgNameVerPeer(name_ver_peer),
+                );
+            }
+        }
+        ResolvedDependencyVersion::Link(_) => {
+            panic!("workspace links are not supported in transitive dependencies")
         }
     }
 }
@@ -1560,6 +1716,9 @@ fn parse_npm_alias(version_range: &str) -> Option<(&str, &str)> {
 async fn resolve_package_version(
     config: &'static Npmrc,
     http_client: &ThrottledClient,
+    lockfile_dir: &Path,
+    pnpmfile: Option<&Path>,
+    ignore_pnpmfile: bool,
     name: &str,
     version_range: &str,
     prefer_offline: bool,
@@ -1567,15 +1726,27 @@ async fn resolve_package_version(
 ) -> PackageVersion {
     if is_tarball_spec(version_range) {
         crate::progress_reporter::resolved();
-        return resolve_package_version_from_tarball_spec(config, http_client, version_range)
-            .await
-            .expect("resolve package version from tarball spec");
+        return crate::apply_read_package_hook_to_package_version(
+            lockfile_dir,
+            pnpmfile,
+            ignore_pnpmfile,
+            &resolve_package_version_from_tarball_spec(config, http_client, version_range)
+                .await
+                .expect("resolve package version from tarball spec"),
+        )
+        .expect("apply .pnpmfile.cjs readPackage hook to tarball package");
     }
     if is_git_spec(version_range) {
         crate::progress_reporter::resolved();
-        return resolve_package_version_from_git_spec(config, http_client, version_range)
-            .await
-            .expect("resolve package version from git spec");
+        return crate::apply_read_package_hook_to_package_version(
+            lockfile_dir,
+            pnpmfile,
+            ignore_pnpmfile,
+            &resolve_package_version_from_git_spec(config, http_client, version_range)
+                .await
+                .expect("resolve package version from git spec"),
+        )
+        .expect("apply .pnpmfile.cjs readPackage hook to git package");
     }
     let (requested_name, requested_range) =
         parse_npm_alias(version_range).unwrap_or((name, version_range));
@@ -1614,7 +1785,13 @@ async fn resolve_package_version(
     }
 
     crate::progress_reporter::resolved();
-    package_version.expect("resolve package version from metadata")
+    crate::apply_read_package_hook_to_package_version(
+        lockfile_dir,
+        pnpmfile,
+        ignore_pnpmfile,
+        &package_version.expect("resolve package version from metadata"),
+    )
+    .expect("apply .pnpmfile.cjs readPackage hook to package metadata")
 }
 
 fn apply_workspace_root_peer_override(
@@ -1862,6 +2039,7 @@ mod tests {
             pnpmfile_checksum: None,
             catalogs: None,
             time: None,
+            extra_fields: Default::default(),
             project_snapshot,
             packages: None,
         }
@@ -2383,6 +2561,10 @@ mod tests {
             dev_dependencies: None,
             peer_dependencies: None,
             engines: None,
+            cpu: None,
+            os: None,
+            libc: None,
+            deprecated: None,
             bin: None,
         };
 
@@ -2390,6 +2572,42 @@ mod tests {
             expected_registry_tarball(&config, &package_version),
             "https://foo.example/@foo/pkg/-/pkg-1.2.3.tgz"
         );
+    }
+
+    #[test]
+    fn to_package_snapshot_preserves_deprecated_message() {
+        let config = Box::leak(Box::new(Npmrc::new()));
+        let package_version = PackageVersion {
+            name: "pkg".to_string(),
+            version: "1.0.0".parse().expect("version"),
+            dist: pacquet_registry::PackageDistribution {
+                tarball: "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz".to_string(),
+                integrity: Some("sha512-deadbeef".parse().expect("integrity")),
+                shasum: None,
+                file_count: None,
+                unpacked_size: None,
+            },
+            dependencies: None,
+            optional_dependencies: None,
+            dev_dependencies: None,
+            peer_dependencies: None,
+            engines: None,
+            cpu: None,
+            os: None,
+            libc: None,
+            deprecated: Some("use pkg2".to_string()),
+            bin: None,
+        };
+
+        let snapshot = InstallWithLockfile::<'_, [DependencyGroup; 0]>::to_package_snapshot(
+            config,
+            &package_version,
+            HashMap::new(),
+            HashMap::new(),
+            false,
+        );
+
+        assert_eq!(snapshot.deprecated.as_deref(), Some("use pkg2"));
     }
 
     fn dummy_snapshot_with_dependencies(

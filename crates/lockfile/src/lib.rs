@@ -20,6 +20,7 @@ mod save_lockfile;
 pub use comver::*;
 pub use dependency_path::*;
 pub use load_lockfile::*;
+pub use lockfile_file::{lockfile_from_json_value, lockfile_to_json_value};
 pub use lockfile_version::*;
 pub use multi_project_snapshot::*;
 pub use package_snapshot::*;
@@ -68,6 +69,7 @@ pub struct Lockfile {
     pub pnpmfile_checksum: Option<String>,
     pub catalogs: Option<serde_yaml::Value>,
     pub time: Option<HashMap<String, String>>,
+    pub extra_fields: HashMap<String, serde_yaml::Value>,
     pub project_snapshot: RootProjectSnapshot,
     pub packages: Option<HashMap<DependencyPath, PackageSnapshot>>,
 }

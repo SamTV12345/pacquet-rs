@@ -10,9 +10,12 @@ use miette::Diagnostic;
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
 use pacquet_registry::{PackageTag, PackageVersion, RegistryError};
-use pacquet_store_dir::PackageFileInfo;
+use pacquet_store_dir::{PackageFileInfo, PackageFilesIndex};
 use pacquet_tarball::{DownloadTarballToStore, MemCache, TarballError};
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 /// This subroutine executes the following and returns the package
 /// * Retrieves the package from the registry
@@ -27,9 +30,13 @@ pub struct InstallPackageFromRegistry<'a> {
     pub tarball_mem_cache: &'a MemCache,
     pub http_client: &'a ThrottledClient,
     pub config: &'static Npmrc,
+    pub lockfile_dir: &'a Path,
+    pub pnpmfile: Option<&'a Path>,
+    pub ignore_pnpmfile: bool,
     pub node_modules_dir: &'a Path,
     pub name: &'a str,
     pub version_range: &'a str,
+    pub optional: bool,
     pub prefer_offline: bool,
     pub offline: bool,
     pub force: bool,
@@ -103,8 +110,12 @@ impl<'a> InstallPackageFromRegistry<'a> {
         let &InstallPackageFromRegistry {
             http_client,
             config,
+            lockfile_dir,
+            pnpmfile,
+            ignore_pnpmfile,
             name,
             version_range,
+            optional,
             prefer_offline,
             offline,
             ..
@@ -114,7 +125,25 @@ impl<'a> InstallPackageFromRegistry<'a> {
                 resolve_package_version_from_tarball_spec(config, http_client, version_range)
                     .await
                     .map_err(InstallPackageFromRegistryError::ResolveTarballSpec)?;
+            let package_version = crate::apply_read_package_hook_to_package_version(
+                lockfile_dir,
+                pnpmfile,
+                ignore_pnpmfile,
+                &package_version,
+            )
+            .map_err(|error| {
+                InstallPackageFromRegistryError::ResolveTarballSpec(error.to_string())
+            })?;
             progress_reporter::resolved();
+            if matches!(
+                crate::installability::check_package_version_installability(
+                    &package_version,
+                    optional
+                ),
+                crate::installability::Installability::SkipOptional
+            ) {
+                return Ok(package_version);
+            }
             self.install_package_version(&package_version, name).await?;
             return Ok(package_version);
         }
@@ -123,7 +152,23 @@ impl<'a> InstallPackageFromRegistry<'a> {
                 resolve_package_version_from_git_spec(config, http_client, version_range)
                     .await
                     .map_err(InstallPackageFromRegistryError::ResolveGitSpec)?;
+            let package_version = crate::apply_read_package_hook_to_package_version(
+                lockfile_dir,
+                pnpmfile,
+                ignore_pnpmfile,
+                &package_version,
+            )
+            .map_err(|error| InstallPackageFromRegistryError::ResolveGitSpec(error.to_string()))?;
             progress_reporter::resolved();
+            if matches!(
+                crate::installability::check_package_version_installability(
+                    &package_version,
+                    optional
+                ),
+                crate::installability::Installability::SkipOptional
+            ) {
+                return Ok(package_version);
+            }
             self.install_package_version(&package_version, name).await?;
             return Ok(package_version);
         }
@@ -153,8 +198,31 @@ impl<'a> InstallPackageFromRegistry<'a> {
                 Self::resolve_requested_version(&fresh, requested_name, requested_range);
         }
 
-        let package_version = package_version?;
+        let package_version = crate::apply_read_package_hook_to_package_version(
+            lockfile_dir,
+            pnpmfile,
+            ignore_pnpmfile,
+            &package_version?,
+        )
+        .map_err(|error| {
+            InstallPackageFromRegistryError::FetchFromRegistry(RegistryError::Serialization(
+                error.to_string(),
+            ))
+        })?;
+        if let Some(message) = package_version.deprecated.as_deref() {
+            progress_reporter::deprecation(
+                &package_version.name,
+                &package_version.version.to_string(),
+                message,
+            );
+        }
         progress_reporter::resolved();
+        if matches!(
+            crate::installability::check_package_version_installability(&package_version, optional),
+            crate::installability::Installability::SkipOptional
+        ) {
+            return Ok(package_version);
+        }
         self.install_package_version(&package_version, name).await?;
         Ok(package_version)
     }
@@ -196,26 +264,39 @@ impl<'a> InstallPackageFromRegistry<'a> {
             if should_link {
                 link_package(config.symlink, &save_path, &symlink_path)
                     .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
-                progress_reporter::linked();
+                progress_reporter::added();
             }
             return Ok(());
         }
 
         if !force
-            && config
-                .store_dir
-                .read_index_file(
-                    package_version.dist.integrity.as_ref().expect("has integrity field"),
-                    &package_id,
-                )
-                .is_some_and(|index| package_is_already_imported(&save_path, &index.files))
+            && let Some(index) = config.store_dir.read_index_file(
+                package_version.dist.integrity.as_ref().expect("has integrity field"),
+                &package_id,
+            )
         {
-            if should_link {
-                link_package(config.symlink, &save_path, &symlink_path)
-                    .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
-                progress_reporter::linked();
+            if package_is_already_imported(&save_path, &index.files) {
+                progress_reporter::reused();
+                if should_link {
+                    link_package(config.symlink, &save_path, &symlink_path)
+                        .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
+                    progress_reporter::added();
+                }
+                return Ok(());
             }
-            return Ok(());
+
+            if let Some(cas_paths) = cas_paths_from_index(&config.store_dir, &index) {
+                progress_reporter::reused();
+                tracing::info!(target: "pacquet::import", ?save_path, ?symlink_path, "Import package from shared store index");
+                create_cas_files(config.package_import_method, &save_path, &cas_paths)
+                    .map_err(InstallPackageFromRegistryError::CreateCasFiles)?;
+                if should_link {
+                    link_package(config.symlink, &save_path, &symlink_path)
+                        .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
+                    progress_reporter::added();
+                }
+                return Ok(());
+            }
         }
 
         // TODO: skip when it already exists in store?
@@ -237,7 +318,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
         .run_with_mem_cache(tarball_mem_cache)
         .await
         .map_err(InstallPackageFromRegistryError::DownloadTarballToStore)?;
-        progress_reporter::fetched();
+        progress_reporter::downloaded();
 
         tracing::info!(target: "pacquet::import", ?save_path, ?symlink_path, "Import package");
 
@@ -247,7 +328,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
         if should_link {
             link_package(config.symlink, &save_path, &symlink_path)
                 .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
-            progress_reporter::linked();
+            progress_reporter::added();
         }
 
         Ok(())
@@ -262,6 +343,23 @@ fn package_is_already_imported(
         return false;
     };
     save_path.join(file_name).exists()
+}
+
+pub(crate) fn cas_paths_from_index(
+    store_dir: &pacquet_store_dir::StoreDir,
+    index: &PackageFilesIndex,
+) -> Option<HashMap<String, PathBuf>> {
+    index
+        .files
+        .iter()
+        .map(|(cleaned_entry, file_info)| {
+            let executable = (file_info.mode & 0o111) != 0;
+            store_dir
+                .cas_file_path_by_integrity(&file_info.integrity, executable)
+                .filter(|path| path.exists())
+                .map(|path| (cleaned_entry.clone(), path))
+        })
+        .collect()
 }
 
 fn representative_file_name<'a>(file_names: impl Iterator<Item = &'a str>) -> Option<&'a str> {
@@ -282,9 +380,10 @@ fn representative_file_name<'a>(file_names: impl Iterator<Item = &'a str>) -> Op
 mod tests {
     use super::*;
     use pacquet_npmrc::Npmrc;
-    use pacquet_store_dir::StoreDir;
+    use pacquet_store_dir::{PackageFilesIndex, StoreDir};
     use pipe_trait::Pipe;
     use pretty_assertions::assert_eq;
+    use ssri::{Algorithm, IntegrityOpts};
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
@@ -331,9 +430,13 @@ mod tests {
             tarball_mem_cache: &Default::default(),
             config,
             http_client: &http_client,
+            lockfile_dir: modules_dir.path(),
+            pnpmfile: None,
+            ignore_pnpmfile: false,
             name: "fast-querystring",
             version_range: "1.0.0",
             node_modules_dir: modules_dir.path(),
+            optional: false,
             prefer_offline: false,
             offline: false,
             force: false,
@@ -366,5 +469,128 @@ mod tests {
             fs::canonicalize(modules_dir.path().join(&package.name)).unwrap(),
             fs::canonicalize(virtual_store_path).unwrap()
         );
+    }
+
+    #[test]
+    fn cas_paths_from_index_resolves_existing_store_files() {
+        let dir = tempdir().expect("tempdir");
+        let store_dir = StoreDir::new(dir.path().join("store"));
+        let content = b"{\"name\":\"pkg\",\"version\":\"1.0.0\"}";
+        let (cas_path, _) = store_dir.write_cas_file(content, false).expect("write cas");
+        let integrity =
+            IntegrityOpts::new().algorithm(Algorithm::Sha512).chain(content).result().to_string();
+        let index = PackageFilesIndex {
+            name: Some("pkg".to_string()),
+            version: Some("1.0.0".to_string()),
+            requires_build: None,
+            files: HashMap::from([(
+                "package.json".to_string(),
+                PackageFileInfo {
+                    checked_at: None,
+                    integrity: integrity.to_string(),
+                    mode: 0o644,
+                    size: Some(content.len() as u64),
+                },
+            )]),
+            side_effects: None,
+        };
+
+        let cas_paths = cas_paths_from_index(&store_dir, &index).expect("resolve cas paths");
+        assert_eq!(cas_paths["package.json"], cas_path);
+    }
+
+    #[tokio::test]
+    async fn should_import_package_from_shared_store_without_downloading() {
+        let store_dir = tempdir().expect("store dir");
+        let modules_dir = tempdir().expect("modules dir");
+        let virtual_store_dir = tempdir().expect("virtual store dir");
+        let config: &'static Npmrc =
+            create_config(store_dir.path(), modules_dir.path(), virtual_store_dir.path())
+                .pipe(Box::new)
+                .pipe(Box::leak);
+
+        let package_json = br#"{"name":"pkg","version":"1.0.0"}"#;
+        let (cas_path, _) =
+            config.store_dir.write_cas_file(package_json, false).expect("write cas");
+        let integrity = IntegrityOpts::new()
+            .algorithm(Algorithm::Sha512)
+            .chain(package_json)
+            .result()
+            .to_string();
+        let tarball_integrity =
+            IntegrityOpts::new().algorithm(Algorithm::Sha512).chain(b"tarball").result();
+        config
+            .store_dir
+            .write_index_file(
+                &tarball_integrity,
+                "pkg@1.0.0",
+                &PackageFilesIndex {
+                    name: Some("pkg".to_string()),
+                    version: Some("1.0.0".to_string()),
+                    requires_build: None,
+                    files: HashMap::from([(
+                        "package.json".to_string(),
+                        PackageFileInfo {
+                            checked_at: None,
+                            integrity: integrity.to_string(),
+                            mode: 0o644,
+                            size: Some(package_json.len() as u64),
+                        },
+                    )]),
+                    side_effects: None,
+                },
+            )
+            .expect("write index");
+
+        let package_version = PackageVersion {
+            name: "pkg".to_string(),
+            version: "1.0.0".parse().expect("version"),
+            dist: pacquet_registry::PackageDistribution {
+                tarball: "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz".to_string(),
+                integrity: Some(tarball_integrity),
+                shasum: None,
+                file_count: None,
+                unpacked_size: None,
+            },
+            dependencies: None,
+            optional_dependencies: None,
+            dev_dependencies: None,
+            peer_dependencies: None,
+            engines: None,
+            cpu: None,
+            os: None,
+            libc: None,
+            deprecated: None,
+            bin: None,
+        };
+
+        InstallPackageFromRegistry {
+            tarball_mem_cache: &Default::default(),
+            config,
+            http_client: &ThrottledClient::new_from_cpu_count(),
+            lockfile_dir: modules_dir.path(),
+            pnpmfile: None,
+            ignore_pnpmfile: false,
+            name: "pkg",
+            version_range: "1.0.0",
+            node_modules_dir: modules_dir.path(),
+            optional: false,
+            prefer_offline: false,
+            offline: true,
+            force: false,
+        }
+        .install_package_version(&package_version, "pkg")
+        .await
+        .expect("import from shared store");
+
+        let imported = virtual_store_dir
+            .path()
+            .join("pkg@1.0.0")
+            .join("node_modules")
+            .join("pkg")
+            .join("package.json");
+        assert!(imported.is_file());
+        assert_eq!(fs::read(imported).expect("read imported package"), package_json);
+        assert!(cas_path.exists());
     }
 }

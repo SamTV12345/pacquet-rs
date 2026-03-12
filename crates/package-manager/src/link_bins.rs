@@ -42,7 +42,7 @@ pub fn link_bins_for_manifest(
     Ok(())
 }
 
-fn collect_bin_entries(manifest: &PackageManifest) -> Vec<(String, String)> {
+pub(crate) fn collect_bin_entries(manifest: &PackageManifest) -> Vec<(String, String)> {
     let manifest_dir =
         manifest.path().parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     match manifest.value().get("bin") {
@@ -163,7 +163,7 @@ fn default_bin_name(package_name: &str) -> String {
     package_name.rsplit('/').next().unwrap_or(package_name).to_string()
 }
 
-fn write_bin_wrapper(
+pub(crate) fn write_bin_wrapper(
     config: &Npmrc,
     bin_dir: &Path,
     bin_name: &str,
