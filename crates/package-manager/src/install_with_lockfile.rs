@@ -1784,13 +1784,10 @@ async fn resolve_package_version(
     };
     let mut package_version = resolve(&package);
     if package_version.is_none() && maybe_cached.is_some() {
-        let fresh = fetch_package_from_registry_and_cache(
-            ctx.config,
-            ctx.http_client,
-            requested_name,
-        )
-            .await
-            .expect("fetch package metadata from registry");
+        let fresh =
+            fetch_package_from_registry_and_cache(ctx.config, ctx.http_client, requested_name)
+                .await
+                .expect("fetch package metadata from registry");
         package_version = resolve(&fresh);
     }
 
