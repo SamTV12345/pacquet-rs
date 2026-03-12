@@ -14,20 +14,84 @@ Experimental package manager for node.js written in rust.
 - [~] Workspace support
 - [ ] Full sync with [pnpm error codes](https://pnpm.io/errors)
 - [x] Generate a `node_modules/.bin` folder
-- [ ] Add CLI report
+- [x] Add CLI report
 
 ## Priority Roadmap vs local `pnpm`
 
 - [x] `pacquet add` registry-spec parity: support multiple packages and preserve explicit version, range, and tag specs.
 - [x] Top-level `-w, --workspace-root` so `add` and `install` can target the workspace root from a subproject.
-- [~] Install-mode parity: `--ignore-scripts`, `--lockfile-only`, `--fix-lockfile`, `--offline`, `--prefer-offline`, `--resolution-only`, `--force`, `--reporter` (`default`, `append-only`, `silent`), `--use-store-server`, and `--shamefully-hoist` are wired up; deeper pnpm reporter/store-server semantics are still missing.
+- [~] Install-mode parity: `--ignore-scripts`, `--lockfile-only`, `--fix-lockfile`, `--offline`, `--prefer-offline`, `--resolution-only`, `--force`, `--reporter` (`default`, `append-only`, `silent`), `--use-store-server`, and `--shamefully-hoist` are wired up; recursive summaries, progress lines, shared-store reuse, current-lockfile/modules state, and `list`/`why` text+JSON goldens are covered by parity tests, but deeper pnpm reporter/store-server semantics are still missing.
 - [~] Workspace command parity: workspace-root safety plus `add/install/remove --filter`, `add --workspace`, `add -r/--recursive`, `install -r/--recursive`, and `remove -r/--recursive` are in place; broader recursive command coverage is still missing.
 - [~] Additional `add` sources: `workspace:`, local file system, remote tarball, npm alias specs, and GitHub-style Git specs (`owner/repo`, `github:`, `https://github.com/...`, `git+ssh://git@github.com/...`) are in place; broader Git host/protocol coverage is still missing.
 - [x] `.npmrc` parity: hoisting, `node-linker`, auth token helpers, request/TLS settings, local-dir/injected-workspace lockfile behaviors, and peer-dependency settings are wired.
 - [x] Store parity: `store status`, `store add`, and non-destructive `store prune`.
 - [x] Lifecycle parity: install script handling, `pnpm:devPreinstall`, and `ignore-scripts`/`lockfile-only` behavior are consistent with pnpm for current install flows.
-- [~] Command-surface parity: `exec` (including recursive summary/prefix controls), lockfile-based `fetch`, metadata `cache` inspection, `dedupe`, and temporary-package `dlx` execution with cache reuse/expiry are in place; pnpm-exact reporter/output polish is still missing.
-- [ ] Advanced compatibility: patching, hooks/pnpmfile support, shell completion, reporter polish, and error-code parity.
+- [~] Command-surface parity: `exec` (including recursive summary/prefix controls), lockfile-based `fetch`, metadata `cache` inspection, `dedupe`, temporary-package `dlx` execution with cache reuse/expiry, and `list`/`why` pnpm goldens are in place; pnpm-exact reporter/output polish is still missing.
+- [~] Advanced compatibility: `.pnpmfile.cjs` `readPackage` and `afterAllResolved`, `--ignore-pnpmfile`, custom `--pnpmfile`, hook logging, and lockfile checksum behavior are in place; patching, broader hook coverage, shell completion, reporter polish, and error-code parity are still missing.
+
+## Command Audit vs local `pnpm`
+
+Audited against local pnpm command registration in `/Users/samuelschwanzer/WebstormProjects/pnpm/pnpm/src/cmd/index.ts`.
+
+Implemented in pacquet:
+- `add`
+- `cache`
+- `ci`
+- `dedupe`
+- `dlx`
+- `env`
+- `exec`
+- `fetch`
+- `init`
+- `install`
+- `list` / `ls` / `ll`
+- `remove`
+- `run`
+- `start`
+- `store`
+- `test`
+- `why`
+
+Present but only partial pnpm parity:
+- `env`
+  Current pacquet surface is `add`, `use`, `remove`, and `list`, not the full pnpm env/version-management surface.
+- `list` / `why`
+  Goldens are in place against local pnpm, but pnpm output format still varies between observed environments and the tests normalize equivalent variants.
+
+Missing compared to local pnpm:
+- `approve-builds`
+- `audit`
+- `bin`
+- `config`
+- `create`
+- `deploy`
+- `doctor`
+- `get`
+- `ignored-builds`
+- `import`
+- `licenses`
+- `link`
+- `outdated`
+- `pack`
+- `patch`
+- `patch-commit`
+- `patch-remove`
+- `prune`
+- `publish`
+- `rebuild`
+- `restart`
+- `self-update`
+- `server`
+- `set`
+- `setup`
+- `unlink`
+- `update`
+
+Internal pnpm command wiring not counted as user-facing parity:
+- `completion-server`
+- recursive command dispatcher (`recursive`)
+- store inspection helpers (`cat-file`, `cat-index`, `find-hash`)
+- install-test helper (`installTest`)
 
 ## Debugging
 
@@ -44,8 +108,14 @@ just install
 # Start a mocked registry server (optional)
 just registry-mock launch
 
-# Run test
+# Run tests
 just test
+
+# Or run the compiled suite via nextest
+cargo nextest run
+
+# Lint strictly
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ## Benchmarking

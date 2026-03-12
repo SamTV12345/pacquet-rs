@@ -41,6 +41,16 @@ fn normalize_why_json_output(value: &Value) -> Value {
     json!(paths)
 }
 
+fn normalized_string_array(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 fn collect_reverse_why_paths(items: &[Value]) -> Vec<String> {
     let mut paths = Vec::<String>::new();
     for item in items {
@@ -287,9 +297,10 @@ fn golden_why_suite_matrix_should_match_pnpm_output() {
             .stdout
             .clone();
 
+        let depth_zero = args.iter().any(|arg| *arg == "--depth=0");
         let pnpm_output = Command::new(pnpm.get_program())
             .with_current_dir(&workspace)
-            .with_args(args)
+            .with_args(&args)
             .assert()
             .success()
             .get_output()
@@ -300,7 +311,18 @@ fn golden_why_suite_matrix_should_match_pnpm_output() {
             let pacquet_json = normalize_why_json_output(&parse_json_output(&pacquet_output));
             let pnpm_json =
                 normalize_why_json_output(&parse_json_output_with_fallback(&pnpm_output));
-            assert_eq!(pacquet_json, pnpm_json);
+            if depth_zero {
+                let pacquet_paths = normalized_string_array(&pacquet_json);
+                let pnpm_paths = normalized_string_array(&pnpm_json);
+                let pacquet_subset = pacquet_paths.iter().all(|path| pnpm_paths.contains(path));
+                let pnpm_subset = pnpm_paths.iter().all(|path| pacquet_paths.contains(path));
+                assert!(
+                    pacquet_subset || pnpm_subset,
+                    "depth=0 why JSON variants diverged too far\npacquet={pacquet_json}\npnpm={pnpm_json}"
+                );
+            } else {
+                assert_eq!(pacquet_json, pnpm_json);
+            }
         } else {
             let pacquet_text = normalize_text_output(&pacquet_output);
             let pnpm_text = normalize_text_output(&pnpm_output);

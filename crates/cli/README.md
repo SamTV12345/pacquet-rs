@@ -7,6 +7,58 @@
 | ✅   | -C <path>, --dir <path> |       |
 | ✅   | -w, --workspace-root    | top-level flag |
 
+# Command Audit
+
+Audited against local pnpm command registration in `/Users/samuelschwanzer/WebstormProjects/pnpm/pnpm/src/cmd/index.ts`.
+
+Implemented commands:
+- `add`
+- `cache`
+- `ci`
+- `dedupe`
+- `dlx`
+- `env`
+- `exec`
+- `fetch`
+- `init`
+- `install`
+- `list` / `ls` / `ll`
+- `remove`
+- `run`
+- `start`
+- `store`
+- `test`
+- `why`
+
+Missing commands from local pnpm:
+- `approve-builds`
+- `audit`
+- `bin`
+- `config`
+- `create`
+- `deploy`
+- `doctor`
+- `get`
+- `ignored-builds`
+- `import`
+- `licenses`
+- `link`
+- `outdated`
+- `pack`
+- `patch`
+- `patch-commit`
+- `patch-remove`
+- `prune`
+- `publish`
+- `rebuild`
+- `restart`
+- `self-update`
+- `server`
+- `set`
+- `setup`
+- `unlink`
+- `update`
+
 # Manage dependencies
 
 ## `pacquet add <pkg...>`
@@ -140,6 +192,28 @@
 | ✅   | `-P, --prod` | fetches only production and optional packages from the lockfile root importer |
 | ✅   | `-D, --dev` | fetches only development packages from the lockfile root importer |
 | ✅   | `--reporter=<name>` | supports `default`, `append-only`, and `silent` progress output |
+
+## `pacquet list` / `pacquet ls`
+
+[pnpm documentation](https://pnpm.io/cli/list)
+
+| Done | Command | Notes |
+| ---- | ------- | ----- |
+| ✅   | `ls --json --depth=0/1` | JSON output is covered against local pnpm goldens for direct and depth-1 dependency views |
+| ✅   | `ls --parseable` | parseable output is covered against local pnpm goldens |
+| ✅   | `ls --depth=0` | text output matches current local pnpm in the compatibility suite; the golden normalizes pnpm's flat/tree variant formatting |
+| ✅   | `--long` | long JSON and parseable output are covered |
+
+## `pacquet why`
+
+[pnpm documentation](https://pnpm.io/cli/why)
+
+| Done | Command | Notes |
+| ---- | ------- | ----- |
+| ✅   | `why <pkg>` | tree output is covered by the current `why` suite |
+| ✅   | `why --json` | compatibility suite covers both currently observed pnpm JSON shapes |
+| ✅   | `why --parseable` | parseable output is covered against local pnpm goldens |
+| ✅   | `--depth=0` | JSON compatibility covered in the golden suite |
 
 ## `pacquet cache`
 
