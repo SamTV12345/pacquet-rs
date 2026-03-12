@@ -97,32 +97,32 @@ pub fn ensure_file(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
     #[cfg(windows)]
     #[test]
     fn to_windows_extended_path_normalizes_forward_slashes() {
-        let path = Path::new(r"C:\Users\runneradmin\AppData/Local/pnpm/store\v10\files\db");
-        let path = PathBuf::from(path.to_string_lossy().replace('\\', "/"));
+        let path =
+            std::path::Path::new(r"C:\Users\runneradmin\AppData/Local/pnpm/store\v10\files\db");
+        let path = std::path::PathBuf::from(path.to_string_lossy().replace('\\', "/"));
 
-        let received = to_windows_extended_path(&path);
+        let received = super::to_windows_extended_path(&path);
 
         assert_eq!(
             received,
-            PathBuf::from(r"\\?\C:\Users\runneradmin\AppData\Local\pnpm\store\v10\files\db")
+            std::path::PathBuf::from(
+                r"\\?\C:\Users\runneradmin\AppData\Local\pnpm\store\v10\files\db"
+            )
         );
     }
 
     #[cfg(windows)]
     #[test]
     fn ensure_file_creates_mixed_separator_path() {
-        let dir = tempdir().expect("create tempdir");
+        let dir = tempfile::tempdir().expect("create tempdir");
         let nested =
             dir.path().join("a").join("b").join("file.txt").to_string_lossy().replace('\\', "/");
-        let nested = PathBuf::from(nested);
+        let nested = std::path::PathBuf::from(nested);
 
-        ensure_file(&nested, b"hello", None).expect("write file");
+        super::ensure_file(&nested, b"hello", None).expect("write file");
 
         assert_eq!(std::fs::read(&nested).expect("read file"), b"hello");
     }

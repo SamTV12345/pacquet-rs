@@ -205,9 +205,7 @@ pub fn added() {
 pub fn finish(success: bool) -> Option<ProgressStats> {
     let mutex = state_mutex();
     let mut guard = mutex.lock().expect("progress mutex");
-    let Some(state) = guard.as_mut() else {
-        return None;
-    };
+    let state = guard.as_mut()?;
 
     if state.reporter != InstallReporter::AppendOnly && state.suppressed_warnings > 0 {
         let summary = format_warn(&format!("{} other warnings", state.suppressed_warnings));

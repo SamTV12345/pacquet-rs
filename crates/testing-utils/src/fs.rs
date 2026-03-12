@@ -85,16 +85,14 @@ pub fn is_path_executable(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[cfg(windows)]
     #[test]
     fn is_symlink_or_junction_returns_false_for_plain_directory() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let plain = dir.path().join("plain");
-        fs::create_dir(&plain).expect("create plain dir");
+        std::fs::create_dir(&plain).expect("create plain dir");
 
-        assert!(!is_symlink_or_junction(&plain).expect("check plain dir"));
+        assert!(!super::is_symlink_or_junction(&plain).expect("check plain dir"));
     }
 
     #[cfg(windows)]
@@ -103,9 +101,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let target = dir.path().join("target");
         let link = dir.path().join("link");
-        fs::create_dir(&target).expect("create target dir");
+        std::fs::create_dir(&target).expect("create target dir");
         junction::create(&target, &link).expect("create junction");
 
-        assert_eq!(symlink_or_junction_target(&link).expect("read target"), target);
+        assert_eq!(super::symlink_or_junction_target(&link).expect("read target"), target);
     }
 }

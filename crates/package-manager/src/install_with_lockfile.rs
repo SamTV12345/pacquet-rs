@@ -350,15 +350,17 @@ where
         offline: bool,
     ) -> ResolvedPackage {
         let package_version = resolve_package_version(
-            config,
-            http_client,
-            lockfile_dir,
-            pnpmfile,
-            ignore_pnpmfile,
+            ResolvePackageVersionContext {
+                config,
+                http_client,
+                lockfile_dir,
+                pnpmfile,
+                ignore_pnpmfile,
+                prefer_offline,
+                offline,
+            },
             name,
             version_range,
-            prefer_offline,
-            offline,
         )
         .await;
 
@@ -1713,24 +1715,28 @@ fn parse_npm_alias(version_range: &str) -> Option<(&str, &str)> {
     }
 }
 
-async fn resolve_package_version(
+struct ResolvePackageVersionContext<'a> {
     config: &'static Npmrc,
-    http_client: &ThrottledClient,
-    lockfile_dir: &Path,
-    pnpmfile: Option<&Path>,
+    http_client: &'a ThrottledClient,
+    lockfile_dir: &'a Path,
+    pnpmfile: Option<&'a Path>,
     ignore_pnpmfile: bool,
-    name: &str,
-    version_range: &str,
     prefer_offline: bool,
     offline: bool,
+}
+
+async fn resolve_package_version(
+    ctx: ResolvePackageVersionContext<'_>,
+    name: &str,
+    version_range: &str,
 ) -> PackageVersion {
     if is_tarball_spec(version_range) {
         crate::progress_reporter::resolved();
         return crate::apply_read_package_hook_to_package_version(
-            lockfile_dir,
-            pnpmfile,
-            ignore_pnpmfile,
-            &resolve_package_version_from_tarball_spec(config, http_client, version_range)
+            ctx.lockfile_dir,
+            ctx.pnpmfile,
+            ctx.ignore_pnpmfile,
+            &resolve_package_version_from_tarball_spec(ctx.config, ctx.http_client, version_range)
                 .await
                 .expect("resolve package version from tarball spec"),
         )
@@ -1739,10 +1745,10 @@ async fn resolve_package_version(
     if is_git_spec(version_range) {
         crate::progress_reporter::resolved();
         return crate::apply_read_package_hook_to_package_version(
-            lockfile_dir,
-            pnpmfile,
-            ignore_pnpmfile,
-            &resolve_package_version_from_git_spec(config, http_client, version_range)
+            ctx.lockfile_dir,
+            ctx.pnpmfile,
+            ctx.ignore_pnpmfile,
+            &resolve_package_version_from_git_spec(ctx.config, ctx.http_client, version_range)
                 .await
                 .expect("resolve package version from git spec"),
         )
@@ -1751,11 +1757,11 @@ async fn resolve_package_version(
     let (requested_name, requested_range) =
         parse_npm_alias(version_range).unwrap_or((name, version_range));
     let package = fetch_package_with_metadata_cache(
-        config,
-        http_client,
+        ctx.config,
+        ctx.http_client,
         requested_name,
-        prefer_offline,
-        offline,
+        ctx.prefer_offline,
+        ctx.offline,
     )
     .await;
     let resolve = |package: &pacquet_registry::Package| {
@@ -1771,14 +1777,18 @@ async fn resolve_package_version(
         package.pinned_version(requested_range).cloned()
     };
 
-    let maybe_cached = if prefer_offline && !offline {
-        read_cached_package_from_config(config, requested_name)
+    let maybe_cached = if ctx.prefer_offline && !ctx.offline {
+        read_cached_package_from_config(ctx.config, requested_name)
     } else {
         None
     };
     let mut package_version = resolve(&package);
     if package_version.is_none() && maybe_cached.is_some() {
-        let fresh = fetch_package_from_registry_and_cache(config, http_client, requested_name)
+        let fresh = fetch_package_from_registry_and_cache(
+            ctx.config,
+            ctx.http_client,
+            requested_name,
+        )
             .await
             .expect("fetch package metadata from registry");
         package_version = resolve(&fresh);
@@ -1786,9 +1796,9 @@ async fn resolve_package_version(
 
     crate::progress_reporter::resolved();
     crate::apply_read_package_hook_to_package_version(
-        lockfile_dir,
-        pnpmfile,
-        ignore_pnpmfile,
+        ctx.lockfile_dir,
+        ctx.pnpmfile,
+        ctx.ignore_pnpmfile,
         &package_version.expect("resolve package version from metadata"),
     )
     .expect("apply .pnpmfile.cjs readPackage hook to package metadata")
