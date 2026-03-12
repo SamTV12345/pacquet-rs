@@ -6,3 +6,4 @@ node_modules
 *.tmp
 .idea
 target-*
+.DS_Store
