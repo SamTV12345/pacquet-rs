@@ -228,6 +228,8 @@ mod tests {
             libc: None,
             deprecated: None,
             bin: None,
+            homepage: None,
+            repository: None,
         };
         assert_eq!(
             check_package_version_installability(&package, true),

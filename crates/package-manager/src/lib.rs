@@ -39,6 +39,7 @@ pub use install_package_by_snapshot::*;
 pub use install_package_from_registry::*;
 pub use install_with_lockfile::*;
 pub use install_without_lockfile::*;
+pub use link_bins::link_bins_from_package_manifest;
 pub(crate) use link_bins::*;
 pub use link_file::*;
 pub(crate) use link_policy::*;

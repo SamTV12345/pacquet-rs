@@ -108,6 +108,8 @@ mod tests {
             libc: None,
             deprecated: None,
             bin: None,
+            homepage: None,
+            repository: None,
         };
 
         let dependencies = |peer| version.dependencies(peer).collect::<HashMap<_, _>>();
@@ -134,6 +136,8 @@ mod tests {
             libc: None,
             deprecated: None,
             bin: None,
+            homepage: None,
+            repository: None,
         };
 
         assert_eq!(version.serialize(true), "3.2.1");

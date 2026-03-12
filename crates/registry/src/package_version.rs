@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use pacquet_network::ThrottledClient;
 use pipe_trait::Pipe;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{NetworkError, PackageTag, RegistryError, package_distribution::PackageDistribution};
 
@@ -28,6 +29,10 @@ pub struct PackageVersion {
     pub deprecated: Option<String>,
     #[serde(default)]
     pub bin: Option<serde_json::Value>,
+    #[serde(default)]
+    pub homepage: Option<String>,
+    #[serde(default)]
+    pub repository: Option<Value>,
 }
 
 impl PartialEq for PackageVersion {
@@ -172,5 +177,32 @@ mod tests {
         .expect("deserialize package version");
 
         assert_eq!(value.deprecated.as_deref(), Some("use something else"));
+    }
+
+    #[test]
+    fn deserializes_homepage_and_repository_fields() {
+        let value = serde_json::from_value::<PackageVersion>(serde_json::json!({
+            "name": "pkg",
+            "version": "1.0.0",
+            "homepage": "https://example.com/pkg",
+            "repository": {
+                "type": "git",
+                "url": "git+https://github.com/example/pkg.git"
+            },
+            "dist": {
+                "tarball": "https://registry.example/pkg/-/pkg-1.0.0.tgz"
+            }
+        }))
+        .expect("deserialize package version");
+
+        assert_eq!(value.homepage.as_deref(), Some("https://example.com/pkg"));
+        assert_eq!(
+            value
+                .repository
+                .as_ref()
+                .and_then(|repository| repository.get("url"))
+                .and_then(Value::as_str),
+            Some("git+https://github.com/example/pkg.git")
+        );
     }
 }

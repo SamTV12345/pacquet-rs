@@ -113,5 +113,10 @@ pub(crate) async fn resolve_package_version_from_tarball_spec(
             .and_then(serde_json::Value::as_str)
             .map(ToOwned::to_owned),
         bin: manifest.get("bin").cloned(),
+        homepage: manifest
+            .get("homepage")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        repository: manifest.get("repository").cloned(),
     })
 }

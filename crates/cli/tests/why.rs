@@ -338,7 +338,7 @@ fn golden_why_suite_matrix_should_match_pnpm_output() {
             .stdout
             .clone();
 
-        let depth_zero = args.iter().any(|arg| *arg == "--depth=0");
+        let depth_zero = args.contains(&"--depth=0");
         let pnpm_output = Command::new(pnpm.get_program())
             .with_current_dir(&workspace)
             .with_args(&args)

@@ -785,6 +785,10 @@ impl Npmrc {
         registries
     }
 
+    pub fn raw_settings(&self) -> &HashMap<String, String> {
+        &self.raw_settings
+    }
+
     pub fn set_raw_setting(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.raw_settings.insert(key.into(), value.into());
     }

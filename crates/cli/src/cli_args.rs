@@ -1,38 +1,50 @@
 pub mod add;
+pub mod bin;
 pub mod cache;
 pub mod ci;
+pub mod config;
 pub mod dedupe;
 pub mod dlx;
 pub mod env;
 pub mod exec;
 pub mod fetch;
 pub mod install;
+pub mod link;
 pub mod list;
+pub mod outdated;
+pub mod prune;
 pub mod remove;
 pub mod run;
 pub mod store;
+pub mod unlink;
 pub mod why;
 
 use crate::State;
 use crate::state::find_workspace_root;
 use add::AddArgs;
+use bin::BinArgs;
 use cache::CacheArgs;
 use ci::CiArgs;
 use clap::{Parser, Subcommand};
+use config::{ConfigArgs, GetArgs, SetArgs};
 use dedupe::DedupeArgs;
 use dlx::DlxArgs;
 use env::EnvArgs;
 use exec::ExecArgs;
 use fetch::FetchArgs;
 use install::InstallArgs;
+use link::LinkArgs;
 use list::ListArgs;
 use miette::{Context, IntoDiagnostic};
+use outdated::OutdatedArgs;
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::PackageManifest;
+use prune::PruneArgs;
 use remove::RemoveArgs;
 use run::{RunArgs, run_start, run_test};
 use std::{env as std_env, path::PathBuf};
 use store::StoreCommand;
+use unlink::UnlinkArgs;
 use why::WhyArgs;
 
 /// Experimental package manager for node.js written in rust.
@@ -62,8 +74,16 @@ pub enum CliCommand {
     Add(AddArgs),
     /// Inspect and manage the metadata cache.
     Cache(CacheArgs),
+    /// Manage the pacquet configuration files.
+    #[clap(alias = "c")]
+    Config(ConfigArgs),
+    /// Print the directory where pacquet will install executables.
+    Bin(BinArgs),
     /// Install packages
     Install(InstallArgs),
+    /// Link packages from the filesystem or global link area.
+    #[clap(alias = "ln")]
+    Link(LinkArgs),
     /// Install with a frozen lockfile (CI mode)
     Ci(CiArgs),
     /// Manage Node.js versions.
@@ -82,8 +102,19 @@ pub enum CliCommand {
     /// List installed dependencies.
     #[clap(alias = "ls", alias = "la", alias = "ll")]
     List(ListArgs),
+    /// Check for outdated packages.
+    Outdated(OutdatedArgs),
+    /// Removes extraneous packages.
+    Prune(PruneArgs),
     /// Shows all packages that depend on the specified package.
     Why(WhyArgs),
+    /// Removes links created by `pacquet link` and reinstalls dependencies.
+    #[clap(alias = "dislink")]
+    Unlink(UnlinkArgs),
+    /// Print the config value for the provided key.
+    Get(GetArgs),
+    /// Set the config key to the value provided.
+    Set(SetArgs),
     /// Runs a package's "test" script, if one was provided.
     Test,
     /// Runs a defined package script.
@@ -123,11 +154,14 @@ impl CliArgs {
                 PackageManifest::init(&manifest_path()).wrap_err("initialize package.json")?;
             }
             CliCommand::Cache(args) => args.run(npmrc)?,
+            CliCommand::Config(args) => args.run(&dir, npmrc)?,
+            CliCommand::Bin(args) => args.run(dir)?,
             CliCommand::Add(mut args) => {
                 args.invoked_with_workspace_root = workspace_root;
                 args.run(state()?).await?
             }
             CliCommand::Install(args) => args.run(state()?).await?,
+            CliCommand::Link(args) => args.run(dir, npmrc).await?,
             CliCommand::Ci(args) => args.run(state()?).await?,
             CliCommand::Env(args) => args.run().await?,
             CliCommand::Dedupe(args) => args.run(dir, npmrc).await?,
@@ -136,7 +170,12 @@ impl CliArgs {
             CliCommand::Fetch(args) => args.run(dir, npmrc).await?,
             CliCommand::Remove(args) => args.run(state()?).await?,
             CliCommand::List(args) => args.run(state()?)?,
+            CliCommand::Outdated(args) => args.run(state()?).await?,
+            CliCommand::Prune(args) => args.run(state()?).await?,
             CliCommand::Why(args) => args.run(state()?)?,
+            CliCommand::Unlink(args) => args.run(state()?).await?,
+            CliCommand::Get(args) => args.run(&dir, npmrc)?,
+            CliCommand::Set(args) => args.run(&dir, npmrc)?,
             CliCommand::Test => run_test(manifest_path(), npmrc)?,
             CliCommand::Run(args) => args.run(manifest_path(), npmrc)?,
             CliCommand::Start => run_start(manifest_path(), npmrc)?,

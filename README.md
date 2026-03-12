@@ -35,56 +35,62 @@ Audited against local pnpm command registration in `/Users/samuelschwanzer/Webst
 
 Implemented in pacquet:
 - `add`
+- `bin`
 - `cache`
 - `ci`
+- `config`
 - `dedupe`
 - `dlx`
 - `env`
 - `exec`
 - `fetch`
+- `get`
 - `init`
 - `install`
+- `link`
 - `list` / `ls` / `ll`
+- `outdated`
+- `prune`
 - `remove`
 - `run`
+- `set`
 - `start`
 - `store`
 - `test`
+- `unlink`
 - `why`
 
 Present but only partial pnpm parity:
 - `env`
   Current pacquet surface is `add`, `use`, `remove`, and `list`, not the full pnpm env/version-management surface.
+- `outdated`
+  Table/list/json output, recursive mode, and compatibility filtering are implemented, but pnpm's exit-code behavior and some metadata/details edge cases are still not identical.
+- `link`
+  Local directory links, global register/link round-trips, workspace override writing, and peer-dependency warnings are in place, but pnpm's exact manifest-preservation and broader install-option parity are still incomplete.
+- `unlink`
+  Removes pacquet-created `link:` dependencies and link overrides, supports recursive workspace unlinking, and reinstalls afterward, but it cannot fully restore pnpm's pre-link manifest state because pacquet `link` currently rewrites the saved spec.
 - `list` / `why`
   Goldens are in place against local pnpm, but pnpm output format still varies between observed environments and the tests normalize equivalent variants.
 
 Missing compared to local pnpm:
 - `approve-builds`
 - `audit`
-- `bin`
-- `config`
 - `create`
 - `deploy`
 - `doctor`
-- `get`
 - `ignored-builds`
 - `import`
 - `licenses`
-- `link`
-- `outdated`
 - `pack`
 - `patch`
 - `patch-commit`
 - `patch-remove`
-- `prune`
 - `publish`
 - `rebuild`
 - `restart`
 - `self-update`
 - `server`
-- `set`
 - `setup`
-- `unlink`
 - `update`
 
 Internal pnpm command wiring not counted as user-facing parity:

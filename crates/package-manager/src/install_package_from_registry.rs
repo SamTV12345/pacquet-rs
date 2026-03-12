@@ -562,6 +562,8 @@ mod tests {
             libc: None,
             deprecated: None,
             bin: None,
+            homepage: None,
+            repository: None,
         };
 
         InstallPackageFromRegistry {

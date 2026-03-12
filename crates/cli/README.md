@@ -13,18 +13,24 @@ Audited against local pnpm command registration in `/Users/samuelschwanzer/Webst
 
 Implemented commands:
 - `add`
+- `bin`
 - `cache`
 - `ci`
+- `config`
 - `dedupe`
 - `dlx`
 - `env`
 - `exec`
 - `fetch`
+- `get`
 - `init`
 - `install`
 - `list` / `ls` / `ll`
+- `outdated`
+- `prune`
 - `remove`
 - `run`
+- `set`
 - `start`
 - `store`
 - `test`
@@ -33,30 +39,22 @@ Implemented commands:
 Missing commands from local pnpm:
 - `approve-builds`
 - `audit`
-- `bin`
-- `config`
 - `create`
 - `deploy`
 - `doctor`
-- `get`
 - `ignored-builds`
 - `import`
 - `licenses`
-- `link`
-- `outdated`
 - `pack`
 - `patch`
 - `patch-commit`
 - `patch-remove`
-- `prune`
 - `publish`
 - `rebuild`
 - `restart`
 - `self-update`
 - `server`
-- `set`
 - `setup`
-- `unlink`
 - `update`
 
 # Manage dependencies
@@ -226,6 +224,73 @@ Missing commands from local pnpm:
 | ✅   | `cache view <pkg>` | shows cached metadata grouped by registry |
 | ✅   | `cache delete <pattern...>` | deletes matching metadata cache files |
 
+## `pacquet config` / `pacquet get` / `pacquet set`
+
+[pnpm documentation](https://pnpm.io/cli/config)
+
+| Done | Command | Notes |
+| ---- | ------- | ----- |
+| ✅   | `config list` | prints merged raw `.npmrc` settings sorted by key |
+| ✅   | `config list --json` | prints merged raw `.npmrc` settings as JSON |
+| ✅   | `config get <key>` | supports kebab-case and camelCase keys |
+| ✅   | `config set <key> <value>` | writes to `.npmrc`; `key=value` syntax is also supported |
+| ✅   | `config delete <key>` | removes the key from `.npmrc` |
+| ✅   | `get` / `set` | top-level aliases delegating to `config get` / `config set` |
+| ~    | `--location project|global` | project and global `.npmrc` targets are supported; pnpm-workspace.yaml fallback is still missing |
+
+## `pacquet prune`
+
+[pnpm documentation](https://pnpm.io/cli/prune)
+
+| Done | Command | Notes |
+| ---- | ------- | ----- |
+| ✅   | `prune` | forces virtual-store orphan pruning and re-syncs installed dependencies to the manifest |
+| ✅   | `prune --prod` | removes installed `devDependencies` while keeping production dependencies |
+| ✅   | `prune --no-optional` | excludes optional dependencies from the pruned install result |
+| ✅   | `--ignore-scripts` | passes through to the underlying install flow |
+
+## `pacquet outdated`
+
+[pnpm documentation](https://pnpm.io/cli/outdated)
+
+| Done | Command | Notes |
+| ---- | ------- | ----- |
+| ✅   | `outdated` | checks registry dependencies against the latest registry version with pnpm-like table output |
+| ✅   | `outdated --json` | emits pnpm-shaped JSON objects keyed by package name |
+| ✅   | `--prod` / `--dev` / `--no-optional` | filters dependency groups like install |
+| ✅   | package filters | exact names and glob patterns are supported |
+| ✅   | `--compatible` | uses the latest version that still satisfies the declared range |
+| ✅   | `-r` / `--recursive` | aggregates outdated dependencies across workspace packages |
+| ✅   | `--long` | includes detail strings when registry metadata provides them |
+| ✅   | `--format table|list|json` / `--no-table` | supports pnpm-compatible format selection |
+| ~    | exit-code parity | pacquet still does not mirror pnpm's non-zero exit code for outdated packages |
+
+## `pacquet link`
+
+[pnpm documentation](https://pnpm.io/cli/link)
+
+| Done | Command | Notes |
+| ---- | ------- | ----- |
+| ✅   | `link <dir>` | links a local package into the current project using a `link:` spec and reinstalls |
+| ✅   | `link <pkg>` | resolves globally linked packages from `PNPM_HOME/global/node_modules` |
+| ✅   | `link` | registers the current package in the global link area and links its bins into `PNPM_HOME` |
+| ✅   | workspace overrides | writes `overrides` to `pnpm-workspace.yaml` when linking inside a workspace |
+| ✅   | peer dependency warning | warns when the linked package declares peer dependencies |
+| ~    | manifest preservation | pacquet currently rewrites the dependency spec to `link:` instead of always preserving the previous declared range like pnpm |
+| ~    | install-option parity | pnpm's broader `link` install/config option surface is not fully mirrored yet |
+
+## `pacquet unlink`
+
+[pnpm documentation](https://pnpm.io/cli/unlink)
+
+| Done | Command | Notes |
+| ---- | ------- | ----- |
+| ✅   | `unlink` | removes pacquet-created `link:` dependencies and reinstalls the project |
+| ✅   | `unlink <pkg...>` | removes only matching linked packages |
+| ✅   | `unlink -r` / `unlink --recursive` | unlinks matching packages across workspace projects |
+| ✅   | workspace overrides | removes `link:` overrides from `pnpm-workspace.yaml` during unlink |
+| ~    | exact pnpm manifest restoration | pnpm can reinstall from the pre-link saved range; pacquet currently removes the `link:` spec because `link` does not preserve the original range yet |
+
 ## `pacquet test`
 
 [pnpm documentation](https://pnpm.io/cli/test)
@@ -235,6 +300,15 @@ Missing commands from local pnpm:
 [pnpm documentation](https://pnpm.io/cli/start)
 
 # Misc.
+
+## `pacquet bin`
+
+[pnpm documentation](https://pnpm.io/cli/bin)
+
+| Done | Command | Notes |
+| ---- | ------- | ----- |
+| ✅   | `bin` | prints `<cwd>/node_modules/.bin` |
+| ✅   | `bin -g` / `bin --global` | prefers `PNPM_HOME`, matching pnpm's common global-bin flow |
 
 ## `pacquet store`
 

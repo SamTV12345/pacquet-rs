@@ -2573,6 +2573,8 @@ mod tests {
             libc: None,
             deprecated: None,
             bin: None,
+            homepage: None,
+            repository: None,
         };
 
         assert_eq!(
@@ -2604,6 +2606,8 @@ mod tests {
             libc: None,
             deprecated: Some("use pkg2".to_string()),
             bin: None,
+            homepage: None,
+            repository: None,
         };
 
         let snapshot = InstallWithLockfile::<'_, [DependencyGroup; 0]>::to_package_snapshot(

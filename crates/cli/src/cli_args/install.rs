@@ -33,7 +33,7 @@ pub struct InstallDependencyOptions {
 impl InstallDependencyOptions {
     /// Convert the dependency options to an iterator of [`DependencyGroup`]
     /// which filters the types of dependencies to install.
-    fn dependency_groups(&self) -> impl Iterator<Item = DependencyGroup> {
+    pub(crate) fn dependency_groups(&self) -> impl Iterator<Item = DependencyGroup> {
         let &InstallDependencyOptions { prod, dev, no_optional } = self;
         let has_both = prod == dev;
         let has_prod = has_both || prod;

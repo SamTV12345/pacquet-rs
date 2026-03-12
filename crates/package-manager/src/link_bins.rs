@@ -42,6 +42,20 @@ pub fn link_bins_for_manifest(
     Ok(())
 }
 
+pub fn link_bins_from_package_manifest(
+    config: &Npmrc,
+    manifest: &PackageManifest,
+    package_dir: &Path,
+    bin_dir: &Path,
+) -> miette::Result<()> {
+    for (bin_name, relative_target) in collect_bin_entries(manifest) {
+        let target = package_dir.join(relative_target);
+        write_bin_wrapper(config, bin_dir, &bin_name, &target)
+            .wrap_err_with(|| format!("link bin `{bin_name}` from {}", target.display()))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn collect_bin_entries(manifest: &PackageManifest) -> Vec<(String, String)> {
     let manifest_dir =
         manifest.path().parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
