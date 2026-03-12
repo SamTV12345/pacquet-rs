@@ -933,6 +933,51 @@ fn should_add_link_protocol_dependency_with_symlinked_node_modules() {
 }
 
 #[test]
+fn add_summary_should_format_local_link_like_pnpm() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("app");
+    let local_pkg_dir = workspace.join("local-pkg");
+    std::fs::create_dir_all(&app_dir).expect("create app dir");
+    std::fs::create_dir_all(&local_pkg_dir).expect("create local-pkg dir");
+    std::fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+    std::fs::write(
+        local_pkg_dir.join("package.json"),
+        serde_json::json!({
+            "name": "local-pkg",
+            "version": "1.0.0",
+            "main": "index.js"
+        })
+        .to_string(),
+    )
+    .expect("write linked package manifest");
+    std::fs::write(local_pkg_dir.join("index.js"), "module.exports = 'linked';\n")
+        .expect("write source file");
+
+    let assert = pacquet
+        .with_args(["-C", app_dir.to_str().unwrap(), "add", "link:../local-pkg"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+
+    assert!(stdout.contains("dependencies:"));
+    #[cfg(windows)]
+    assert!(stdout.contains(r"+ local-pkg <- ..\local-pkg"));
+    #[cfg(not(windows))]
+    assert!(stdout.contains("+ local-pkg <- ../local-pkg"));
+
+    drop(root); // cleanup
+}
+
+#[test]
 fn should_preserve_symlink_target_for_link_protocol_dependency() {
     let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
 
@@ -999,6 +1044,42 @@ fn should_add_npm_alias_dependency() {
         .map(|(_, version)| version);
     assert_eq!(dependency, Some("npm:@pnpm.e2e/hello-world-js-bin@1.0.0"));
     drop((root, anchor)); // cleanup
+}
+
+#[test]
+fn add_summary_should_format_npm_alias_like_pnpm() {
+    let CommandTempCwd { pacquet, root, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let mock_instance = npmrc_info.mock_instance;
+
+    let assert = pacquet
+        .with_args(["add", "hello-alias@npm:@pnpm.e2e/hello-world-js-bin@1.0.0"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+
+    assert!(stdout.contains("dependencies:"));
+    assert!(stdout.contains("+ hello-alias <- @pnpm.e2e/hello-world-js-bin 1.0.0"));
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn add_reporter_silent_should_suppress_output() {
+    let CommandTempCwd { pacquet, root, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let mock_instance = npmrc_info.mock_instance;
+
+    let assert = pacquet
+        .with_args(["add", "@pnpm.e2e/hello-world-js-bin", "--reporter", "silent"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stdout.trim().is_empty());
+    assert!(stderr.trim().is_empty());
+
+    drop((root, mock_instance)); // cleanup
 }
 
 #[test]

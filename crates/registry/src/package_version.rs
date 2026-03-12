@@ -17,6 +17,8 @@ pub struct PackageVersion {
     pub dev_dependencies: Option<HashMap<String, String>>,
     pub peer_dependencies: Option<HashMap<String, String>>,
     #[serde(default)]
+    pub engines: Option<HashMap<String, String>>,
+    #[serde(default)]
     pub bin: Option<serde_json::Value>,
 }
 

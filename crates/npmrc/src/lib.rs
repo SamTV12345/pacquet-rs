@@ -17,12 +17,13 @@ use std::{
 use url::Url;
 
 use crate::custom_deserializer::{
-    bool_true, default_cache_dir, default_fetch_timeout, default_hoist_pattern,
-    default_modules_cache_max_age, default_modules_dir, default_network_concurrency,
-    default_peers_suffix_max_length, default_public_hoist_pattern, default_registry,
-    default_store_dir, default_virtual_store_dir, deserialize_bool, deserialize_optional_bool,
-    deserialize_optional_pathbuf, deserialize_pathbuf, deserialize_registry, deserialize_store_dir,
-    deserialize_string_vec, deserialize_u16, deserialize_u64,
+    bool_true, default_cache_dir, default_dlx_cache_max_age, default_fetch_timeout,
+    default_hoist_pattern, default_modules_cache_max_age, default_modules_dir,
+    default_network_concurrency, default_peers_suffix_max_length, default_public_hoist_pattern,
+    default_registry, default_store_dir, default_virtual_store_dir, deserialize_bool,
+    deserialize_optional_bool, deserialize_optional_pathbuf, deserialize_pathbuf,
+    deserialize_registry, deserialize_store_dir, deserialize_string_vec, deserialize_u16,
+    deserialize_u64,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -107,6 +108,14 @@ pub struct Npmrc {
     /// Directory where package metadata cache is stored.
     #[serde(default = "default_cache_dir", deserialize_with = "deserialize_pathbuf")]
     pub cache_dir: PathBuf,
+
+    /// The time in minutes after which a cached dlx environment is considered stale.
+    #[serde(
+        default = "default_dlx_cache_max_age",
+        alias = "dlx_cache_max_age",
+        deserialize_with = "deserialize_u64"
+    )]
+    pub dlx_cache_max_age: u64,
 
     /// The directory in which dependencies will be installed (instead of node_modules).
     #[serde(
@@ -799,6 +808,7 @@ mod tests {
         assert_eq!(value.package_import_method, PackageImportMethod::default());
         assert_eq!(value.network_concurrency, 16);
         assert_eq!(value.fetch_timeout, 60000);
+        assert_eq!(value.dlx_cache_max_age, 1440);
         assert!(value.strict_ssl);
         assert_eq!(value.proxy, None);
         assert_eq!(value.https_proxy, None);
@@ -921,6 +931,12 @@ mod tests {
     }
 
     #[test]
+    pub fn parse_dlx_cache_max_age() {
+        let value: Npmrc = serde_ini::from_str("dlx-cache-max-age=30").unwrap();
+        assert_eq!(value.dlx_cache_max_age, 30);
+    }
+
+    #[test]
     pub fn parse_strict_ssl() {
         let value: Npmrc = serde_ini::from_str("strict-ssl=false").unwrap();
         assert!(!value.strict_ssl);
@@ -939,11 +955,13 @@ mod tests {
 
     #[test]
     pub fn parse_request_settings_numeric_and_bool_from_underscore_keys() {
-        let value: Npmrc =
-            serde_ini::from_str("network_concurrency=12\nfetch_timeout=45000\nstrict_ssl=false")
-                .unwrap();
+        let value: Npmrc = serde_ini::from_str(
+            "network_concurrency=12\nfetch_timeout=45000\ndlx_cache_max_age=30\nstrict_ssl=false",
+        )
+        .unwrap();
         assert_eq!(value.network_concurrency, 12);
         assert_eq!(value.fetch_timeout, 45000);
+        assert_eq!(value.dlx_cache_max_age, 30);
         assert!(!value.strict_ssl);
     }
 

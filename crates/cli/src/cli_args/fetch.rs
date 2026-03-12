@@ -1,10 +1,13 @@
+use crate::cli_args::install::parse_install_reporter;
 use crate::state::find_workspace_root;
 use clap::Args;
 use miette::{Context, IntoDiagnostic};
 use pacquet_lockfile::{Lockfile, ProjectSnapshot, RootProjectSnapshot};
 use pacquet_network::{RegistryTlsConfig, ThrottledClient, ThrottledClientOptions};
 use pacquet_npmrc::Npmrc;
-use pacquet_package_manager::{InstallFrozenLockfile, ResolvedPackages};
+use pacquet_package_manager::{
+    InstallFrozenLockfile, ResolvedPackages, finish_progress_reporter, start_progress_reporter,
+};
 use pacquet_package_manifest::DependencyGroup;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
@@ -53,10 +56,14 @@ impl FetchDependencyOptions {
 pub struct FetchArgs {
     #[clap(flatten)]
     dependency_options: FetchDependencyOptions,
+    /// Reporter name.
+    #[clap(long)]
+    reporter: Option<String>,
 }
 
 impl FetchArgs {
     pub async fn run(self, dir: PathBuf, config: &'static Npmrc) -> miette::Result<()> {
+        let reporter = parse_install_reporter(self.reporter.as_deref())?;
         let lockfile_dir = find_workspace_root(&dir).unwrap_or(dir);
         let lockfile = Lockfile::load_from_dir(&lockfile_dir)
             .wrap_err_with(|| format!("load lockfile from {}", lockfile_dir.display()))?
@@ -87,6 +94,10 @@ impl FetchArgs {
             },
         );
         let resolved_packages = ResolvedPackages::new();
+        let dependency_groups = self.dependency_options.dependency_groups().collect::<Vec<_>>();
+        let direct_dependencies =
+            project_snapshot.dependencies_by_groups(dependency_groups.iter().copied()).count();
+        start_progress_reporter(direct_dependencies, true, reporter);
 
         InstallFrozenLockfile {
             http_client: &http_client,
@@ -95,12 +106,13 @@ impl FetchArgs {
             project_snapshot,
             packages: lockfile.packages.as_ref(),
             lockfile_dir: &lockfile_dir,
-            dependency_groups: self.dependency_options.dependency_groups(),
+            dependency_groups: dependency_groups.iter().copied(),
             offline: false,
             force: false,
         }
         .run()
         .await;
+        finish_progress_reporter(true);
 
         Ok(())
     }

@@ -102,6 +102,7 @@ mod tests {
             optional_dependencies: None,
             dev_dependencies: None,
             peer_dependencies: Some(peer_dependencies),
+            engines: None,
             bin: None,
         };
 
@@ -123,6 +124,7 @@ mod tests {
             optional_dependencies: None,
             dev_dependencies: None,
             peer_dependencies: None,
+            engines: None,
             bin: None,
         };
 

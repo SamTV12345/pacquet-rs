@@ -56,9 +56,11 @@ pub struct ExecuteLifecycleScript<'a> {
 /// Parameters used to run one arbitrary command in a package context.
 pub struct ExecuteCommand<'a> {
     pub pkg_root: &'a Path,
+    pub current_dir: Option<&'a Path>,
     pub program: &'a str,
     pub args: &'a [String],
     pub extra_env: &'a [(OsString, OsString)],
+    pub shell_mode: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -85,10 +87,15 @@ pub fn execute_lifecycle_script(opts: ExecuteLifecycleScript<'_>) -> Result<(), 
 /// Execute one arbitrary command with pnpm-like PATH preparation.
 pub fn execute_command(opts: ExecuteCommand<'_>) -> Result<(), ExecutorError> {
     let path_var = prepend_node_modules_bin_paths(opts.pkg_root)?;
-    let env = [(OsString::from("PATH"), path_var.clone())];
-    let mut command = Command::new(resolve_program_for_emulator(opts.program, &env));
-    command.args(opts.args);
-    command.current_dir(opts.pkg_root);
+    let common_env = [(OsString::from("PATH"), path_var.clone())];
+    let mut command = if opts.shell_mode {
+        shell_command(None, &append_args_to_script(opts.program, opts.args))?
+    } else {
+        let mut command = Command::new(resolve_program_for_emulator(opts.program, &common_env));
+        command.args(opts.args);
+        command
+    };
+    command.current_dir(opts.current_dir.unwrap_or(opts.pkg_root));
     command.env("PATH", path_var);
     for (key, value) in opts.extra_env {
         command.env(key, value);
@@ -101,10 +108,15 @@ pub fn execute_command_capture(
     opts: ExecuteCommand<'_>,
 ) -> Result<LifecycleScriptOutput, ExecutorError> {
     let path_var = prepend_node_modules_bin_paths(opts.pkg_root)?;
-    let env = [(OsString::from("PATH"), path_var.clone())];
-    let mut command = Command::new(resolve_program_for_emulator(opts.program, &env));
-    command.args(opts.args);
-    command.current_dir(opts.pkg_root);
+    let common_env = [(OsString::from("PATH"), path_var.clone())];
+    let mut command = if opts.shell_mode {
+        shell_command(None, &append_args_to_script(opts.program, opts.args))?
+    } else {
+        let mut command = Command::new(resolve_program_for_emulator(opts.program, &common_env));
+        command.args(opts.args);
+        command
+    };
+    command.current_dir(opts.current_dir.unwrap_or(opts.pkg_root));
     command.env("PATH", path_var);
     for (key, value) in opts.extra_env {
         command.env(key, value);
@@ -577,9 +589,11 @@ mod tests {
 
         execute_command(ExecuteCommand {
             pkg_root: dir.path(),
+            current_dir: None,
             program: "hello",
             args: &[],
             extra_env: &[],
+            shell_mode: false,
         })
         .expect("execute command");
 

@@ -1298,6 +1298,55 @@ fn should_accept_reporter_flag() {
 }
 
 #[test]
+fn reporter_silent_should_suppress_install_output() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    let assert = pacquet.with_args(["install", "--reporter", "silent"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stdout.trim().is_empty());
+    assert!(stderr.trim().is_empty());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn reporter_append_only_should_write_static_progress_lines_to_stderr() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    let assert = pacquet.with_args(["install", "--reporter", "append-only"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stdout.contains("Packages: +1"));
+    assert!(stdout.contains("Done in "));
+    assert!(stderr.contains("pacquet starting [regular]"));
+    assert!(stderr.contains("pacquet done [regular]"));
+    assert!(!stderr.contains("\u{1b}["));
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
 fn should_accept_use_store_server_flag() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();

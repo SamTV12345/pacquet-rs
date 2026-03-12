@@ -41,6 +41,51 @@ fn should_remove_dependency_from_manifest() {
 }
 
 #[test]
+fn remove_summary_should_report_removed_dependency_like_pnpm() {
+    let CommandTempCwd { root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let mock_instance = npmrc_info.mock_instance;
+
+    pacquet_command(&workspace)
+        .with_args(["add", "@pnpm.e2e/hello-world-js-bin@1.0.0"])
+        .assert()
+        .success();
+    let assert = pacquet_command(&workspace)
+        .with_args(["remove", "@pnpm.e2e/hello-world-js-bin"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+
+    assert!(stdout.contains("Packages: -1"));
+    assert!(stdout.contains("dependencies:"));
+    assert!(stdout.contains("- @pnpm.e2e/hello-world-js-bin 1.0.0"));
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn remove_reporter_silent_should_suppress_output() {
+    let CommandTempCwd { root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let mock_instance = npmrc_info.mock_instance;
+
+    pacquet_command(&workspace)
+        .with_args(["add", "@pnpm.e2e/hello-world-js-bin@1.0.0"])
+        .assert()
+        .success();
+    let assert = pacquet_command(&workspace)
+        .with_args(["remove", "@pnpm.e2e/hello-world-js-bin", "--reporter", "silent"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stdout.trim().is_empty());
+    assert!(stderr.trim().is_empty());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
 fn should_fail_when_dependency_is_missing() {
     let CommandTempCwd { root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();

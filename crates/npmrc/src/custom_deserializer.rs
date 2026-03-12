@@ -123,6 +123,10 @@ pub fn default_fetch_timeout() -> u64 {
     60000
 }
 
+pub fn default_dlx_cache_max_age() -> u64 {
+    24 * 60
+}
+
 pub fn default_peers_suffix_max_length() -> u16 {
     1000
 }

@@ -1,4 +1,5 @@
 use crate::State;
+use crate::cli_args::install::parse_install_reporter;
 use clap::Args;
 use miette::Context;
 use pacquet_lockfile::Lockfile;
@@ -94,6 +95,9 @@ pub struct AddArgs {
     /// Add dependencies to the workspace root package even when this is not explicitly requested.
     #[clap(long = "ignore-workspace-root-check")]
     pub ignore_workspace_root_check: bool,
+    /// Reporter name.
+    #[clap(long)]
+    pub reporter: Option<String>,
     #[arg(skip)]
     pub invoked_with_workspace_root: bool,
 }
@@ -111,8 +115,10 @@ impl AddArgs {
             recursive,
             virtual_store_dir: _virtual_store_dir,
             ignore_workspace_root_check,
+            reporter,
             invoked_with_workspace_root,
         } = self;
+        let reporter = parse_install_reporter(reporter.as_deref())?;
 
         let State {
             tarball_mem_cache,
@@ -183,6 +189,7 @@ impl AddArgs {
                     packages: &packages,
                     save_exact,
                     workspace_only: workspace,
+                    reporter,
                     resolved_packages,
                 }
                 .run()
@@ -224,6 +231,7 @@ impl AddArgs {
             packages: &packages,
             save_exact,
             workspace_only: workspace,
+            reporter,
             resolved_packages,
         }
         .run()

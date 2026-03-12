@@ -1,9 +1,10 @@
 use crate::State;
+use crate::cli_args::install::parse_install_reporter;
 use clap::Args;
 use miette::{Context, IntoDiagnostic};
 use pacquet_lockfile::Lockfile;
 use pacquet_npmrc::Npmrc;
-use pacquet_package_manager::Install;
+use pacquet_package_manager::{Install, format_summary_dependency_line_with_prefix};
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use serde_json::Value;
 use std::{
@@ -58,14 +59,18 @@ pub struct RemoveArgs {
     /// Remove dependencies from every workspace project recursively (including workspace root).
     #[clap(short = 'r', long)]
     pub recursive: bool,
+    /// Reporter name.
+    #[clap(long)]
+    pub reporter: Option<String>,
 }
 
 impl RemoveArgs {
     pub async fn run(self, mut state: State) -> miette::Result<()> {
-        let RemoveArgs { packages, dependency_options, filter, recursive } = self;
+        let RemoveArgs { packages, dependency_options, filter, recursive, reporter } = self;
         if packages.is_empty() {
             miette::bail!("At least one dependency name should be specified for removal");
         }
+        let reporter = parse_install_reporter(reporter.as_deref())?;
 
         let State {
             tarball_mem_cache,
@@ -137,14 +142,18 @@ impl RemoveArgs {
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| lockfile_dir.to_path_buf());
                 let target_config = config_for_project(config, &project_dir).leak();
+                let removed_entries = collect_removed_entries(&target_manifest, &packages, &groups);
 
-                let _removed_any = apply_remove_to_manifest(
+                let removed_any = apply_remove_to_manifest(
                     &packages,
                     &groups,
                     &mut target_manifest,
                     false,
                     target_config,
                 )?;
+                if !removed_any {
+                    continue;
+                }
 
                 Install {
                     tarball_mem_cache,
@@ -166,10 +175,16 @@ impl RemoveArgs {
                     force: false,
                     prefer_offline: false,
                     offline: false,
+                    reporter,
+                    print_summary: false,
                 }
                 .run()
                 .await
                 .wrap_err("reinstall after removal")?;
+
+                if reporter != pacquet_package_manager::InstallReporter::Silent {
+                    print_remove_summary(&removed_entries);
+                }
 
                 current_lockfile = if config.lockfile {
                     Lockfile::load_from_dir(lockfile_dir)
@@ -182,6 +197,7 @@ impl RemoveArgs {
             return Ok(());
         }
 
+        let removed_entries = collect_removed_entries(manifest, &packages, &groups);
         apply_remove_to_manifest(&packages, &groups, manifest, true, config)?;
 
         Install {
@@ -204,10 +220,17 @@ impl RemoveArgs {
             force: false,
             prefer_offline: false,
             offline: false,
+            reporter,
+            print_summary: false,
         }
         .run()
         .await
-        .wrap_err("reinstall after removal")
+        .wrap_err("reinstall after removal")?;
+
+        if reporter != pacquet_package_manager::InstallReporter::Silent {
+            print_remove_summary(&removed_entries);
+        }
+        Ok(())
     }
 }
 
@@ -266,6 +289,57 @@ fn apply_remove_to_manifest(
         PackageManifest::from_path(manifest_path).wrap_err("reload package.json after removal")?;
 
     Ok(removed_any)
+}
+
+fn collect_removed_entries(
+    manifest: &PackageManifest,
+    packages: &[String],
+    groups: &[DependencyGroup],
+) -> Vec<(&'static str, String, String)> {
+    groups
+        .iter()
+        .flat_map(|group| {
+            let header = match group {
+                DependencyGroup::Prod => "dependencies",
+                DependencyGroup::Dev => "devDependencies",
+                DependencyGroup::Optional => "optionalDependencies",
+                DependencyGroup::Peer => "peerDependencies",
+            };
+            manifest
+                .dependencies(std::iter::once(*group))
+                .filter(|(name, _)| packages.iter().any(|package| package == name))
+                .map(move |(name, spec)| (header, name.to_string(), spec.to_string()))
+        })
+        .collect()
+}
+
+fn print_remove_summary(entries: &[(&'static str, String, String)]) {
+    use std::collections::BTreeMap;
+    use std::io::Write;
+
+    if entries.is_empty() {
+        return;
+    }
+
+    let mut grouped = BTreeMap::<&str, Vec<(String, String)>>::new();
+    for (header, name, spec) in entries {
+        grouped.entry(header).or_default().push((name.clone(), spec.clone()));
+    }
+
+    let total_packages = entries.len();
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "Packages: -{total_packages}");
+    let _ = writeln!(out, "{}", "-".repeat(total_packages.min(80)));
+    let _ = writeln!(out);
+
+    for (header, deps) in grouped {
+        let _ = writeln!(out, "{header}:");
+        for (name, spec) in deps {
+            let _ =
+                writeln!(out, "{}", format_summary_dependency_line_with_prefix('-', &name, &spec));
+        }
+        let _ = writeln!(out);
+    }
 }
 
 fn config_for_project(config: &Npmrc, project_dir: &Path) -> Npmrc {

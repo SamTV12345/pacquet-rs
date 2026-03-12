@@ -275,9 +275,11 @@ fn execute_command_in_dir(dir: &Path, command: &str, args: &[String]) -> miette:
     let extra_env = command_extra_env(dir)?;
     execute_command(ExecuteCommand {
         pkg_root: dir,
+        current_dir: None,
         program: command,
         args,
         extra_env: &extra_env,
+        shell_mode: false,
     })
     .into_diagnostic()?;
     Ok(())
@@ -298,9 +300,11 @@ fn execute_command_in_project(
     let extra_env = command_extra_env(&project.package_dir)?;
     let opts = ExecuteCommand {
         pkg_root: &project.package_dir,
+        current_dir: None,
         program: command,
         args,
         extra_env: &extra_env,
+        shell_mode: false,
     };
     match output_mode {
         CommandOutputMode::Inherit => {

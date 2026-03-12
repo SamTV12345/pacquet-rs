@@ -2,6 +2,13 @@ use std::io::{IsTerminal, Write, stderr};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallReporter {
+    Default,
+    AppendOnly,
+    Silent,
+}
+
 #[derive(Debug)]
 struct State {
     start: Instant,
@@ -14,10 +21,11 @@ struct State {
     phase: &'static str,
     spinner_index: usize,
     rendered_lines: usize,
+    reporter: InstallReporter,
 }
 
 impl State {
-    fn new(direct_dependencies: usize, frozen_lockfile: bool) -> Self {
+    fn new(direct_dependencies: usize, frozen_lockfile: bool, reporter: InstallReporter) -> Self {
         let now = Instant::now();
         Self {
             start: now,
@@ -30,6 +38,7 @@ impl State {
             phase: "starting",
             spinner_index: 0,
             rendered_lines: 0,
+            reporter,
         }
     }
 
@@ -113,15 +122,26 @@ fn draw(state: &mut State, phase_label: &str, force: bool) {
     let lines = render_lines(state, phase_label);
     let mut err = stderr();
 
-    if state.rendered_lines > 0 {
-        let _ = write!(err, "\x1b[{}A", state.rendered_lines);
-    }
+    match state.reporter {
+        InstallReporter::Default => {
+            if state.rendered_lines > 0 {
+                let _ = write!(err, "\x1b[{}A", state.rendered_lines);
+            }
 
-    for line in &lines {
-        let _ = write!(err, "\r\x1b[2K{line}\n");
+            for line in &lines {
+                let _ = write!(err, "\r\x1b[2K{line}\n");
+            }
+            state.rendered_lines = lines.len();
+        }
+        InstallReporter::AppendOnly => {
+            let _ = writeln!(err, "pacquet {phase_label} [{}]", state.mode());
+            state.rendered_lines = 0;
+        }
+        InstallReporter::Silent => {
+            state.rendered_lines = 0;
+        }
     }
     let _ = err.flush();
-    state.rendered_lines = lines.len();
 }
 
 fn update(phase: &'static str, update_counter: impl FnOnce(&mut State)) {
@@ -135,13 +155,16 @@ fn update(phase: &'static str, update_counter: impl FnOnce(&mut State)) {
     draw(state, phase, false);
 }
 
-pub fn start(direct_dependencies: usize, frozen_lockfile: bool) {
-    if !stderr().is_terminal() {
+pub fn start(direct_dependencies: usize, frozen_lockfile: bool, reporter: InstallReporter) {
+    if reporter == InstallReporter::Silent {
+        return;
+    }
+    if reporter == InstallReporter::Default && !stderr().is_terminal() {
         return;
     }
     let mutex = state_mutex();
     let mut guard = mutex.lock().expect("progress mutex");
-    *guard = Some(State::new(direct_dependencies, frozen_lockfile));
+    *guard = Some(State::new(direct_dependencies, frozen_lockfile, reporter));
     if let Some(state) = guard.as_mut() {
         draw(state, "starting", true);
     }
@@ -170,18 +193,20 @@ pub fn finish(success: bool) {
     draw(state, phase, true);
 
     let mut err = stderr();
-    let _ = writeln!(err, "\r\x1b[2K");
-    let elapsed = state.start.elapsed().as_secs_f32();
-    let _ = writeln!(
-        err,
-        "pacquet [{}] {phase} | direct: {} | resolved: {} | fetched: {} | linked: {} | {:.1}s",
-        state.mode(),
-        state.direct_dependencies,
-        state.resolved,
-        state.fetched,
-        state.linked,
-        elapsed
-    );
+    if state.reporter == InstallReporter::Default {
+        let _ = writeln!(err, "\r\x1b[2K");
+        let elapsed = state.start.elapsed().as_secs_f32();
+        let _ = writeln!(
+            err,
+            "pacquet [{}] {phase} | direct: {} | resolved: {} | fetched: {} | linked: {} | {:.1}s",
+            state.mode(),
+            state.direct_dependencies,
+            state.resolved,
+            state.fetched,
+            state.linked,
+            elapsed
+        );
+    }
     let _ = err.flush();
     *guard = None;
 }

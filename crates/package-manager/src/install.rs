@@ -37,6 +37,8 @@ where
     pub force: bool,
     pub prefer_offline: bool,
     pub offline: bool,
+    pub reporter: progress_reporter::InstallReporter,
+    pub print_summary: bool,
 }
 
 impl<'a, DependencyGroupList> Install<'a, DependencyGroupList>
@@ -45,6 +47,7 @@ where
 {
     /// Execute the subroutine.
     pub async fn run(self) -> miette::Result<()> {
+        let start_time = std::time::Instant::now();
         let Install {
             tarball_mem_cache,
             resolved_packages,
@@ -61,6 +64,8 @@ where
             force,
             prefer_offline,
             offline,
+            reporter,
+            print_summary,
         } = self;
 
         if lockfile_only && !config.lockfile {
@@ -69,7 +74,7 @@ where
 
         let dependency_groups = dependency_groups.into_iter().collect::<Vec<_>>();
         let direct_dependencies = manifest.dependencies(dependency_groups.iter().copied()).count();
-        progress_reporter::start(direct_dependencies, frozen_lockfile);
+        progress_reporter::start(direct_dependencies, frozen_lockfile, reporter);
         let project_dir = manifest
             .path()
             .parent()
@@ -267,8 +272,102 @@ where
         .await;
 
         progress_reporter::finish(result.is_ok());
+
+        if result.is_ok() && print_summary && reporter != progress_reporter::InstallReporter::Silent
+        {
+            print_pnpm_style_summary(manifest, &dependency_groups, &start_time);
+        }
+
         result
     }
+}
+
+fn print_pnpm_style_summary(
+    manifest: &PackageManifest,
+    dependency_groups: &[DependencyGroup],
+    start_time: &std::time::Instant,
+) {
+    use std::io::Write;
+
+    let elapsed = start_time.elapsed();
+    let elapsed_ms = elapsed.as_millis();
+
+    // Collect dependencies by group
+    let mut sections: Vec<(&str, Vec<(String, String)>)> = Vec::new();
+
+    for &group in dependency_groups {
+        let header = match group {
+            DependencyGroup::Prod => "dependencies",
+            DependencyGroup::Dev => "devDependencies",
+            DependencyGroup::Optional => "optionalDependencies",
+            DependencyGroup::Peer => "peerDependencies",
+        };
+        let mut deps: Vec<(String, String)> = manifest
+            .dependencies(std::iter::once(group))
+            .map(|(name, spec)| (name.to_string(), spec.to_string()))
+            .collect();
+        deps.sort();
+        if !deps.is_empty() {
+            sections.push((header, deps));
+        }
+    }
+
+    let total_packages: usize = sections.iter().map(|(_, deps)| deps.len()).sum();
+
+    let mut out = std::io::stdout().lock();
+
+    if total_packages > 0 {
+        let _ = writeln!(out, "Packages: +{total_packages}");
+        let _ = writeln!(out, "{}", "+".repeat(total_packages.min(80)));
+        let _ = writeln!(out);
+    }
+
+    for (header, deps) in &sections {
+        let _ = writeln!(out, "{header}:");
+        for (name, spec) in deps {
+            let _ = writeln!(out, "{}", format_summary_dependency_line(name, spec));
+        }
+        let _ = writeln!(out);
+    }
+
+    let _ = writeln!(out, "Done in {elapsed_ms}ms");
+}
+
+pub fn format_summary_dependency_line(name: &str, spec: &str) -> String {
+    format_summary_dependency_line_with_prefix('+', name, spec)
+}
+
+pub fn format_summary_dependency_line_with_prefix(prefix: char, name: &str, spec: &str) -> String {
+    if let Some(alias_target) = spec.strip_prefix("npm:") {
+        let (real_name, version) = split_package_name_and_version(alias_target);
+        return version.map_or_else(
+            || format!("{prefix} {name} <- {real_name}"),
+            |version| {
+                format!(
+                    "{prefix} {name} <- {real_name} {}",
+                    version.trim_start_matches('^').trim_start_matches('~')
+                )
+            },
+        );
+    }
+
+    if let Some(local_path) = spec.strip_prefix("link:").or_else(|| spec.strip_prefix("file:")) {
+        return format!("{prefix} {name} <- {}", Path::new(local_path).display());
+    }
+
+    let display_version = spec.trim_start_matches('^').trim_start_matches('~');
+    format!("{prefix} {name} {display_version}")
+}
+
+fn split_package_name_and_version(value: &str) -> (&str, Option<&str>) {
+    let search_start = usize::from(value.starts_with('@'));
+    let Some(version_start) = value[search_start..].rfind('@').map(|index| index + search_start)
+    else {
+        return (value, None);
+    };
+
+    let (name, version) = value.split_at(version_start);
+    (name, Some(version.trim_start_matches('@')))
 }
 
 #[derive(Debug, Deserialize)]
@@ -520,6 +619,8 @@ mod tests {
                     force: false,
                     prefer_offline: false,
                     offline: false,
+                    reporter: progress_reporter::InstallReporter::Default,
+                    print_summary: true,
                     resolved_packages: &Default::default(),
                 }
                 .run()
@@ -594,6 +695,8 @@ mod tests {
                     force: false,
                     prefer_offline: false,
                     offline: false,
+                    reporter: progress_reporter::InstallReporter::Default,
+                    print_summary: true,
                     resolved_packages: &Default::default(),
                 }
                 .run()
@@ -847,6 +950,29 @@ mod tests {
     #[test]
     fn should_prefer_frozen_lockfile_path_disables_headless_for_local_file_directories() {
         assert!(!should_prefer_frozen_lockfile_path(true, true, true));
+    }
+
+    #[test]
+    fn summary_line_formats_npm_alias_like_pnpm() {
+        assert_eq!(
+            format_summary_dependency_line(
+                "hello-alias",
+                "npm:@pnpm.e2e/hello-world-js-bin@^1.0.0"
+            ),
+            "+ hello-alias <- @pnpm.e2e/hello-world-js-bin 1.0.0"
+        );
+    }
+
+    #[test]
+    fn summary_line_formats_local_link_like_pnpm() {
+        #[cfg(windows)]
+        let spec = r"link:..\local-pkg";
+        #[cfg(not(windows))]
+        let spec = "link:../local-pkg";
+
+        let line = format_summary_dependency_line("local-pkg", spec);
+        assert!(line.starts_with("+ local-pkg <- "));
+        assert!(line.contains("local-pkg"));
     }
 
     fn load_manifest(dir: &Path, value: serde_json::Value) -> PackageManifest {

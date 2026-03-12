@@ -1,3 +1,4 @@
+use crate::InstallReporter;
 use crate::{
     Install, ResolvedPackages, WorkspacePackages, is_git_spec, is_tarball_spec, normalize_git_spec,
     resolve_package_version_from_git_spec, resolve_package_version_from_tarball_spec,
@@ -33,6 +34,7 @@ where
     pub packages: &'a [String],
     pub save_exact: bool, // TODO: add `save-exact` to `.npmrc`, merge configs, and remove this
     pub workspace_only: bool,
+    pub reporter: InstallReporter,
 }
 
 /// Error type of [`Add`].
@@ -78,6 +80,7 @@ where
             packages,
             save_exact,
             workspace_only,
+            reporter,
             resolved_packages,
         } = self;
 
@@ -122,6 +125,8 @@ where
             force: false,
             prefer_offline: false,
             offline: false,
+            reporter,
+            print_summary: true,
             resolved_packages,
         }
         .run()

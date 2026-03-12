@@ -928,7 +928,7 @@ where
             id: None,
             name: None,
             version: None,
-            engines: None,
+            engines: package_version.engines.clone(),
             cpu: None,
             os: None,
             libc: None,
@@ -2382,6 +2382,7 @@ mod tests {
             optional_dependencies: None,
             dev_dependencies: None,
             peer_dependencies: None,
+            engines: None,
             bin: None,
         };
 

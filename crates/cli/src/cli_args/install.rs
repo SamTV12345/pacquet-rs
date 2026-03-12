@@ -4,7 +4,7 @@ use miette::{Context, IntoDiagnostic};
 use pacquet_executor::{ExecuteLifecycleScript, execute_lifecycle_script};
 use pacquet_lockfile::Lockfile;
 use pacquet_npmrc::{NodeLinker, Npmrc};
-use pacquet_package_manager::{Install, WorkspacePackages};
+use pacquet_package_manager::{Install, InstallReporter, WorkspacePackages};
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_store_dir::StoreDir;
 use std::collections::BTreeMap;
@@ -17,14 +17,14 @@ pub struct InstallDependencyOptions {
     /// Use this flag to instruct pacquet to ignore NODE_ENV and take its production status from this
     /// flag instead.
     #[arg(short = 'P', long)]
-    prod: bool,
+    pub(crate) prod: bool,
     /// Only devDependencies are installed and dependencies are removed insofar they were
     /// already installed, regardless of the NODE_ENV.
     #[arg(short = 'D', long)]
-    dev: bool,
+    pub(crate) dev: bool,
     /// optionalDependencies are not installed.
     #[arg(long)]
-    no_optional: bool,
+    pub(crate) no_optional: bool,
 }
 
 impl InstallDependencyOptions {
@@ -132,7 +132,7 @@ impl InstallArgs {
             lockfile_only,
             force,
             resolution_only,
-            reporter: _reporter,
+            reporter,
             use_store_server: _use_store_server,
             shamefully_hoist,
             filter,
@@ -142,6 +142,7 @@ impl InstallArgs {
         } = self;
         let lockfile_only = lockfile_only || resolution_only;
         let frozen_lockfile = frozen_lockfile && !fix_lockfile;
+        let reporter = parse_install_reporter(reporter.as_deref())?;
         let prefer_frozen_lockfile_override = if prefer_frozen_lockfile {
             Some(true)
         } else if no_prefer_frozen_lockfile {
@@ -221,6 +222,8 @@ impl InstallArgs {
                 force,
                 prefer_offline,
                 offline,
+                reporter,
+                print_summary: true,
                 resolved_packages,
             }
             .run()
@@ -239,6 +242,17 @@ impl InstallArgs {
         }
 
         Ok(())
+    }
+}
+
+pub(crate) fn parse_install_reporter(value: Option<&str>) -> miette::Result<InstallReporter> {
+    match value.unwrap_or("default") {
+        "default" => Ok(InstallReporter::Default),
+        "append-only" | "appendOnly" => Ok(InstallReporter::AppendOnly),
+        "silent" => Ok(InstallReporter::Silent),
+        other => miette::bail!(
+            "Unsupported reporter `{other}`. Supported values: default, append-only, silent"
+        ),
     }
 }
 

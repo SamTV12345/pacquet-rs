@@ -49,7 +49,7 @@
 | ✅   | --frozen-lockfile           |       |
 | ✅   | --prefer-frozen-lockfile    | overrides `.npmrc` preference for current command |
 | ✅   | --no-prefer-frozen-lockfile | overrides `.npmrc` preference for current command |
-| ✅   | --reporter=<name>           | accepted for compatibility |
+| ✅   | --reporter=<name>           | supports `default`, `append-only`, and `silent` |
 | ✅   | --use-store-server          | accepted for compatibility |
 | ✅   | --shamefully-hoist          | enables hoisted links in `.pnpm/node_modules` |
 | ✅   | --ignore-scripts            | skips project and dependency lifecycle scripts during install |
@@ -106,6 +106,30 @@
 | ✅   | `--report-summary` | writes `pnpm-exec-summary.json` for recursive exec |
 | ✅   | `--reporter-hide-prefix` / `--no-reporter-hide-prefix` | recursive exec output prefix control |
 
+## `pacquet dlx`
+
+[pnpm documentation](https://pnpm.io/cli/dlx)
+
+| Done | Command | Notes |
+| ---- | ------- | ----- |
+| ✅   | `dlx <pkg>` | installs a temporary package environment under `cache-dir/dlx` and runs its default bin |
+| ✅   | `--package <pkg>` | installs explicit package(s) before running the requested command |
+| ✅   | `-c, --shell-mode` | runs the requested command through the system shell in the original cwd |
+| ✅   | cache reuse / expiry | the temp environment is reused via `cache-dir/dlx/<key>/pkg`, and `dlx-cache-max-age` controls expiry |
+| ✅   | `--reporter=<name>` | passes through `default`, `append-only`, and `silent` to the temporary install phase |
+
+## `pacquet dedupe`
+
+[pnpm documentation](https://pnpm.io/cli/dedupe)
+
+| Done | Command | Notes |
+| ---- | ------- | ----- |
+| ✅   | `dedupe` | re-resolves dependencies and updates the lockfile/install result to newer compatible versions |
+| ✅   | `dedupe --check` | checks whether dedupe would change the lockfile without mutating the current workspace |
+| ✅   | `--ignore-scripts` | passes through to the underlying install flow |
+| ✅   | `--offline` / `--prefer-offline` | passes through to the underlying resolution flow |
+| ✅   | `--reporter=<name>` | passes through `default`, `append-only`, and `silent` to the underlying install flow |
+
 ## `pacquet fetch`
 
 [pnpm documentation](https://pnpm.io/cli/fetch)
@@ -115,6 +139,7 @@
 | ✅   | `fetch` | warms the store from `pnpm-lock.yaml` without mutating workspace `node_modules` |
 | ✅   | `-P, --prod` | fetches only production and optional packages from the lockfile root importer |
 | ✅   | `-D, --dev` | fetches only development packages from the lockfile root importer |
+| ✅   | `--reporter=<name>` | supports `default`, `append-only`, and `silent` progress output |
 
 ## `pacquet cache`
 

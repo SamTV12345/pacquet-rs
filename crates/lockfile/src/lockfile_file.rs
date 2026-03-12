@@ -6,7 +6,7 @@ use crate::{
 };
 use derive_more::{Display, Error};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Display, Error)]
 pub(crate) enum LockfileFileError {
@@ -188,7 +188,231 @@ pub(crate) fn parse_lockfile_content(content: &str) -> Result<Lockfile, Lockfile
 
 pub(crate) fn render_lockfile_content(lockfile: &Lockfile) -> Result<String, serde_yaml::Error> {
     let lockfile_file = convert_lockfile_to_v9(lockfile);
-    serde_yaml::to_string(&lockfile_file)
+    let sorted = to_sorted_v9(&lockfile_file);
+    let yaml = serde_yaml::to_string(&sorted)?;
+    Ok(postprocess_lockfile_yaml(&yaml))
+}
+
+/// A mirror of [`LockfileV9File`] that uses [`BTreeMap`] everywhere so that
+/// `serde_yaml::to_string` produces deterministically sorted keys – exactly
+/// like pnpm does.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SortedLockfileV9 {
+    lockfile_version: LockfileVersion<9>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settings: Option<LockfileSettings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalogs: Option<serde_yaml::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ignored_optional_dependencies: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    overrides: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package_extensions_checksum: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patched_dependencies: Option<BTreeMap<String, serde_yaml::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pnpmfile_checksum: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    time: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    importers: Option<BTreeMap<String, serde_yaml::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    packages: Option<BTreeMap<String, serde_yaml::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshots: Option<BTreeMap<String, serde_yaml::Value>>,
+}
+
+fn to_sorted_v9(v9: &LockfileV9File) -> SortedLockfileV9 {
+    fn sort_map<V: Serialize>(
+        map: &Option<HashMap<String, V>>,
+    ) -> Option<BTreeMap<String, serde_yaml::Value>> {
+        map.as_ref().map(|m| {
+            m.iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        sort_yaml_value(serde_yaml::to_value(v).unwrap_or(serde_yaml::Value::Null)),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    SortedLockfileV9 {
+        lockfile_version: v9.lockfile_version,
+        settings: normalize_settings_for_pnpm(v9.settings.clone()),
+        catalogs: v9.catalogs.clone(),
+        ignored_optional_dependencies: v9.ignored_optional_dependencies.clone(),
+        overrides: v9
+            .overrides
+            .as_ref()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+        package_extensions_checksum: v9.package_extensions_checksum.clone(),
+        patched_dependencies: v9
+            .patched_dependencies
+            .as_ref()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+        pnpmfile_checksum: v9.pnpmfile_checksum.clone(),
+        time: v9.time.as_ref().map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+        importers: sort_map(&v9.importers),
+        packages: sort_map(&v9.packages),
+        snapshots: sort_map(&v9.snapshots),
+    }
+}
+
+/// Recursively sort all YAML mappings by key so the output is deterministic.
+/// `resolution` is always sorted first within a mapping (matching pnpm's field order).
+fn sort_yaml_value(value: serde_yaml::Value) -> serde_yaml::Value {
+    match value {
+        serde_yaml::Value::Mapping(mapping) => {
+            let mut sorted = serde_yaml::Mapping::new();
+            let mut pairs: Vec<_> = mapping.into_iter().collect();
+            pairs.sort_by(|(a, _), (b, _)| {
+                let a_str = yaml_key_to_string(a);
+                let b_str = yaml_key_to_string(b);
+                // pnpm always puts "resolution" first in package entries
+                match (a_str.as_str(), b_str.as_str()) {
+                    ("resolution", "resolution") => std::cmp::Ordering::Equal,
+                    ("resolution", _) => std::cmp::Ordering::Less,
+                    (_, "resolution") => std::cmp::Ordering::Greater,
+                    _ => a_str.cmp(&b_str),
+                }
+            });
+            for (k, v) in pairs {
+                sorted.insert(k, sort_yaml_value(v));
+            }
+            serde_yaml::Value::Mapping(sorted)
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            serde_yaml::Value::Sequence(seq.into_iter().map(sort_yaml_value).collect())
+        }
+        other => other,
+    }
+}
+
+fn yaml_key_to_string(value: &serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::String(s) => s.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Strip pnpm-default settings that pnpm itself never writes.
+fn normalize_settings_for_pnpm(settings: Option<LockfileSettings>) -> Option<LockfileSettings> {
+    let mut s = settings?;
+    // pnpm omits these when they equal the default
+    if s.peers_suffix_max_length == Some(1000) {
+        s.peers_suffix_max_length = None;
+    }
+    if s.inject_workspace_packages == Some(false) {
+        s.inject_workspace_packages = None;
+    }
+    // If nothing non-default remains, omit the whole section
+    if s.auto_install_peers.is_none()
+        && s.exclude_links_from_lockfile.is_none()
+        && s.peers_suffix_max_length.is_none()
+        && s.inject_workspace_packages.is_none()
+    {
+        return None;
+    }
+    Some(s)
+}
+
+/// Post-process raw YAML to match pnpm's exact formatting:
+/// - blank line before every top-level key (settings:, importers:, packages:, snapshots:)
+/// - blank line before each entry inside importers/packages/snapshots
+/// - `resolution:` rendered in flow-style `{integrity: …}`
+fn postprocess_lockfile_yaml(yaml: &str) -> String {
+    let mut lines: Vec<String> = yaml.lines().map(ToOwned::to_owned).collect();
+    inline_simple_map_blocks(&mut lines, "resolution");
+    inline_simple_map_blocks(&mut lines, "engines");
+    let lines = insert_pnpm_blank_lines(&lines);
+    lines.join("\n") + "\n"
+}
+
+/// Turn multi-line blocks like `resolution:\n  integrity: …` or `engines:\n  node: …`
+/// into flow-style `resolution: {integrity: …}` / `engines: {node: '>=0.10.0'}`.
+fn inline_simple_map_blocks(lines: &mut Vec<String>, field_name: &str) {
+    let suffix = format!("{field_name}:");
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim_end();
+        if !trimmed.ends_with(&suffix) {
+            i += 1;
+            continue;
+        }
+        let indent = lines[i].len() - lines[i].trim_start().len();
+        let child_indent = indent + 2;
+        let mut j = i + 1;
+        let mut entries = Vec::new();
+        while j < lines.len() {
+            let line = &lines[j];
+            let cur_indent = line.len() - line.trim_start().len();
+            if cur_indent != child_indent || !line.trim().contains(": ") {
+                break;
+            }
+            entries.push(line.trim().to_string());
+            j += 1;
+        }
+        if !entries.is_empty() {
+            let merged = format!("{}{field_name}: {{{}}}", " ".repeat(indent), entries.join(", "));
+            lines.splice(i..j, [merged]);
+        }
+        i += 1;
+    }
+}
+
+/// Insert blank lines between top-level sections and between entries inside
+/// importers / packages / snapshots, matching pnpm's output exactly.
+fn insert_pnpm_blank_lines(lines: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 20);
+    let mut current_section: Option<&str> = None;
+    let mut first_top = true;
+
+    for line in lines {
+        if line.is_empty() {
+            continue; // strip serde_yaml's own blank lines; we add our own
+        }
+        let indent = line.len() - line.trim_start().len();
+        let trimmed = line.trim();
+
+        // Top-level key (indent == 0 and ends with ':')
+        let is_top_level_section = indent == 0 && trimmed.ends_with(':');
+        let is_top_level_scalar = indent == 0 && trimmed.contains(':') && !trimmed.ends_with(':');
+
+        if is_top_level_section || is_top_level_scalar {
+            if !first_top {
+                out.push(String::new()); // blank line before section
+            }
+            first_top = false;
+            current_section =
+                if is_top_level_section { Some(trimmed.trim_end_matches(':')) } else { None };
+            out.push(line.clone());
+            continue;
+        }
+
+        // Entry inside importers / packages / snapshots (indent == 2, key-line)
+        let in_list_section =
+            current_section.is_some_and(|s| matches!(s, "importers" | "packages" | "snapshots"));
+        let is_entry = indent == 2 && in_list_section;
+
+        if is_entry {
+            // blank line before each entry (including the first one after the header)
+            if out.last().is_some_and(|l| !l.is_empty()) {
+                out.push(String::new());
+            }
+        }
+
+        out.push(line.clone());
+    }
+
+    // Remove trailing blank lines
+    while out.last().is_some_and(String::is_empty) {
+        out.pop();
+    }
+    out
 }
 
 fn convert_v9_to_lockfile(v9: LockfileV9File) -> Result<Lockfile, LockfileFileError> {

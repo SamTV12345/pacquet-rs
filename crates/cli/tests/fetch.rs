@@ -53,3 +53,61 @@ fn fetch_should_fail_without_lockfile() {
 
     drop(root); // cleanup
 }
+
+#[test]
+fn fetch_reporter_silent_should_suppress_output() {
+    let CommandTempCwd { root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write package.json");
+
+    pacquet_command(&workspace).with_args(["install", "--lockfile-only"]).assert().success();
+    let assert =
+        pacquet_command(&workspace).with_args(["fetch", "--reporter", "silent"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stdout.trim().is_empty());
+    assert!(stderr.trim().is_empty());
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn fetch_reporter_append_only_should_write_static_progress_lines() {
+    let CommandTempCwd { root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write package.json");
+
+    pacquet_command(&workspace).with_args(["install", "--lockfile-only"]).assert().success();
+    let assert = pacquet_command(&workspace)
+        .with_args(["fetch", "--reporter", "append-only"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("pacquet starting [frozen]"));
+    assert!(stderr.contains("pacquet done [frozen]"));
+    assert!(!stderr.contains("\u{1b}["));
+
+    drop((root, mock_instance)); // cleanup
+}

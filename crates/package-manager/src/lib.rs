@@ -43,6 +43,9 @@ pub(crate) use link_policy::*;
 pub(crate) use lockfile_check::*;
 pub(crate) use modules_manifest::*;
 pub(crate) use pnp_manifest::*;
+pub use progress_reporter::{
+    InstallReporter, finish as finish_progress_reporter, start as start_progress_reporter,
+};
 pub(crate) use registry_metadata_cache::*;
 pub use symlink_direct_dependencies::*;
 pub use symlink_package::*;

@@ -81,11 +81,8 @@ fn write_bin_append_package_name_script(workspace: &Path, name: &str) {
 
     #[cfg(windows)]
     {
-        fs::write(
-            bin_dir.join(format!("{name}.cmd")),
-            format!("@echo off\r\necho %PNPM_PACKAGE_NAME%\r\n"),
-        )
-        .expect("write .cmd file");
+        fs::write(bin_dir.join(format!("{name}.cmd")), "@echo off\r\necho %PNPM_PACKAGE_NAME%\r\n")
+            .expect("write .cmd file");
     }
 
     #[cfg(unix)]

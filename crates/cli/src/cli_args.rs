@@ -1,6 +1,8 @@
 pub mod add;
 pub mod cache;
 pub mod ci;
+pub mod dedupe;
+pub mod dlx;
 pub mod env;
 pub mod exec;
 pub mod fetch;
@@ -17,6 +19,8 @@ use add::AddArgs;
 use cache::CacheArgs;
 use ci::CiArgs;
 use clap::{Parser, Subcommand};
+use dedupe::DedupeArgs;
+use dlx::DlxArgs;
 use env::EnvArgs;
 use exec::ExecArgs;
 use fetch::FetchArgs;
@@ -64,6 +68,10 @@ pub enum CliCommand {
     Ci(CiArgs),
     /// Manage Node.js versions.
     Env(EnvArgs),
+    /// Re-resolve dependencies to deduplicate older lockfile entries.
+    Dedupe(DedupeArgs),
+    /// Run a package in a temporary environment.
+    Dlx(DlxArgs),
     /// Run an arbitrary command in the current package context.
     Exec(ExecArgs),
     /// Fetch packages from the lockfile into the store without mutating the workspace.
@@ -122,6 +130,8 @@ impl CliArgs {
             CliCommand::Install(args) => args.run(state()?).await?,
             CliCommand::Ci(args) => args.run(state()?).await?,
             CliCommand::Env(args) => args.run().await?,
+            CliCommand::Dedupe(args) => args.run(dir, npmrc).await?,
+            CliCommand::Dlx(args) => args.run(dir, npmrc).await?,
             CliCommand::Exec(args) => args.run(dir)?,
             CliCommand::Fetch(args) => args.run(dir, npmrc).await?,
             CliCommand::Remove(args) => args.run(state()?).await?,
