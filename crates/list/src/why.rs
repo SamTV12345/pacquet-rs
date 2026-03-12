@@ -522,7 +522,10 @@ fn prune_root_json_to_matches(root: &mut Map<String, Value>, patterns: &[QueryPa
     }
 }
 
-fn filter_group_to_matches(group: &Map<String, Value>, patterns: &[QueryPattern]) -> Map<String, Value> {
+fn filter_group_to_matches(
+    group: &Map<String, Value>,
+    patterns: &[QueryPattern],
+) -> Map<String, Value> {
     let mut filtered = Map::new();
     for (alias, value) in group {
         let Some(dep) = value.as_object() else {
@@ -535,7 +538,8 @@ fn filter_group_to_matches(group: &Map<String, Value>, patterns: &[QueryPattern]
             .and_then(Value::as_object)
             .map(|nested| filter_group_to_matches(nested, patterns))
             .filter(|nested| !nested.is_empty());
-        let is_match = patterns.iter().any(|pattern| pattern.matches(alias) || pattern.matches(from));
+        let is_match =
+            patterns.iter().any(|pattern| pattern.matches(alias) || pattern.matches(from));
         match nested_filtered {
             Some(nested) => {
                 dep.insert("dependencies".to_string(), Value::Object(nested));

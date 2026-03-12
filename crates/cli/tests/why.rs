@@ -67,10 +67,7 @@ fn why_json_should_match_pnpm_dependency_tree_shape() {
         .success();
     let value = parse_json_output(&assert.get_output().stdout);
     let first_result = value.as_array().and_then(|items| items.first()).expect("one project root");
-    assert_eq!(
-        first_result.get("name").and_then(Value::as_str),
-        Some("workspace"),
-    );
+    assert_eq!(first_result.get("name").and_then(Value::as_str), Some("workspace"),);
     let first_dependent = first_result
         .get("dependencies")
         .and_then(|deps| deps.get("@pnpm.e2e/hello-world-js-bin-parent"))
@@ -83,7 +80,10 @@ fn why_json_should_match_pnpm_dependency_tree_shape() {
         .get("dependencies")
         .and_then(|deps| deps.get("@pnpm.e2e/hello-world-js-bin"))
         .expect("matched transitive dependency should be nested under the direct path");
-    assert_eq!(nested_match.get("from").and_then(Value::as_str), Some("@pnpm.e2e/hello-world-js-bin"),);
+    assert_eq!(
+        nested_match.get("from").and_then(Value::as_str),
+        Some("@pnpm.e2e/hello-world-js-bin"),
+    );
 
     drop((root, mock_instance));
 }
