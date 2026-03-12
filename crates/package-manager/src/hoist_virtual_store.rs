@@ -400,7 +400,16 @@ mod tests {
 
         hoist_virtual_store_packages(&config).expect("hoist should succeed");
 
-        assert!(modules_dir.join(".pnpm/node_modules/.bin/dep-cli").exists());
+        let private_bin_dir = modules_dir.join(".pnpm/node_modules/.bin");
+        #[cfg(windows)]
+        {
+            assert!(private_bin_dir.join("dep-cli.cmd").exists());
+            assert!(private_bin_dir.join("dep-cli.ps1").exists());
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(private_bin_dir.join("dep-cli").exists());
+        }
     }
 
     #[test]
