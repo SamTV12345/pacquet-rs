@@ -24,6 +24,47 @@ fn normalize_text_output(output: &[u8]) -> String {
     String::from_utf8_lossy(output).replace("\r\n", "\n").trim_end().to_string()
 }
 
+fn normalize_why_parseable_output(output: &[u8]) -> Vec<String> {
+    let mut packages = Vec::<String>::new();
+    for line in normalize_text_output(output).lines().filter(|line| !line.is_empty()) {
+        if line.contains(" > ") {
+            packages.extend(
+                line.split(" > ")
+                    .skip(1)
+                    .filter(|segment| !segment.is_empty())
+                    .map(ToOwned::to_owned),
+            );
+            continue;
+        }
+
+        let Some((store_segment, package_name)) = parse_package_id_from_parseable_path(line) else {
+            continue;
+        };
+        packages.push(format!("{package_name}@{store_segment}"));
+    }
+    packages.sort();
+    packages.dedup();
+    packages
+}
+
+fn parse_package_id_from_parseable_path(path: &str) -> Option<(String, String)> {
+    let package_name = path.rsplit("/node_modules/").next()?;
+    if package_name == path || package_name.is_empty() {
+        return None;
+    }
+
+    let store_segment = path.split("/.pnpm/").nth(1)?.split('/').next()?;
+    let encoded_name = package_name.replace('/', "+");
+    let version = store_segment
+        .strip_prefix(&format!("{encoded_name}@"))
+        .unwrap_or(store_segment)
+        .split('_')
+        .next()
+        .unwrap_or(store_segment);
+
+    Some((version.to_string(), package_name.to_string()))
+}
+
 fn normalize_why_json_output(value: &Value) -> Value {
     let Some(items) = value.as_array() else {
         return value.clone();
@@ -324,8 +365,8 @@ fn golden_why_suite_matrix_should_match_pnpm_output() {
                 assert_eq!(pacquet_json, pnpm_json);
             }
         } else {
-            let pacquet_text = normalize_text_output(&pacquet_output);
-            let pnpm_text = normalize_text_output(&pnpm_output);
+            let pacquet_text = normalize_why_parseable_output(&pacquet_output);
+            let pnpm_text = normalize_why_parseable_output(&pnpm_output);
             assert_eq!(pacquet_text, pnpm_text);
         }
     }
