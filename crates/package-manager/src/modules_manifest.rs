@@ -320,6 +320,7 @@ mod tests {
     use std::{
         collections::HashMap,
         fs,
+        path::{Path, PathBuf},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
@@ -530,11 +531,14 @@ mod tests {
 
         let content =
             fs::read_to_string(dir.path().join(MODULES_MANIFEST_FILE_NAME)).expect("read manifest");
+        let manifest = read_modules_manifest(dir.path()).expect("read modules manifest");
         assert!(content.contains("virtualStoreDirMaxLength: 120"));
         assert!(content.contains("pendingBuilds: []"));
         assert!(!content.contains("ignoredBuilds"));
         assert!(content.contains("storeDir:"));
-        assert!(content.contains("/store/v10"));
+        assert!(
+            PathBuf::from(manifest.store_dir.expect("store dir")).ends_with(Path::new("store/v10"))
+        );
     }
 
     #[test]
