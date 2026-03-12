@@ -21,7 +21,45 @@ fn parse_json_output_with_fallback(output: &[u8]) -> Value {
 }
 
 fn normalize_text_output(output: &[u8]) -> String {
-    String::from_utf8_lossy(output).replace("\r\n", "\n").trim_end().to_string()
+    let text = String::from_utf8_lossy(output).replace("\r\n", "\n").trim_end().to_string();
+    if !text.starts_with("Legend: production dependency, optional only, dev only\n\n") {
+        return text;
+    }
+
+    let mut normalized_lines = Vec::<String>::new();
+    for line in text.lines() {
+        if matches!(line, "1 package") || line.ends_with(" packages") {
+            continue;
+        }
+        let line = match line {
+            "│" => "",
+            other => other,
+        };
+        let line = line
+            .strip_prefix("│   ")
+            .or_else(|| line.strip_prefix("├── "))
+            .or_else(|| line.strip_prefix("└── "))
+            .unwrap_or(line);
+        let line =
+            if !line.contains(' ') { normalize_tree_package_line(line) } else { line.to_string() };
+        normalized_lines.push(line);
+    }
+
+    normalized_lines.join("\n").trim_end().to_string()
+}
+
+fn normalize_tree_package_line(line: &str) -> String {
+    let Some(index) = line.rfind('@') else {
+        return line.to_string();
+    };
+    if index == 0 || index + 1 >= line.len() {
+        return line.to_string();
+    }
+    let version = &line[index + 1..];
+    if !version.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        return line.to_string();
+    }
+    format!("{} {}", &line[..index], version)
 }
 
 fn remove_path_if_exists(path: &Path) {
