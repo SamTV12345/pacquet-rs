@@ -1849,16 +1849,64 @@ mod tests {
                     None,
                     "is-positive@1.0.0".parse().expect("positive dep path"),
                 ),
-                serde_yaml::from_str::<pacquet_lockfile::PackageSnapshot>("{}")
-                    .expect("positive snapshot"),
+                PackageSnapshot {
+                    resolution: pacquet_lockfile::LockfileResolution::Registry(
+                        pacquet_lockfile::RegistryResolution {
+                            integrity: "sha512-Bw==".parse().expect("integrity"),
+                        },
+                    ),
+                    id: None,
+                    name: None,
+                    version: None,
+                    engines: None,
+                    cpu: None,
+                    os: None,
+                    libc: None,
+                    deprecated: None,
+                    has_bin: None,
+                    prepare: None,
+                    requires_build: None,
+                    bundled_dependencies: None,
+                    peer_dependencies: None,
+                    peer_dependencies_meta: None,
+                    dependencies: None,
+                    optional_dependencies: None,
+                    transitive_peer_dependencies: None,
+                    dev: None,
+                    optional: None,
+                },
             ),
             (
                 pacquet_lockfile::DependencyPath::registry(
                     None,
                     "is-negative@1.0.0".parse().expect("negative dep path"),
                 ),
-                serde_yaml::from_str::<pacquet_lockfile::PackageSnapshot>("{}")
-                    .expect("negative snapshot"),
+                PackageSnapshot {
+                    resolution: pacquet_lockfile::LockfileResolution::Registry(
+                        pacquet_lockfile::RegistryResolution {
+                            integrity: "sha512-Bw==".parse().expect("integrity"),
+                        },
+                    ),
+                    id: None,
+                    name: None,
+                    version: None,
+                    engines: None,
+                    cpu: None,
+                    os: None,
+                    libc: None,
+                    deprecated: None,
+                    has_bin: None,
+                    prepare: None,
+                    requires_build: None,
+                    bundled_dependencies: None,
+                    peer_dependencies: None,
+                    peer_dependencies_meta: None,
+                    dependencies: None,
+                    optional_dependencies: None,
+                    transitive_peer_dependencies: None,
+                    dev: None,
+                    optional: None,
+                },
             ),
         ]);
 
