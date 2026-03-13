@@ -20,10 +20,10 @@ allow = [
   "Apache-2.0",
   "Unicode-3.0",
   "Unicode-DFS-2016",
-  "BSD-3-Clause",
   "BSL-1.0",
   "ISC",
   "Unlicense",
+  "Zlib",
 ]
 confidence-threshold = 0.8
 exceptions = []
