@@ -1677,8 +1677,15 @@ mod tests {
         config.modules_dir = modules_dir.clone();
         config.virtual_store_dir = virtual_store_dir.clone();
         config.store_dir = pacquet_store_dir::StoreDir::new(dir.path().join("store"));
-        write_modules_manifest(&modules_dir, &config, &[DependencyGroup::Prod], &[], None, None)
-            .expect("write modules manifest");
+        write_modules_manifest(
+            &modules_dir,
+            &config,
+            &[DependencyGroup::Prod],
+            &[],
+            lockfile.packages.as_ref(),
+            Some(&["dep".to_string()]),
+        )
+        .expect("write modules manifest");
 
         assert!(
             !recreate_modules_dir_if_incompatible(&config, &[DependencyGroup::Prod])
@@ -1965,7 +1972,38 @@ mod tests {
             project_snapshot: RootProjectSnapshot::Multi(pacquet_lockfile::MultiProjectSnapshot {
                 importers,
             }),
-            packages: None,
+            packages: Some(HashMap::from([(
+                pacquet_lockfile::DependencyPath::registry(
+                    None,
+                    "dep@1.0.0".parse().expect("dep path"),
+                ),
+                PackageSnapshot {
+                    resolution: pacquet_lockfile::LockfileResolution::Registry(
+                        pacquet_lockfile::RegistryResolution {
+                            integrity: "sha512-Bw==".parse().expect("integrity"),
+                        },
+                    ),
+                    id: None,
+                    name: None,
+                    version: None,
+                    engines: None,
+                    cpu: None,
+                    os: None,
+                    libc: None,
+                    deprecated: None,
+                    has_bin: None,
+                    prepare: None,
+                    requires_build: None,
+                    bundled_dependencies: None,
+                    peer_dependencies: None,
+                    peer_dependencies_meta: None,
+                    dependencies: None,
+                    optional_dependencies: None,
+                    transitive_peer_dependencies: None,
+                    dev: None,
+                    optional: None,
+                },
+            )])),
             never_built_dependencies: None,
             overrides: None,
             package_extensions_checksum: None,
