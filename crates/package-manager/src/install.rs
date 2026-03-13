@@ -330,7 +330,8 @@ where
                     config.prefer_frozen_lockfile,
                     has_local_directory_dependency_specs,
                 ) {
-                    if !lockfile_only
+                    if !force
+                        && !lockfile_only
                         && persisted_install_state_is_reusable(
                             lockfile,
                             config,
@@ -455,7 +456,8 @@ where
                     );
                 }
 
-                if !lockfile_only
+                if !force
+                    && !lockfile_only
                     && persisted_install_state_is_reusable(
                         lockfile,
                         config,
