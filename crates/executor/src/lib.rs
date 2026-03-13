@@ -365,7 +365,7 @@ fn build_program_command(
         }
         WindowsResolvedProgram::BatchScript(target) => {
             let mut command = Command::new("cmd");
-            command.args(["/d", "/c"]).arg(build_windows_batch_command_line(&target, args));
+            command.args(["/d", "/c"]).arg(target).args(args);
             command
         }
     }
@@ -441,17 +441,6 @@ fn try_build_direct_lifecycle_command_windows(
 
 fn contains_windows_shell_metacharacters(command_line: &str) -> bool {
     command_line.chars().any(|ch| matches!(ch, '|' | '>' | '<' | '&' | '(' | ')' | '%' | '!'))
-}
-
-fn build_windows_batch_command_line(target: &Path, args: &[String]) -> String {
-    let mut parts = Vec::with_capacity(args.len() + 1);
-    parts.push(shell_quote_windows_cmd(&target.to_string_lossy()));
-    parts.extend(args.iter().map(|arg| shell_quote_windows_cmd(arg)));
-    format!("call {}", parts.join(" "))
-}
-
-fn shell_quote_windows_cmd(input: &str) -> String {
-    serde_json::to_string(input).expect("serialize Windows cmd arg to JSON string")
 }
 
 fn windows_candidate_extensions(has_extension: bool) -> Vec<String> {
@@ -780,5 +769,30 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn execute_command_capture_runs_cmd_shim_from_ancestor_bin_path() {
+        let dir = tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        let package_dir = workspace.join("packages/app");
+        let bin_dir = workspace.join("node_modules/.bin");
+        fs::create_dir_all(&package_dir).expect("create package dir");
+        fs::create_dir_all(&bin_dir).expect("create .bin");
+        fs::write(bin_dir.join("say-name.cmd"), "@echo off\r\necho %PNPM_PACKAGE_NAME%\r\n")
+            .expect("write .cmd");
+
+        let output = execute_command_capture(ExecuteCommand {
+            pkg_root: &package_dir,
+            current_dir: None,
+            program: "say-name",
+            args: &[],
+            extra_env: &[(OsString::from("PNPM_PACKAGE_NAME"), OsString::from("app"))],
+            shell_mode: false,
+        })
+        .expect("capture command");
+
+        assert_eq!(output.stdout.trim(), "app");
     }
 }
