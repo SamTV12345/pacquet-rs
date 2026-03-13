@@ -479,6 +479,12 @@ where
                 optional,
             );
             package_snapshots.insert(dependency_path, package_snapshot);
+        } else {
+            downgrade_existing_snapshot_optional_flag(
+                package_snapshots,
+                &dependency_path,
+                optional,
+            );
         }
 
         Ok(ResolvedPackage::new(resolved_version))
@@ -615,6 +621,12 @@ where
                 optional,
             );
             package_snapshots.insert(dependency_path, package_snapshot);
+        } else {
+            downgrade_existing_snapshot_optional_flag(
+                package_snapshots,
+                &dependency_path,
+                optional,
+            );
         }
 
         Ok(ResolvedPackage::new(resolved_version))
@@ -1234,6 +1246,19 @@ fn expected_registry_tarball(config: &Npmrc, package_version: &PackageVersion) -
     let bare_name =
         package_version.name.rsplit('/').next().unwrap_or(package_version.name.as_str());
     format!("{registry}/{}/-/{bare_name}-{}.tgz", package_version.name, package_version.version)
+}
+
+fn downgrade_existing_snapshot_optional_flag(
+    package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
+    dependency_path: &DependencyPath,
+    optional: bool,
+) {
+    if optional {
+        return;
+    }
+    if let Some(mut package_snapshot) = package_snapshots.get_mut(dependency_path) {
+        package_snapshot.optional = None;
+    }
 }
 
 fn should_include_dependency_in_lockfile(
@@ -2758,6 +2783,44 @@ mod tests {
         );
 
         assert_eq!(snapshot.deprecated.as_deref(), Some("use pkg2"));
+    }
+
+    #[test]
+    fn downgrade_existing_snapshot_optional_flag_clears_optional_for_required_reuse() {
+        let dependency_path: DependencyPath = "/foo@1.0.0".parse().expect("dependency path");
+        let package_snapshots = DashMap::new();
+        package_snapshots.insert(
+            dependency_path.clone(),
+            PackageSnapshot {
+                resolution: LockfileResolution::Tarball(TarballResolution {
+                    tarball: "file:dummy.tgz".to_string(),
+                    integrity: None,
+                }),
+                id: None,
+                name: None,
+                version: None,
+                engines: None,
+                cpu: None,
+                os: None,
+                libc: None,
+                deprecated: None,
+                has_bin: None,
+                prepare: None,
+                requires_build: None,
+                bundled_dependencies: None,
+                peer_dependencies: None,
+                peer_dependencies_meta: None,
+                dependencies: None,
+                optional_dependencies: None,
+                transitive_peer_dependencies: None,
+                dev: None,
+                optional: Some(true),
+            },
+        );
+
+        downgrade_existing_snapshot_optional_flag(&package_snapshots, &dependency_path, false);
+
+        assert_eq!(package_snapshots.get(&dependency_path).expect("snapshot").optional, None);
     }
 
     fn dummy_snapshot_with_dependencies(
