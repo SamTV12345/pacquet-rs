@@ -1677,15 +1677,8 @@ mod tests {
         config.modules_dir = modules_dir.clone();
         config.virtual_store_dir = virtual_store_dir.clone();
         config.store_dir = pacquet_store_dir::StoreDir::new(dir.path().join("store"));
-        write_modules_manifest(
-            &modules_dir,
-            &config,
-            &[DependencyGroup::Prod],
-            &[],
-            lockfile.packages.as_ref(),
-            Some(&["dep".to_string()]),
-        )
-        .expect("write modules manifest");
+        write_modules_manifest(&modules_dir, &config, &[DependencyGroup::Prod], &[], None, None)
+            .expect("write modules manifest");
 
         assert!(
             !recreate_modules_dir_if_incompatible(&config, &[DependencyGroup::Prod])
@@ -2014,8 +2007,23 @@ mod tests {
             ignored_optional_dependencies: None,
             extra_fields: Default::default(),
         };
-        lockfile.save_to_path(&dir.path().join("pnpm-lock.yaml")).expect("write wanted lockfile");
-        lockfile
+        let wanted_lockfile_path = dir.path().join("pnpm-lock.yaml");
+        lockfile.save_to_path(&wanted_lockfile_path).expect("write wanted lockfile");
+        let lockfile =
+            Lockfile::load_from_path(&wanted_lockfile_path).expect("load wanted lockfile");
+        let lockfile = lockfile.expect("wanted lockfile should exist");
+        let mut current_lockfile = current_lockfile_for_installers(
+            &lockfile,
+            &std::collections::HashSet::from(["packages/app".to_string()]),
+            &[DependencyGroup::Prod],
+            &std::collections::HashSet::new(),
+        );
+        if let RootProjectSnapshot::Multi(snapshot) = &mut current_lockfile.project_snapshot {
+            snapshot
+                .importers
+                .insert("packages/other".to_string(), pacquet_lockfile::ProjectSnapshot::default());
+        }
+        current_lockfile
             .save_to_path(&virtual_store_dir.join("lock.yaml"))
             .expect("write current lockfile");
         write_modules_manifest(&modules_dir, &config, &[DependencyGroup::Prod], &[], None, None)
