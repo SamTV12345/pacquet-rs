@@ -866,6 +866,46 @@ fn no_prefer_frozen_lockfile_flag_should_override_default_true_setting() {
 }
 
 #[test]
+fn prefer_frozen_lockfile_should_succeed_without_current_install_state_when_lockfile_matches() {
+    let CommandTempCwd { root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { store_dir, cache_dir, .. } = npmrc_info;
+
+    let manifest_path = workspace.join("package.json");
+    let package_json_content = serde_json::json!({
+        "dependencies": {
+            "@pnpm.e2e/hello-world-js-bin-parent": "1.0.0",
+        },
+    });
+    fs::write(&manifest_path, package_json_content.to_string()).expect("write to package.json");
+
+    pacquet_command(&workspace).with_args(["install"]).assert().success();
+    assert!(workspace.join("pnpm-lock.yaml").exists());
+    fs::remove_dir_all(workspace.join("node_modules")).expect("remove node_modules");
+
+    fs::write(
+        workspace.join(".npmrc"),
+        format!(
+            "registry=http://127.0.0.1:9/\nstore-dir={}\ncache-dir={}\nfetch-timeout=100\nprefer-frozen-lockfile=true\n",
+            store_dir.display(),
+            cache_dir.display()
+        ),
+    )
+    .expect("rewrite .npmrc");
+
+    pacquet_command(&workspace)
+        .with_args(["install", "--prefer-frozen-lockfile"])
+        .assert()
+        .success();
+    assert!(wait_for_path(
+        &workspace.join("node_modules/@pnpm.e2e/hello-world-js-bin-parent"),
+        Duration::from_secs(2),
+    ));
+
+    drop(root); // cleanup
+}
+
+#[test]
 fn should_accept_ignore_scripts_flag() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();

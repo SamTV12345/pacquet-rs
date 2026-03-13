@@ -41,6 +41,7 @@ impl Package {
                     "accept",
                     "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*",
                 );
+                request = request.header("accept-encoding", "identity");
                 if let Some(auth_header) = auth_header {
                     request = request.header("authorization", auth_header);
                 }
@@ -48,10 +49,11 @@ impl Package {
             })
             .await
             .map_err(network_error)?
-            .json::<Package>()
+            .bytes()
             .await
             .map_err(network_error)?
-            .pipe(Ok)
+            .pipe(|body| serde_json::from_slice::<Package>(&body))
+            .map_err(|error| RegistryError::Serialization(error.to_string()))
     }
 
     pub fn pinned_version(&self, version_range: &str) -> Option<&PackageVersion> {
@@ -163,6 +165,7 @@ mod tests {
         let _mock = server
             .mock("GET", "/pkg")
             .match_header("authorization", "Bearer secret-token")
+            .match_header("accept-encoding", "identity")
             .with_status(200)
             .with_body(body.to_string())
             .create_async()

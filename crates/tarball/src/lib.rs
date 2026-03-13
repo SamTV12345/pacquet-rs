@@ -223,39 +223,54 @@ impl<'a> DownloadTarballToStore<'a> {
         mem_cache: &'a MemCache,
     ) -> Result<Arc<HashMap<String, PathBuf>>, TarballError> {
         let &DownloadTarballToStore { package_url, .. } = &self;
+        loop {
+            // QUESTION: I see no copying from existing store_dir, is there such mechanism?
+            // TODO: If it's not implemented yet, implement it
+            if let Some(cache_lock) = mem_cache.get(package_url) {
+                let notify = match &*cache_lock.write().await {
+                    CacheValue::Available(cas_paths) => {
+                        return Ok(Arc::clone(cas_paths));
+                    }
+                    CacheValue::InProgress(notify) => Arc::clone(notify),
+                };
 
-        // QUESTION: I see no copying from existing store_dir, is there such mechanism?
-        // TODO: If it's not implemented yet, implement it
-
-        if let Some(cache_lock) = mem_cache.get(package_url) {
-            let notify = match &*cache_lock.write().await {
-                CacheValue::Available(cas_paths) => {
-                    return Ok(Arc::clone(cas_paths));
+                tracing::info!(target: "pacquet::download", ?package_url, "Wait for cache");
+                notify.notified().await;
+                match &*cache_lock.read().await {
+                    CacheValue::Available(cas_paths) => {
+                        return Ok(Arc::clone(cas_paths));
+                    }
+                    CacheValue::InProgress(_) => {
+                        mem_cache.remove(package_url);
+                        continue;
+                    }
                 }
-                CacheValue::InProgress(notify) => Arc::clone(notify),
-            };
-
-            tracing::info!(target: "pacquet::download", ?package_url, "Wait for cache");
-            notify.notified().await;
-            if let CacheValue::Available(cas_paths) = &*cache_lock.read().await {
-                return Ok(Arc::clone(cas_paths));
+            } else {
+                let notify = Arc::new(Notify::new());
+                let cache_lock = notify
+                    .pipe_ref(Arc::clone)
+                    .pipe(CacheValue::InProgress)
+                    .pipe(RwLock::new)
+                    .pipe(Arc::new);
+                if mem_cache.insert(package_url.to_string(), Arc::clone(&cache_lock)).is_some() {
+                    tracing::warn!(target: "pacquet::download", ?package_url, "Race condition detected when writing to cache");
+                }
+                match self.run_without_mem_cache().await {
+                    Ok(cas_paths) => {
+                        let cas_paths = cas_paths.pipe(Arc::new);
+                        let mut cache_write = cache_lock.write().await;
+                        *cache_write = CacheValue::Available(Arc::clone(&cas_paths));
+                        drop(cache_write);
+                        notify.notify_waiters();
+                        return Ok(cas_paths);
+                    }
+                    Err(error) => {
+                        mem_cache.remove(package_url);
+                        notify.notify_waiters();
+                        return Err(error);
+                    }
+                }
             }
-            unreachable!("Failed to get or compute tarball data for {package_url:?}");
-        } else {
-            let notify = Arc::new(Notify::new());
-            let cache_lock = notify
-                .pipe_ref(Arc::clone)
-                .pipe(CacheValue::InProgress)
-                .pipe(RwLock::new)
-                .pipe(Arc::new);
-            if mem_cache.insert(package_url.to_string(), Arc::clone(&cache_lock)).is_some() {
-                tracing::warn!(target: "pacquet::download", ?package_url, "Race condition detected when writing to cache");
-            }
-            let cas_paths = self.run_without_mem_cache().await?.pipe(Arc::new);
-            let mut cache_write = cache_lock.write().await;
-            *cache_write = CacheValue::Available(Arc::clone(&cas_paths));
-            notify.notify_waiters();
-            Ok(cas_paths)
         }
     }
 
@@ -606,6 +621,60 @@ mod tests {
         .run_without_mem_cache()
         .await
         .expect("download tarball with auth header");
+
+        assert!(cas_files.contains_key("package.json"));
+        drop(store_dir);
+    }
+
+    #[tokio::test]
+    async fn mem_cache_should_clear_failed_in_progress_entry_before_retry() {
+        let (store_dir, store_path) = tempdir_with_leaked_path();
+        let mut server = Server::new_async().await;
+        let body = create_tgz_with_single_file(
+            "package/package.json",
+            br#"{"name":"pkg","version":"1.0.0"}"#,
+        );
+        let hash = Sha512::digest(&body);
+        let integrity = integrity(&format!("sha512-{}", BASE64_STD.encode(hash)));
+        let url = format!("{}/pkg.tgz", server.url());
+        let mem_cache = MemCache::default();
+
+        let _first = server.mock("GET", "/pkg.tgz").with_status(500).create_async().await;
+        DownloadTarballToStore {
+            http_client: &Default::default(),
+            store_dir: store_path,
+            package_id: "pkg@1.0.0",
+            package_integrity: &integrity,
+            package_unpacked_size: None,
+            auth_header: None,
+            package_url: &url,
+            offline: false,
+            force: false,
+        }
+        .run_with_mem_cache(&mem_cache)
+        .await
+        .expect_err("first attempt should fail");
+
+        assert!(mem_cache.get(&url).is_none());
+
+        server.reset();
+        let _second =
+            server.mock("GET", "/pkg.tgz").with_status(200).with_body(body).create_async().await;
+
+        let cas_files = DownloadTarballToStore {
+            http_client: &Default::default(),
+            store_dir: store_path,
+            package_id: "pkg@1.0.0",
+            package_integrity: &integrity,
+            package_unpacked_size: None,
+            auth_header: None,
+            package_url: &url,
+            offline: false,
+            force: false,
+        }
+        .run_with_mem_cache(&mem_cache)
+        .await
+        .expect("second attempt should succeed");
 
         assert!(cas_files.contains_key("package.json"));
         drop(store_dir);

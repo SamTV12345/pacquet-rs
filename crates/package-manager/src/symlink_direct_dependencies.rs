@@ -190,20 +190,19 @@ fn materialize_virtual_store_package(
         !target.starts_with(virtual_store_dir)
     }
 
-    fn inner(
-        import_method: PackageImportMethod,
-        source_package_dir: &Path,
-        destination_package_dir: &Path,
-        seen: &mut HashSet<PathBuf>,
-    ) -> Result<(), SymlinkPackageError> {
-        let source_package_dir = fs::canonicalize(source_package_dir).map_err(|error| {
+    let mut seen = HashSet::new();
+    let mut pending =
+        vec![(source_package_dir.to_path_buf(), destination_package_dir.to_path_buf())];
+
+    while let Some((source_package_dir, destination_package_dir)) = pending.pop() {
+        let source_package_dir = fs::canonicalize(&source_package_dir).map_err(|error| {
             SymlinkPackageError::CanonicalizePath { path: source_package_dir.to_path_buf(), error }
         })?;
         if !seen.insert(source_package_dir.clone()) {
-            return Ok(());
+            continue;
         }
 
-        import_local_package_dir(import_method, &source_package_dir, destination_package_dir)?;
+        import_local_package_dir(import_method, &source_package_dir, &destination_package_dir)?;
 
         let dependency_source_dir = if source_package_dir
             .ancestors()
@@ -221,7 +220,7 @@ fn materialize_virtual_store_package(
             source_package_dir.join("node_modules")
         };
         if !dependency_source_dir.is_dir() {
-            return Ok(());
+            continue;
         }
         let virtual_store_dir = source_package_dir
             .ancestors()
@@ -229,7 +228,7 @@ fn materialize_virtual_store_package(
             .unwrap_or_else(|| source_package_dir.parent().unwrap_or(source_package_dir.as_path()));
         let entries = match fs::read_dir(&dependency_source_dir) {
             Ok(entries) => entries,
-            Err(_) => return Ok(()),
+            Err(_) => continue,
         };
         for entry in entries.flatten() {
             let file_name = entry.file_name();
@@ -252,12 +251,7 @@ fn materialize_virtual_store_package(
                         symlink_package(&source_dependency_dir, &destination_dependency_dir)?;
                         continue;
                     }
-                    inner(
-                        import_method,
-                        &source_dependency_dir,
-                        &destination_dependency_dir,
-                        seen,
-                    )?;
+                    pending.push((source_dependency_dir, destination_dependency_dir));
                     continue;
                 }
 
@@ -281,7 +275,7 @@ fn materialize_virtual_store_package(
                         symlink_package(&scoped_source_dir, &destination_dependency_dir)?;
                         continue;
                     }
-                    inner(import_method, &scoped_source_dir, &destination_dependency_dir, seen)?;
+                    pending.push((scoped_source_dir, destination_dependency_dir));
                 }
                 continue;
             }
@@ -298,13 +292,11 @@ fn materialize_virtual_store_package(
                 symlink_package(&source_dependency_dir, &destination_dependency_dir)?;
                 continue;
             }
-            inner(import_method, &source_dependency_dir, &destination_dependency_dir, seen)?;
+            pending.push((source_dependency_dir, destination_dependency_dir));
         }
-
-        Ok(())
     }
 
-    inner(import_method, source_package_dir, destination_package_dir, &mut HashSet::new())
+    Ok(())
 }
 
 fn should_materialize_workspace_dependency(

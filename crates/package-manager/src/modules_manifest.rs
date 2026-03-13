@@ -8,7 +8,6 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs, io,
     path::{Path, PathBuf},
-    process::Command,
     sync::OnceLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -124,19 +123,7 @@ pub(crate) fn write_modules_manifest(
 
 fn detect_pnpm_package_manager() -> String {
     static PACKAGE_MANAGER: OnceLock<String> = OnceLock::new();
-    PACKAGE_MANAGER
-        .get_or_init(|| {
-            Command::new("pnpm")
-                .arg("--version")
-                .output()
-                .ok()
-                .filter(|output| output.status.success())
-                .and_then(|output| String::from_utf8(output.stdout).ok())
-                .map(|version| format!("pnpm@{}", version.trim()))
-                .filter(|value| value != "pnpm@")
-                .unwrap_or_else(|| format!("pacquet@{}", env!("CARGO_PKG_VERSION")))
-        })
-        .clone()
+    PACKAGE_MANAGER.get_or_init(|| format!("pacquet@{}", env!("CARGO_PKG_VERSION"))).clone()
 }
 
 fn canonical_store_dir(config: &Npmrc) -> String {
@@ -308,7 +295,8 @@ fn cache_expired(pruned_at: &str, modules_cache_max_age_minutes: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH, MODULES_MANIFEST_FILE_NAME, read_modules_manifest,
+        DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH, MODULES_MANIFEST_FILE_NAME,
+        detect_pnpm_package_manager, read_modules_manifest,
         should_prune_orphaned_virtual_store_entries, write_modules_manifest,
     };
     use pacquet_lockfile::{
@@ -429,14 +417,16 @@ mod tests {
         assert!(content.contains("- b@1.0.0"));
         assert!(content.contains("layoutVersion: 5"));
         assert!(content.contains("nodeLinker: isolated"));
-        assert!(
-            content.contains("packageManager: pnpm@")
-                || content.contains("packageManager: pacquet@")
-        );
+        assert!(content.contains("packageManager: pacquet@"));
         assert!(content.contains("injectedDeps: {}"));
         assert!(content.contains("virtualStoreDir: .pnpm"));
         assert!(content.contains("dependencies: true"));
         assert!(content.contains("optionalDependencies: true"));
+    }
+
+    #[test]
+    fn detect_package_manager_is_pacquet_and_does_not_shell_out() {
+        assert_eq!(detect_pnpm_package_manager(), format!("pacquet@{}", env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

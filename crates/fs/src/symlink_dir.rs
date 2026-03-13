@@ -10,12 +10,32 @@ pub fn symlink_dir(original: &Path, link: &Path) -> io::Result<()> {
     #[cfg(unix)]
     return std::os::unix::fs::symlink(original, link);
     #[cfg(windows)]
-    return junction::create(original, link); // junctions instead of symlinks because symlinks may require elevated privileges.
+    {
+        match std::os::windows::fs::symlink_dir(original, link) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(1314) // ERROR_PRIVILEGE_NOT_HELD
+                        | Some(5) // ERROR_ACCESS_DENIED
+                ) =>
+            {
+                junction::create(original, link)
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 pub fn is_symlink_or_junction(path: &Path) -> io::Result<bool> {
     #[cfg(windows)]
     {
+        if std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
         match junction::exists(path) {
             Ok(value) => Ok(value),
             Err(error) if error.raw_os_error() == Some(4390) => Ok(false),
@@ -32,7 +52,14 @@ pub fn is_symlink_or_junction(path: &Path) -> io::Result<bool> {
 pub fn symlink_or_junction_target(path: &Path) -> io::Result<PathBuf> {
     #[cfg(windows)]
     {
-        junction::get_target(path)
+        if std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            std::fs::read_link(path)
+        } else {
+            junction::get_target(path)
+        }
     }
 
     #[cfg(not(windows))]

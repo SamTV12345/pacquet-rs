@@ -201,6 +201,7 @@ impl RemoveArgs {
                     reporter_prefix: multiple_targets.then_some(importer_id.as_str()),
                     reporter,
                     print_summary: false,
+                    manage_progress_reporter: true,
                 }
                 .run()
                 .await
@@ -268,6 +269,7 @@ impl RemoveArgs {
             reporter_prefix: None,
             reporter,
             print_summary: false,
+            manage_progress_reporter: true,
         }
         .run()
         .await

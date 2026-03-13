@@ -5,8 +5,9 @@ use pacquet_executor::{ExecuteLifecycleScript, execute_lifecycle_script};
 use pacquet_lockfile::Lockfile;
 use pacquet_npmrc::{NodeLinker, Npmrc};
 use pacquet_package_manager::{
-    Install, InstallReporter, WorkspacePackages, current_lockfile_for_installers,
-    warn_progress_reporter,
+    Install, InstallFrozenWorkspace, InstallReporter, WorkspaceFrozenInstallTarget,
+    WorkspacePackages, current_lockfile_for_installers, finish_progress_reporter,
+    start_progress_reporter, warn_progress_reporter,
 };
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_store_dir::StoreDir;
@@ -199,6 +200,7 @@ impl InstallArgs {
 
         let multiple_targets = install_targets.len() > 1;
         let selected_importers = install_targets.keys().cloned().collect::<HashSet<_>>();
+        let install_target_entries = install_targets.into_iter().collect::<Vec<_>>();
         let mut skipped_dep_paths = HashSet::<String>::new();
         let mut current_lockfile = lockfile.clone();
         if lockfile_only
@@ -209,64 +211,172 @@ impl InstallArgs {
                 "`node_modules` is present. Lockfile only installation will make it out-of-date",
             );
         }
-        for (importer_id, manifest_path) in install_targets {
-            let workspace_manifest = if manifest_path == manifest.path() {
-                None
-            } else {
-                Some(PackageManifest::from_path(manifest_path.clone()).wrap_err_with(|| {
-                    format!("load workspace manifest: {}", manifest_path.display())
-                })?)
-            };
-            let target_manifest = workspace_manifest.as_ref().unwrap_or(manifest);
-            let project_dir = target_manifest
-                .path()
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| lockfile_dir.to_path_buf());
-            let target_config = config_for_project(
+        if should_parallelize_workspace_frozen_install(
+            multiple_targets,
+            frozen_lockfile,
+            lockfile_only,
+            force,
+        ) {
+            let lockfile = current_lockfile.as_ref().ok_or_else(|| {
+                miette::miette!("parallel frozen workspace install requires pnpm-lock.yaml")
+            })?;
+            let root_config: &'static Npmrc = config_for_project(
                 config,
-                &project_dir,
+                lockfile_dir,
                 shamefully_hoist,
                 prefer_frozen_lockfile_override,
             )
             .leak();
+            let mut targets = Vec::new();
+            let mut total_direct_dependencies = 0usize;
+            for (importer_id, manifest_path) in &install_target_entries {
+                let target_manifest = PackageManifest::from_path(manifest_path.clone())
+                    .wrap_err_with(|| {
+                        format!("load workspace manifest: {}", manifest_path.display())
+                    })?;
+                total_direct_dependencies +=
+                    target_manifest.dependencies(dependency_groups.iter().copied()).count();
+                let project_dir = target_manifest
+                    .path()
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| lockfile_dir.to_path_buf());
+                let target_config: &'static Npmrc = config_for_project(
+                    config,
+                    &project_dir,
+                    shamefully_hoist,
+                    prefer_frozen_lockfile_override,
+                )
+                .leak();
+                let project_snapshot = match &lockfile.project_snapshot {
+                    pacquet_lockfile::RootProjectSnapshot::Single(snapshot) => {
+                        if importer_id != "." {
+                            miette::bail!("Cannot find importer `{importer_id}` in pnpm-lock.yaml");
+                        }
+                        snapshot.clone()
+                    }
+                    pacquet_lockfile::RootProjectSnapshot::Multi(snapshot) => snapshot
+                        .importers
+                        .get(importer_id.as_str())
+                        .ok_or_else(|| {
+                            miette::miette!(
+                                "Cannot find importer `{importer_id}` in pnpm-lock.yaml"
+                            )
+                        })?
+                        .clone(),
+                };
+                targets.push(WorkspaceFrozenInstallTarget {
+                    importer_id: importer_id.clone(),
+                    config: target_config,
+                    manifest: target_manifest,
+                    project_snapshot,
+                });
+            }
 
-            let skipped = Install {
-                tarball_mem_cache,
+            start_progress_reporter(total_direct_dependencies, true, reporter, None);
+            let result = InstallFrozenWorkspace {
                 http_client,
-                config: target_config,
-                manifest: target_manifest,
-                lockfile: current_lockfile.as_ref(),
+                resolved_packages,
+                shared_config: root_config,
+                lockfile,
+                targets,
+                packages: lockfile.packages.as_ref(),
                 lockfile_dir,
-                lockfile_importer_id: &importer_id,
-                workspace_packages,
-                dependency_groups: dependency_groups.iter().copied(),
-                frozen_lockfile,
-                lockfile_only,
-                force,
-                prefer_offline,
+                dependency_groups: dependency_groups.clone(),
                 offline,
+                force,
                 pnpmfile: pnpmfile.as_deref(),
                 ignore_pnpmfile,
-                reporter_prefix: multiple_targets.then_some(importer_id.as_str()),
-                reporter,
-                print_summary: true,
-                resolved_packages,
             }
             .run()
-            .await?;
-            skipped_dep_paths.extend(skipped);
+            .await;
+            let _ = finish_progress_reporter(result.is_ok());
+            skipped_dep_paths.extend(result?);
 
-            if !ignore_scripts && !lockfile_only {
-                run_install_lifecycle_scripts(target_manifest.path().to_path_buf(), target_config)?;
+            for (_, manifest_path) in &install_target_entries {
+                if !ignore_scripts && !lockfile_only {
+                    let project_dir = manifest_path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| lockfile_dir.to_path_buf());
+                    let target_config: &'static Npmrc = config_for_project(
+                        config,
+                        &project_dir,
+                        shamefully_hoist,
+                        prefer_frozen_lockfile_override,
+                    )
+                    .leak();
+                    run_install_lifecycle_scripts(manifest_path.clone(), target_config)?;
+                }
             }
+        } else {
+            for (importer_id, manifest_path) in install_target_entries {
+                let workspace_manifest = if manifest_path == manifest.path() {
+                    None
+                } else {
+                    Some(PackageManifest::from_path(manifest_path.clone()).wrap_err_with(|| {
+                        format!("load workspace manifest: {}", manifest_path.display())
+                    })?)
+                };
+                let target_manifest = workspace_manifest.as_ref().unwrap_or(manifest);
+                let project_dir = target_manifest
+                    .path()
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| lockfile_dir.to_path_buf());
+                let target_config: &'static Npmrc = config_for_project(
+                    config,
+                    &project_dir,
+                    shamefully_hoist,
+                    prefer_frozen_lockfile_override,
+                )
+                .leak();
 
-            current_lockfile = if config.lockfile {
-                Lockfile::load_from_dir(lockfile_dir)
-                    .wrap_err("reload lockfile after workspace install")?
-            } else {
-                None
-            };
+                let skipped = Install {
+                    tarball_mem_cache,
+                    http_client,
+                    config: target_config,
+                    manifest: target_manifest,
+                    lockfile: current_lockfile.as_ref(),
+                    lockfile_dir,
+                    lockfile_importer_id: &importer_id,
+                    workspace_packages,
+                    dependency_groups: dependency_groups.iter().copied(),
+                    frozen_lockfile,
+                    lockfile_only,
+                    force,
+                    prefer_offline,
+                    offline,
+                    pnpmfile: pnpmfile.as_deref(),
+                    ignore_pnpmfile,
+                    reporter_prefix: multiple_targets.then_some(importer_id.as_str()),
+                    reporter,
+                    print_summary: true,
+                    manage_progress_reporter: true,
+                    resolved_packages,
+                }
+                .run()
+                .await?;
+                skipped_dep_paths.extend(skipped);
+
+                if !ignore_scripts && !lockfile_only {
+                    run_install_lifecycle_scripts(
+                        target_manifest.path().to_path_buf(),
+                        target_config,
+                    )?;
+                }
+
+                current_lockfile = if should_reload_lockfile_after_importer(
+                    config.lockfile,
+                    frozen_lockfile,
+                    lockfile_only,
+                ) {
+                    Lockfile::load_from_dir(lockfile_dir)
+                        .wrap_err("reload lockfile after workspace install")?
+                } else {
+                    current_lockfile
+                };
+            }
         }
 
         if config.lockfile
@@ -286,6 +396,23 @@ impl InstallArgs {
 
         Ok(())
     }
+}
+
+fn should_reload_lockfile_after_importer(
+    lockfile_enabled: bool,
+    frozen_lockfile: bool,
+    lockfile_only: bool,
+) -> bool {
+    lockfile_enabled && !frozen_lockfile && !lockfile_only
+}
+
+fn should_parallelize_workspace_frozen_install(
+    multiple_targets: bool,
+    frozen_lockfile: bool,
+    lockfile_only: bool,
+    force: bool,
+) -> bool {
+    multiple_targets && frozen_lockfile && !lockfile_only && !force
 }
 
 pub(crate) fn parse_install_reporter(value: Option<&str>) -> miette::Result<InstallReporter> {
@@ -481,5 +608,22 @@ mod tests {
             create_list(InstallDependencyOptions { prod: true, dev: true, no_optional: true }),
             [Prod, Dev],
         );
+    }
+
+    #[test]
+    fn should_reload_lockfile_after_importer_only_for_mutable_lockfile_installs() {
+        assert!(should_reload_lockfile_after_importer(true, false, false));
+        assert!(!should_reload_lockfile_after_importer(true, true, false));
+        assert!(!should_reload_lockfile_after_importer(true, false, true));
+        assert!(!should_reload_lockfile_after_importer(false, false, false));
+    }
+
+    #[test]
+    fn should_parallelize_workspace_frozen_install_only_for_multi_target_frozen_runs() {
+        assert!(should_parallelize_workspace_frozen_install(true, true, false, false));
+        assert!(!should_parallelize_workspace_frozen_install(false, true, false, false));
+        assert!(!should_parallelize_workspace_frozen_install(true, false, false, false));
+        assert!(!should_parallelize_workspace_frozen_install(true, true, true, false));
+        assert!(!should_parallelize_workspace_frozen_install(true, true, false, true));
     }
 }

@@ -48,6 +48,12 @@ pub fn get_all_files(root: &Path) -> Vec<String> {
 pub fn is_symlink_or_junction(path: &Path) -> io::Result<bool> {
     #[cfg(windows)]
     {
+        if std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
         match junction::exists(path) {
             Ok(value) => Ok(value),
             Err(error) if error.raw_os_error() == Some(4390) => Ok(false),
@@ -62,7 +68,14 @@ pub fn is_symlink_or_junction(path: &Path) -> io::Result<bool> {
 pub fn symlink_or_junction_target(path: &Path) -> io::Result<PathBuf> {
     #[cfg(windows)]
     {
-        junction::get_target(path)
+        if std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            std::fs::read_link(path)
+        } else {
+            junction::get_target(path)
+        }
     }
 
     #[cfg(not(windows))]

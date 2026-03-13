@@ -6,7 +6,7 @@ use pacquet_lockfile::{
     ProjectSnapshot, ResolvedDependencyMap, ResolvedDependencyVersion,
 };
 use pacquet_network::ThrottledClient;
-use pacquet_npmrc::{NodeLinker, Npmrc};
+use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::DependencyGroup;
 use std::collections::{HashMap, HashSet};
 
@@ -104,7 +104,7 @@ where
     }
 }
 
-fn dedupe_project_snapshot(
+pub(crate) fn dedupe_project_snapshot(
     project_snapshot: &ProjectSnapshot,
     packages: Option<&HashMap<DependencyPath, PackageSnapshot>>,
     dedupe_peer_dependents: bool,
@@ -123,7 +123,7 @@ fn dedupe_project_snapshot(
     snapshot
 }
 
-fn filter_installable_optional_dependencies(
+pub(crate) fn filter_installable_optional_dependencies(
     project_snapshot: &ProjectSnapshot,
     packages: Option<&HashMap<DependencyPath, PackageSnapshot>>,
     dependency_groups: &[DependencyGroup],
@@ -254,7 +254,7 @@ fn resolved_path_to_version(
     }
 }
 
-fn importer_dependencies_ready(
+pub(crate) fn importer_dependencies_ready(
     config: &Npmrc,
     project_snapshot: &ProjectSnapshot,
     packages: Option<&HashMap<DependencyPath, PackageSnapshot>>,
@@ -266,20 +266,11 @@ fn importer_dependencies_ready(
 
     let direct_dependencies =
         project_snapshot.dependencies_by_groups(dependency_groups).collect::<Vec<_>>();
-    let should_expect_direct_links =
-        config.symlink || matches!(config.node_linker, NodeLinker::Hoisted);
     if !direct_dependencies.iter().all(|(alias, spec)| {
         if !config.disable_relink_local_dir_deps
             && matches!(&spec.version, ResolvedDependencyVersion::Link(link) if link.starts_with("file:"))
         {
             return false;
-        }
-        let is_link_dependency = matches!(spec.version, ResolvedDependencyVersion::Link(_));
-        if should_expect_direct_links && !is_link_dependency {
-            let direct_link = config.modules_dir.join(alias.to_string());
-            if !direct_link.exists() {
-                return false;
-            }
         }
         direct_dependency_virtual_store_location(alias, &spec.version, packages).is_none_or(
             |(_, virtual_store_name, package_name)| {
@@ -498,7 +489,7 @@ fn direct_dependency_path(
     resolve_package_snapshot(packages, &dependency_path).map(|(resolved_path, _)| resolved_path)
 }
 
-fn direct_dependency_virtual_store_location(
+pub(crate) fn direct_dependency_virtual_store_location(
     alias: &PkgName,
     resolved_version: &ResolvedDependencyVersion,
     packages: Option<&HashMap<DependencyPath, PackageSnapshot>>,
@@ -797,5 +788,48 @@ mod tests {
         );
         assert!(filtered_packages.expect("filtered packages").is_empty());
         assert_eq!(skipped, vec![dependency_path.to_string()]);
+    }
+
+    #[test]
+    fn importer_dependencies_ready_does_not_require_importer_root_links() {
+        use pacquet_lockfile::{ResolvedDependencyMap, ResolvedDependencySpec};
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("project/node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
+        let dependency_path =
+            DependencyPath::registry(None, "@scope/pkg@1.0.0".parse().expect("package specifier"));
+        let package_dir =
+            virtual_store_dir.join("@scope+pkg@1.0.0").join("node_modules/@scope/pkg");
+        std::fs::create_dir_all(&package_dir).expect("create virtual store package dir");
+
+        let mut dependencies = ResolvedDependencyMap::new();
+        dependencies.insert(
+            "@scope/pkg".parse().expect("alias"),
+            ResolvedDependencySpec {
+                specifier: "^1.0.0".to_string(),
+                version: ResolvedDependencyVersion::PkgNameVerPeer(
+                    "@scope/pkg@1.0.0".parse().expect("resolved version"),
+                ),
+            },
+        );
+        let project_snapshot =
+            ProjectSnapshot { dependencies: Some(dependencies), ..ProjectSnapshot::default() };
+
+        let mut config = Npmrc::new();
+        config.modules_dir = modules_dir;
+        config.virtual_store_dir = virtual_store_dir;
+        config.symlink = true;
+
+        let packages =
+            HashMap::from([(dependency_path, dummy_snapshot_with_dependencies(None, None))]);
+
+        assert!(importer_dependencies_ready(
+            &config,
+            &project_snapshot,
+            Some(&packages),
+            [DependencyGroup::Prod],
+        ));
     }
 }

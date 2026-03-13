@@ -146,6 +146,7 @@ async fn unlink_recursive(
             reporter_prefix: None,
             reporter: InstallReporter::Default,
             print_summary: true,
+            manage_progress_reporter: true,
         }
         .run()
         .await
@@ -215,6 +216,7 @@ async fn reinstall_project(
         reporter_prefix: None,
         reporter: InstallReporter::Default,
         print_summary: true,
+        manage_progress_reporter: true,
     }
     .run()
     .await

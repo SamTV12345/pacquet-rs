@@ -1,9 +1,10 @@
 use crate::{LinkFileError, link_file};
 use derive_more::{Display, Error};
 use miette::Diagnostic;
-use pacquet_fs::symlink_dir;
+use pacquet_fs::{is_symlink_or_junction, symlink_dir, symlink_or_junction_target};
 use pacquet_npmrc::PackageImportMethod;
 use std::{
+    collections::HashSet,
     fs,
     io::{self, ErrorKind},
     path::{Path, PathBuf},
@@ -178,7 +179,7 @@ pub fn symlink_package(
     #[cfg(windows)]
     let symlink_target = symlink_target.to_path_buf();
 
-    force_symlink(&symlink_target, symlink_path, false)
+    force_symlink(&symlink_target, symlink_path)
 }
 
 fn ensure_parent_dir(parent: &Path) -> Result<(), SymlinkPackageError> {
@@ -198,35 +199,31 @@ fn ensure_parent_dir(parent: &Path) -> Result<(), SymlinkPackageError> {
     }
 }
 
-fn force_symlink(
-    symlink_target: &Path,
-    symlink_path: &Path,
-    rename_tried: bool,
-) -> Result<(), SymlinkPackageError> {
-    let initial_error = match symlink_dir(symlink_target, symlink_path) {
-        Ok(()) => return Ok(()),
-        Err(error)
-            if matches!(error.kind(), ErrorKind::AlreadyExists | ErrorKind::IsADirectory) =>
-        {
-            error
-        }
-        Err(error) => {
-            return Err(SymlinkPackageError::SymlinkDir {
-                symlink_target: symlink_target.to_path_buf(),
-                symlink_path: symlink_path.to_path_buf(),
-                error,
-            });
-        }
-    };
+fn force_symlink(symlink_target: &Path, symlink_path: &Path) -> Result<(), SymlinkPackageError> {
+    let mut replaced_existing = false;
 
-    if existing_points_to_target(symlink_target, symlink_path) {
-        return Ok(());
-    }
+    loop {
+        let initial_error = match symlink_dir(symlink_target, symlink_path) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if matches!(error.kind(), ErrorKind::AlreadyExists | ErrorKind::IsADirectory) =>
+            {
+                error
+            }
+            Err(error) => {
+                return Err(SymlinkPackageError::SymlinkDir {
+                    symlink_target: symlink_target.to_path_buf(),
+                    symlink_path: symlink_path.to_path_buf(),
+                    error,
+                });
+            }
+        };
 
-    if rename_tried {
-        remove_existing_path(symlink_path)?;
-    } else if let Err(error) = rename_existing_path(symlink_path) {
-        if error.kind() == ErrorKind::NotFound {
+        if existing_points_to_target(symlink_target, symlink_path) {
+            return Ok(());
+        }
+
+        if replaced_existing {
             return Err(SymlinkPackageError::SymlinkDir {
                 symlink_target: symlink_target.to_path_buf(),
                 symlink_path: symlink_path.to_path_buf(),
@@ -234,21 +231,31 @@ fn force_symlink(
             });
         }
 
-        // Windows often returns EPERM/PermissionDenied when renaming existing junctions.
-        // Fall back to direct deletion before retrying symlink creation.
-        if let Err(remove_error) = remove_existing_path(symlink_path) {
-            return Err(SymlinkPackageError::RenameExistingPath {
-                path: symlink_path.to_path_buf(),
-                rename_to: ignored_path(symlink_path),
-                error: io::Error::new(
-                    error.kind(),
-                    format!("{error}; fallback remove failed: {remove_error}"),
-                ),
-            });
-        }
-    }
+        if let Err(error) = rename_existing_path(symlink_path) {
+            if error.kind() == ErrorKind::NotFound {
+                return Err(SymlinkPackageError::SymlinkDir {
+                    symlink_target: symlink_target.to_path_buf(),
+                    symlink_path: symlink_path.to_path_buf(),
+                    error: initial_error,
+                });
+            }
 
-    force_symlink(symlink_target, symlink_path, true)
+            // Windows often returns EPERM/PermissionDenied when renaming existing junctions.
+            // Fall back to direct deletion before retrying symlink creation.
+            if let Err(remove_error) = remove_existing_path(symlink_path) {
+                return Err(SymlinkPackageError::RenameExistingPath {
+                    path: symlink_path.to_path_buf(),
+                    rename_to: ignored_path(symlink_path),
+                    error: io::Error::new(
+                        error.kind(),
+                        format!("{error}; fallback remove failed: {remove_error}"),
+                    ),
+                });
+            }
+        }
+
+        replaced_existing = true;
+    }
 }
 
 fn existing_points_to_target(symlink_target: &Path, symlink_path: &Path) -> bool {
@@ -259,8 +266,20 @@ fn existing_points_to_target(symlink_target: &Path, symlink_path: &Path) -> bool
             .parent()
             .map_or_else(|| symlink_target.to_path_buf(), |parent| parent.join(symlink_target))
     };
-    fs::canonicalize(symlink_path)
-        .ok()
+    if !is_symlink_or_junction(symlink_path).unwrap_or(false) {
+        return false;
+    }
+
+    let existing_target = symlink_or_junction_target(symlink_path).ok().map(|target| {
+        if target.is_absolute() {
+            target
+        } else {
+            symlink_path.parent().map_or(target.clone(), |parent| parent.join(target))
+        }
+    });
+
+    existing_target
+        .and_then(|existing| fs::canonicalize(existing).ok())
         .zip(fs::canonicalize(compare_target).ok())
         .is_some_and(|(existing, wanted)| existing == wanted)
 }
@@ -274,14 +293,24 @@ fn ignored_path(path: &Path) -> PathBuf {
 }
 
 fn remove_existing_path(path: &Path) -> Result<(), SymlinkPackageError> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        SymlinkPackageError::RemoveExistingPath { path: path.to_path_buf(), error }
-    })?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(SymlinkPackageError::RemoveExistingPath {
+                path: path.to_path_buf(),
+                error,
+            });
+        }
+    };
 
-    if metadata.file_type().is_symlink() {
+    if metadata.file_type().is_symlink() || is_symlink_or_junction(path).unwrap_or(false) {
+        #[cfg(windows)]
+        fs::remove_dir(path).map_err(|error| SymlinkPackageError::RemoveExistingPath {
+            path: path.to_path_buf(),
+            error,
+        })?;
+        #[cfg(not(windows))]
         fs::remove_file(path).map_err(|error| SymlinkPackageError::RemoveExistingPath {
             path: path.to_path_buf(),
             error,
@@ -326,45 +355,68 @@ fn import_dir_recursive(
     source: &Path,
     destination: &Path,
 ) -> Result<(), SymlinkPackageError> {
-    fs::create_dir_all(destination).map_err(|error| SymlinkPackageError::CreateDestinationDir {
-        path: destination.to_path_buf(),
-        error,
+    let canonical_source = fs::canonicalize(source).map_err(|error| {
+        SymlinkPackageError::CanonicalizePath { path: source.to_path_buf(), error }
     })?;
+    let mut pending = vec![(
+        canonical_source.clone(),
+        destination.to_path_buf(),
+        HashSet::from([canonical_source]),
+    )];
 
-    let entries = fs::read_dir(source).map_err(|error| SymlinkPackageError::ReadSourceDir {
-        path: source.to_path_buf(),
-        error,
-    })?;
+    while let Some((current_source, current_destination, ancestors)) = pending.pop() {
+        fs::create_dir_all(&current_destination).map_err(|error| {
+            SymlinkPackageError::CreateDestinationDir { path: current_destination.clone(), error }
+        })?;
 
-    for entry in entries {
-        let entry = entry.map_err(|error| SymlinkPackageError::ReadSourceDir {
-            path: source.to_path_buf(),
-            error,
+        let entries = fs::read_dir(&current_source).map_err(|error| {
+            SymlinkPackageError::ReadSourceDir { path: current_source.clone(), error }
         })?;
-        let from = entry.path();
-        let file_name = entry.file_name();
-        let file_name_str = file_name.to_string_lossy();
-        let to = destination.join(&file_name);
-        let file_type = entry.file_type().map_err(|error| {
-            SymlinkPackageError::ReadSourceEntryType { path: from.clone(), error }
-        })?;
-        if file_type.is_dir() && matches!(file_name_str.as_ref(), "node_modules" | ".git") {
-            continue;
-        }
-        let canonical_from =
-            if file_type.is_symlink() { fs::canonicalize(&from).ok() } else { None };
-        if file_type.is_dir() || canonical_from.as_ref().is_some_and(|target| target.is_dir()) {
-            import_dir_recursive(import_method, canonical_from.as_deref().unwrap_or(&from), &to)?;
-            continue;
-        }
-        let import_from = canonical_from.as_deref().unwrap_or(&from);
-        link_file(import_method, import_from, &to).map_err(|error| {
-            SymlinkPackageError::ImportLocalFile {
-                from: import_from.to_path_buf(),
-                to: to.clone(),
-                error: Box::new(error),
+
+        for entry in entries {
+            let entry = entry.map_err(|error| SymlinkPackageError::ReadSourceDir {
+                path: current_source.clone(),
+                error,
+            })?;
+            let from = entry.path();
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+            let to = current_destination.join(&file_name);
+            let file_type = entry.file_type().map_err(|error| {
+                SymlinkPackageError::ReadSourceEntryType { path: from.clone(), error }
+            })?;
+            if file_type.is_dir() && matches!(file_name_str.as_ref(), "node_modules" | ".git") {
+                continue;
             }
-        })?;
+            let canonical_from =
+                if file_type.is_symlink() { fs::canonicalize(&from).ok() } else { None };
+            let dir_source = canonical_from
+                .as_ref()
+                .filter(|target| target.is_dir())
+                .or_else(|| file_type.is_dir().then_some(&from));
+
+            if let Some(dir_source) = dir_source {
+                let canonical_dir = fs::canonicalize(dir_source).map_err(|error| {
+                    SymlinkPackageError::CanonicalizePath { path: dir_source.to_path_buf(), error }
+                })?;
+                if ancestors.contains(&canonical_dir) {
+                    continue;
+                }
+                let mut child_ancestors = ancestors.clone();
+                child_ancestors.insert(canonical_dir.clone());
+                pending.push((canonical_dir, to, child_ancestors));
+                continue;
+            }
+
+            let import_from = canonical_from.as_deref().unwrap_or(&from);
+            link_file(import_method, import_from, &to).map_err(|error| {
+                SymlinkPackageError::ImportLocalFile {
+                    from: import_from.to_path_buf(),
+                    to: to.clone(),
+                    error: Box::new(error),
+                }
+            })?;
+        }
     }
 
     Ok(())
@@ -373,7 +425,6 @@ fn import_dir_recursive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
     use pacquet_fs::symlink_dir;
     use tempfile::tempdir;
 
@@ -433,6 +484,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn import_local_package_dir_skips_symlink_cycles_without_stack_overflow() {
+        let dir = tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        let nested = source.join("nested");
+        let destination = dir.path().join("node_modules/pkg");
+        fs::create_dir_all(&nested).expect("create nested");
+        fs::write(nested.join("index.js"), "module.exports = 1;").expect("write file");
+        symlink_dir(&source, &nested.join("loop")).expect("create loop");
+
+        import_local_package_dir(PackageImportMethod::Copy, &source, &destination)
+            .expect("import local package");
+
+        assert!(destination.join("nested/index.js").exists());
+        assert!(!destination.join("nested/loop").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn symlink_package_uses_real_parent_when_destination_parent_is_symlink() {
         let dir = tempdir().expect("tempdir");
         let source = dir.path().join("local-pkg");
@@ -476,5 +545,40 @@ mod tests {
         let link_target = fs::read_link(&link_path).expect("read symlink target");
         assert!(link_target.to_string_lossy().contains("symlink"));
         assert!(!link_target.to_string_lossy().contains("local-pkg"));
+    }
+
+    #[test]
+    fn symlink_package_replaces_existing_directory_link() {
+        let dir = tempdir().expect("tempdir");
+        let source_a = dir.path().join("pkg-a");
+        let source_b = dir.path().join("pkg-b");
+        let link_path = dir.path().join("app/node_modules/pkg");
+
+        fs::create_dir_all(&source_a).expect("create source a");
+        fs::create_dir_all(&source_b).expect("create source b");
+        fs::write(source_a.join("index.js"), "module.exports = 'a';\n").expect("write source a");
+        fs::write(source_b.join("index.js"), "module.exports = 'b';\n").expect("write source b");
+        fs::create_dir_all(link_path.parent().expect("link parent")).expect("create link parent");
+        symlink_dir(&source_a, &link_path).expect("create initial package link");
+
+        symlink_package(&source_b, &link_path).expect("replace package link");
+
+        assert_eq!(
+            fs::read_to_string(link_path.join("index.js")).expect("read replaced link"),
+            "module.exports = 'b';\n"
+        );
+    }
+
+    #[test]
+    fn existing_points_to_target_recognizes_existing_directory_link() {
+        let dir = tempdir().expect("tempdir");
+        let source = dir.path().join("pkg");
+        let link_path = dir.path().join("app/node_modules/pkg");
+
+        fs::create_dir_all(&source).expect("create source");
+        fs::create_dir_all(link_path.parent().expect("parent")).expect("create parent");
+        symlink_dir(&source, &link_path).expect("create link");
+
+        assert!(existing_points_to_target(&source, &link_path));
     }
 }

@@ -181,7 +181,8 @@ impl<'a> InstallPackageFromRegistry<'a> {
             prefer_offline,
             offline,
         )
-        .await;
+        .await
+        .map_err(InstallPackageFromRegistryError::FetchFromRegistry)?;
 
         let maybe_cached = if prefer_offline && !offline {
             read_cached_package_from_config(config, requested_name)

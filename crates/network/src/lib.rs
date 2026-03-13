@@ -206,7 +206,13 @@ fn build_client(
     http_proxy: Option<&str>,
     no_proxy: Option<&str>,
 ) -> Client {
-    let mut builder = Client::builder().danger_accept_invalid_certs(!strict_ssl).no_proxy();
+    let mut builder = Client::builder()
+        .danger_accept_invalid_certs(!strict_ssl)
+        .no_proxy()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd();
     if let Some(ms) = request_timeout_ms {
         builder = builder.timeout(Duration::from_millis(ms));
     }

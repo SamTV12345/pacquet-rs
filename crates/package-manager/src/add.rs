@@ -144,6 +144,7 @@ where
             reporter_prefix: None,
             reporter,
             print_summary: false,
+            manage_progress_reporter: true,
             resolved_packages,
         }
         .run()

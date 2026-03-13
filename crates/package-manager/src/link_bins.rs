@@ -3,7 +3,7 @@ use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use serde_json::Value;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -103,7 +103,7 @@ fn collect_bin_entries_from_directories(manifest: &PackageManifest) -> Vec<(Stri
     }
 
     let mut files = Vec::new();
-    collect_bin_files_recursive(&absolute_bin_dir, &mut files);
+    collect_bin_files_iterative(&manifest_root, &absolute_bin_dir, &mut files);
     files
         .into_iter()
         .filter_map(|file| {
@@ -114,21 +114,42 @@ fn collect_bin_entries_from_directories(manifest: &PackageManifest) -> Vec<(Stri
         .collect()
 }
 
-fn collect_bin_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
+fn collect_bin_files_iterative(manifest_root: &Path, root_dir: &Path, files: &mut Vec<PathBuf>) {
+    let mut pending = vec![root_dir.to_path_buf()];
+    let mut visited_dirs = HashSet::new();
+
+    while let Some(dir) = pending.pop() {
+        let Ok(canonical_dir) = fs::canonicalize(&dir) else {
             continue;
         };
-        if file_type.is_file() {
-            files.push(path);
+        if !canonical_dir.starts_with(manifest_root) || !visited_dirs.insert(canonical_dir.clone())
+        {
             continue;
         }
-        if file_type.is_dir() {
-            collect_bin_files_recursive(&path, files);
+
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+
+            if file_type.is_file() {
+                let Ok(canonical_file) = fs::canonicalize(&path) else {
+                    continue;
+                };
+                if canonical_file.starts_with(manifest_root) {
+                    files.push(canonical_file);
+                }
+                continue;
+            }
+
+            if file_type.is_dir() {
+                pending.push(path);
+            }
         }
     }
 }
@@ -464,6 +485,35 @@ mod tests {
 
         let manifest = PackageManifest::from_path(manifest_path).expect("load manifest");
         assert!(collect_bin_entries(&manifest).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directories_bin_skips_symlink_cycles_without_recursing_forever() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("package.json");
+        let bin_dir = dir.path().join("bin");
+        let nested_dir = bin_dir.join("nested");
+        fs::create_dir_all(&nested_dir).expect("create nested dir");
+        fs::write(nested_dir.join("cli"), "#!/bin/sh\necho hi\n").expect("write cli");
+        std::os::unix::fs::symlink(&bin_dir, nested_dir.join("loop")).expect("create symlink loop");
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "name": "@scope/pkg-with-directories-bin",
+                "directories": {
+                    "bin": "bin"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write package.json");
+
+        let manifest = PackageManifest::from_path(manifest_path).expect("load manifest");
+        assert_eq!(
+            collect_bin_entries(&manifest),
+            vec![("cli".to_string(), "bin/nested/cli".to_string())]
+        );
     }
 
     #[test]

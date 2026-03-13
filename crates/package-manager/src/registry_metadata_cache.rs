@@ -66,28 +66,31 @@ pub(crate) async fn fetch_package_with_metadata_cache(
     package_name: &str,
     prefer_offline: bool,
     offline: bool,
-) -> Package {
+) -> Result<Package, RegistryError> {
     let cache_file = metadata_cache_file(config, package_name);
     let cached = read_cached_package(&cache_file);
     if (prefer_offline || offline)
         && let Some(cached) = cached.clone()
     {
-        return cached;
+        return Ok(cached);
     }
     if offline {
-        panic!("Failed to resolve {package_name} in package mirror {}", cache_file.display());
+        return Err(RegistryError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Failed to resolve {package_name} in package mirror {}", cache_file.display()),
+        )));
     }
 
     match fetch_package_from_registry_and_cache(config, http_client, package_name).await {
-        Ok(package) => package,
+        Ok(package) => Ok(package),
         Err(error) => {
             if let Some(cached) = cached {
                 crate::progress_reporter::warn(&format!(
                     "Failed to fetch package metadata from registry for {package_name}, using cached metadata: {error}"
                 ));
-                return cached;
+                return Ok(cached);
             }
-            panic!("fetch package metadata from registry: {error}");
+            Err(error)
         }
     }
 }
@@ -136,9 +139,30 @@ mod tests {
             false,
             false,
         )
-        .await;
+        .await
+        .expect("fetch package with metadata cache");
 
         assert_eq!(package.name, "pkg");
         assert_eq!(package.latest().version.to_string(), "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn returns_error_when_offline_and_cache_is_missing() {
+        let dir = tempdir().expect("tempdir");
+
+        let mut config = Npmrc::new();
+        config.cache_dir = dir.path().join("cache");
+
+        let error = fetch_package_with_metadata_cache(
+            &config,
+            &ThrottledClient::new_from_cpu_count(),
+            "missing-pkg",
+            false,
+            true,
+        )
+        .await
+        .expect_err("missing offline metadata should error");
+
+        assert!(error.to_string().contains("Failed to resolve missing-pkg in package mirror"));
     }
 }

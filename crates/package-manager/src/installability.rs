@@ -161,6 +161,7 @@ fn check_list(current_values: &[&str], wanted: &[String]) -> bool {
 fn current_os() -> &'static str {
     match std::env::consts::OS {
         "macos" => "darwin",
+        "windows" => "win32",
         other => other,
     }
 }
@@ -273,5 +274,14 @@ mod tests {
     fn allows_blacklist_only_when_current_not_listed() {
         assert!(check_list(&["linux"], &["!darwin".to_string()]));
         assert!(!check_list(&["linux"], &["!linux".to_string()]));
+    }
+
+    #[test]
+    fn normalizes_windows_os_name_like_pnpm() {
+        #[cfg(windows)]
+        assert_eq!(current_os(), "win32");
+
+        #[cfg(not(windows))]
+        assert_ne!(current_os(), "windows");
     }
 }

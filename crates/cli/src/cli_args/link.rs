@@ -136,6 +136,7 @@ async fn install_linked_project(
         reporter_prefix: None,
         reporter: InstallReporter::Default,
         print_summary: true,
+        manage_progress_reporter: true,
     }
     .run()
     .await

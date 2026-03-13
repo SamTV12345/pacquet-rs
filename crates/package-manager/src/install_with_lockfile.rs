@@ -7,6 +7,8 @@ use crate::{
 };
 use async_recursion::async_recursion;
 use dashmap::DashMap;
+use futures_util::stream::{self, StreamExt};
+use miette::Context;
 use pacquet_lockfile::{
     ComVer, DependencyPath, DirectoryResolution, Lockfile, LockfileResolution,
     MultiProjectSnapshot, PackageSnapshot, PackageSnapshotDependency, PkgName, PkgNameVerPeer,
@@ -65,7 +67,7 @@ where
     DependencyGroupList: IntoIterator<Item = DependencyGroup>,
 {
     /// Execute the subroutine.
-    pub async fn run(self) -> Vec<String> {
+    pub async fn run(self) -> miette::Result<Vec<String>> {
         let InstallWithLockfile {
             tarball_mem_cache,
             resolved_packages,
@@ -98,139 +100,166 @@ where
         )
         .expect("apply .pnpmfile.cjs readPackage hook to project manifest");
 
-        for (group, name, version_range) in crate::dependencies_from_manifest_value_grouped(
-            &hooked_manifest,
-            dependency_groups.iter().copied(),
-        ) {
-            let key = (name.to_string(), version_range.to_string());
-            if resolved_direct_dependencies.contains_key(&key) {
-                continue;
-            }
+        let direct_dependencies = unique_direct_dependencies(&hooked_manifest, &dependency_groups);
+        let direct_dependency_concurrency = std::thread::available_parallelism()
+            .map(|parallelism| parallelism.get().clamp(4, 32))
+            .unwrap_or(16);
 
-            if let Some((resolved_package, local_dep_path, should_symlink)) =
-                resolve_local_dependency(manifest.path(), &version_range)
-            {
-                if should_symlink {
-                    if !lockfile_only {
-                        let dependency_path = config.modules_dir.join(name);
-                        link_package(true, &local_dep_path, &dependency_path)
-                            .expect("install local dependency");
-                    }
-                    resolved_direct_dependencies.insert(key, resolved_package);
-                    continue;
+        let resolved_direct_dependency_entries = stream::iter(direct_dependencies)
+            .map(|(group, name, version_range)| {
+                let package_snapshots = &package_snapshots;
+                let workspace_root_peer_overrides = &workspace_root_peer_overrides;
+                async move {
+                    let key = (name.clone(), version_range.clone());
+
+                    let resolved_package =
+                        if let Some((resolved_package, local_dep_path, should_symlink)) =
+                            resolve_local_dependency(manifest.path(), &version_range)
+                        {
+                            if should_symlink {
+                                if !lockfile_only {
+                                    let dependency_path = config.modules_dir.join(&name);
+                                    link_package(true, &local_dep_path, &dependency_path)
+                                        .expect("install local dependency");
+                                }
+                                resolved_package
+                            } else {
+                                let normalized_ref =
+                                    normalized_local_file_reference(lockfile_dir, &local_dep_path)
+                                        .replace('\\', "/");
+                                Self::snapshot_local_directory_package(
+                                    resolved_packages,
+                                    http_client,
+                                    config,
+                                    package_snapshots,
+                                    workspace_packages,
+                                    workspace_root_peer_overrides,
+                                    manifest.path(),
+                                    lockfile_dir,
+                                    pnpmfile,
+                                    ignore_pnpmfile,
+                                    &name,
+                                    &local_dep_path,
+                                    &normalized_ref,
+                                    prefer_offline,
+                                    offline,
+                                )
+                                .await
+                                .wrap_err_with(|| format!("snapshot local dependency `{name}`"))?
+                            }
+                        } else if let Some(workspace_package) =
+                            resolve_workspace_dependency(workspace_packages, &name, &version_range)
+                        {
+                            if should_inject_workspace_dependency(
+                                manifest,
+                                &name,
+                                &version_range,
+                                config,
+                            ) {
+                                let normalized_ref = normalized_local_file_reference(
+                                    lockfile_dir,
+                                    &workspace_package.root_dir,
+                                )
+                                .replace('\\', "/");
+                                Self::snapshot_local_directory_package(
+                                    resolved_packages,
+                                    http_client,
+                                    config,
+                                    package_snapshots,
+                                    workspace_packages,
+                                    workspace_root_peer_overrides,
+                                    manifest.path(),
+                                    lockfile_dir,
+                                    pnpmfile,
+                                    ignore_pnpmfile,
+                                    &name,
+                                    &workspace_package.root_dir,
+                                    &normalized_ref,
+                                    prefer_offline,
+                                    offline,
+                                )
+                                .await
+                                .wrap_err_with(|| {
+                                    format!("snapshot injected workspace dependency `{name}`")
+                                })?
+                            } else {
+                                if !lockfile_only {
+                                    let symlink_path = config.modules_dir.join(&name);
+                                    link_package(
+                                        config.symlink,
+                                        &workspace_package.root_dir,
+                                        &symlink_path,
+                                    )
+                                    .map_err(|error| {
+                                        miette::miette!(
+                                            "symlink workspace package `{name}`: {error}"
+                                        )
+                                    })?;
+                                }
+
+                                let project_dir =
+                                    manifest.path().parent().unwrap_or_else(|| Path::new("."));
+                                let relative =
+                                    to_relative_path(project_dir, &workspace_package.root_dir);
+                                ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
+                                    "link:{}",
+                                    relative.replace('\\', "/")
+                                )))
+                            }
+                        } else if lockfile_only {
+                            Self::resolve_and_snapshot_package(
+                                resolved_packages,
+                                http_client,
+                                config,
+                                lockfile_dir,
+                                pnpmfile,
+                                ignore_pnpmfile,
+                                package_snapshots,
+                                workspace_root_peer_overrides,
+                                &name,
+                                &version_range,
+                                matches!(group, DependencyGroup::Optional),
+                                prefer_offline,
+                                offline,
+                            )
+                            .await
+                            .wrap_err_with(|| {
+                                format!("resolve dependency `{name}` for lockfile snapshot")
+                            })?
+                        } else {
+                            Self::install_and_snapshot_package(
+                                tarball_mem_cache,
+                                resolved_packages,
+                                http_client,
+                                config,
+                                lockfile_dir,
+                                pnpmfile,
+                                ignore_pnpmfile,
+                                package_snapshots,
+                                workspace_root_peer_overrides,
+                                &config.modules_dir,
+                                &name,
+                                &version_range,
+                                matches!(group, DependencyGroup::Optional),
+                                offline,
+                                prefer_offline,
+                                force,
+                            )
+                            .await
+                            .wrap_err_with(|| {
+                                format!("install dependency `{name}` and update lockfile")
+                            })?
+                        };
+
+                    Ok::<_, miette::Report>((key, resolved_package))
                 }
+            })
+            .buffer_unordered(direct_dependency_concurrency)
+            .collect::<Vec<miette::Result<_>>>()
+            .await;
 
-                let normalized_ref = normalized_local_file_reference(lockfile_dir, &local_dep_path)
-                    .replace('\\', "/");
-                let resolved_package = Self::snapshot_local_directory_package(
-                    resolved_packages,
-                    http_client,
-                    config,
-                    &package_snapshots,
-                    workspace_packages,
-                    &workspace_root_peer_overrides,
-                    manifest.path(),
-                    lockfile_dir,
-                    pnpmfile,
-                    ignore_pnpmfile,
-                    &name,
-                    &local_dep_path,
-                    &normalized_ref,
-                    prefer_offline,
-                    offline,
-                )
-                .await;
-                resolved_direct_dependencies.insert(key, resolved_package);
-                continue;
-            }
-
-            if let Some(workspace_package) =
-                resolve_workspace_dependency(workspace_packages, &name, &version_range)
-            {
-                let resolved_package = if should_inject_workspace_dependency(
-                    manifest,
-                    &name,
-                    &version_range,
-                    config,
-                ) {
-                    let normalized_ref =
-                        normalized_local_file_reference(lockfile_dir, &workspace_package.root_dir)
-                            .replace('\\', "/");
-                    Self::snapshot_local_directory_package(
-                        resolved_packages,
-                        http_client,
-                        config,
-                        &package_snapshots,
-                        workspace_packages,
-                        &workspace_root_peer_overrides,
-                        manifest.path(),
-                        lockfile_dir,
-                        pnpmfile,
-                        ignore_pnpmfile,
-                        &name,
-                        &workspace_package.root_dir,
-                        &normalized_ref,
-                        prefer_offline,
-                        offline,
-                    )
-                    .await
-                } else {
-                    if !lockfile_only {
-                        let symlink_path = config.modules_dir.join(name);
-                        link_package(config.symlink, &workspace_package.root_dir, &symlink_path)
-                            .expect("symlink workspace package");
-                    }
-
-                    let project_dir = manifest.path().parent().unwrap_or_else(|| Path::new("."));
-                    let relative = to_relative_path(project_dir, &workspace_package.root_dir);
-                    ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
-                        "link:{}",
-                        relative.replace('\\', "/")
-                    )))
-                };
-                resolved_direct_dependencies.insert(key, resolved_package);
-                continue;
-            }
-
-            let resolved_package = if lockfile_only {
-                Self::resolve_and_snapshot_package(
-                    resolved_packages,
-                    http_client,
-                    config,
-                    lockfile_dir,
-                    pnpmfile,
-                    ignore_pnpmfile,
-                    &package_snapshots,
-                    &workspace_root_peer_overrides,
-                    &name,
-                    &version_range,
-                    matches!(group, DependencyGroup::Optional),
-                    prefer_offline,
-                    offline,
-                )
-                .await
-            } else {
-                Self::install_and_snapshot_package(
-                    tarball_mem_cache,
-                    resolved_packages,
-                    http_client,
-                    config,
-                    lockfile_dir,
-                    pnpmfile,
-                    ignore_pnpmfile,
-                    &package_snapshots,
-                    &workspace_root_peer_overrides,
-                    &config.modules_dir,
-                    &name,
-                    &version_range,
-                    matches!(group, DependencyGroup::Optional),
-                    offline,
-                    prefer_offline,
-                    force,
-                )
-                .await
-            };
-
+        for entry in resolved_direct_dependency_entries {
+            let (key, resolved_package) = entry?;
             resolved_direct_dependencies.insert(key, resolved_package);
         }
 
@@ -312,7 +341,7 @@ where
 
         if !lockfile_only {
             let relinked_packages = ResolvedPackages::new();
-            return crate::InstallFrozenLockfile {
+            let skipped = crate::InstallFrozenLockfile {
                 http_client,
                 resolved_packages: &relinked_packages,
                 config,
@@ -327,9 +356,10 @@ where
             }
             .run()
             .await;
+            return Ok(skipped);
         }
 
-        Vec::new()
+        Ok(Vec::new())
     }
 
     #[async_recursion]
@@ -348,7 +378,7 @@ where
         optional: bool,
         prefer_offline: bool,
         offline: bool,
-    ) -> ResolvedPackage {
+    ) -> miette::Result<ResolvedPackage> {
         let package_version = resolve_package_version(
             ResolvePackageVersionContext {
                 config,
@@ -362,7 +392,7 @@ where
             name,
             version_range,
         )
-        .await;
+        .await?;
 
         let ver_peer = Self::to_pkg_ver_peer(&package_version);
         let resolved_version = if package_version.name == name {
@@ -381,36 +411,57 @@ where
         if resolved_packages.insert(virtual_store_name.clone()) {
             let mut snapshot_dependencies = HashMap::new();
             let mut snapshot_optional_dependencies = HashMap::new();
-            for (dependency_optional, dependency_name, dependency_version_range) in
+            let dependency_entries = if skipped_optional {
+                Vec::new()
+            } else {
                 package_dependency_entries(&package_version, config.auto_install_peers)
-            {
-                if skipped_optional {
-                    break;
-                }
-                let dependency_version_range = apply_workspace_root_peer_override(
-                    config,
-                    workspace_root_peer_overrides,
-                    package_version.peer_dependencies.as_ref(),
-                    &dependency_name,
-                    &dependency_version_range,
-                );
-                let resolved_dependency = Self::resolve_and_snapshot_package(
-                    resolved_packages,
-                    http_client,
-                    config,
-                    lockfile_dir,
-                    pnpmfile,
-                    ignore_pnpmfile,
-                    package_snapshots,
-                    workspace_root_peer_overrides,
-                    &dependency_name,
-                    &dependency_version_range,
-                    dependency_optional,
-                    prefer_offline,
-                    offline,
-                )
+            };
+            let dependency_concurrency = std::thread::available_parallelism()
+                .map(|parallelism| parallelism.get().clamp(4, 32))
+                .unwrap_or(16);
+            let peer_dependencies = package_version.peer_dependencies.clone();
+
+            let resolved_dependencies = stream::iter(dependency_entries)
+                .map(|(dependency_optional, dependency_name, dependency_version_range)| {
+                    let peer_dependencies = peer_dependencies.clone();
+                    async move {
+                        let dependency_version_range = apply_workspace_root_peer_override(
+                            config,
+                            workspace_root_peer_overrides,
+                            peer_dependencies.as_ref(),
+                            &dependency_name,
+                            &dependency_version_range,
+                        );
+                        let resolved_dependency = Self::resolve_and_snapshot_package(
+                            resolved_packages,
+                            http_client,
+                            config,
+                            lockfile_dir,
+                            pnpmfile,
+                            ignore_pnpmfile,
+                            package_snapshots,
+                            workspace_root_peer_overrides,
+                            &dependency_name,
+                            &dependency_version_range,
+                            dependency_optional,
+                            prefer_offline,
+                            offline,
+                        )
+                        .await?;
+                        Ok::<_, miette::Report>((
+                            dependency_optional,
+                            dependency_name,
+                            resolved_dependency,
+                        ))
+                    }
+                })
+                .buffer_unordered(dependency_concurrency)
+                .collect::<Vec<miette::Result<_>>>()
                 .await;
 
+            for resolved_dependency in resolved_dependencies {
+                let (dependency_optional, dependency_name, resolved_dependency) =
+                    resolved_dependency?;
                 insert_snapshot_dependency(
                     &mut snapshot_dependencies,
                     &mut snapshot_optional_dependencies,
@@ -430,7 +481,7 @@ where
             package_snapshots.insert(dependency_path, package_snapshot);
         }
 
-        ResolvedPackage::new(resolved_version)
+        Ok(ResolvedPackage::new(resolved_version))
     }
 
     #[async_recursion]
@@ -452,7 +503,7 @@ where
         offline: bool,
         prefer_offline: bool,
         force: bool,
-    ) -> ResolvedPackage {
+    ) -> miette::Result<ResolvedPackage> {
         let package_version = InstallPackageFromRegistry {
             tarball_mem_cache,
             http_client,
@@ -470,7 +521,7 @@ where
         }
         .run()
         .await
-        .expect("install package from registry");
+        .map_err(|error| miette::miette!("install package from registry: {error}"))?;
 
         let ver_peer = Self::to_pkg_ver_peer(&package_version);
         let resolved_version = if package_version.name == name {
@@ -492,39 +543,61 @@ where
 
             let mut snapshot_dependencies = HashMap::new();
             let mut snapshot_optional_dependencies = HashMap::new();
-            for (dependency_optional, dependency_name, dependency_version_range) in
+            let dependency_entries = if skipped_optional {
+                Vec::new()
+            } else {
                 package_dependency_entries(&package_version, config.auto_install_peers)
-            {
-                if skipped_optional {
-                    break;
-                }
-                let dependency_version_range = apply_workspace_root_peer_override(
-                    config,
-                    workspace_root_peer_overrides,
-                    package_version.peer_dependencies.as_ref(),
-                    &dependency_name,
-                    &dependency_version_range,
-                );
-                let resolved_dependency = Self::install_and_snapshot_package(
-                    tarball_mem_cache,
-                    resolved_packages,
-                    http_client,
-                    config,
-                    lockfile_dir,
-                    pnpmfile,
-                    ignore_pnpmfile,
-                    package_snapshots,
-                    workspace_root_peer_overrides,
-                    &virtual_node_modules_dir,
-                    &dependency_name,
-                    &dependency_version_range,
-                    dependency_optional,
-                    offline,
-                    prefer_offline,
-                    force,
-                )
+            };
+            let dependency_concurrency = std::thread::available_parallelism()
+                .map(|parallelism| parallelism.get().clamp(4, 32))
+                .unwrap_or(16);
+            let peer_dependencies = package_version.peer_dependencies.clone();
+
+            let resolved_dependencies = stream::iter(dependency_entries)
+                .map(|(dependency_optional, dependency_name, dependency_version_range)| {
+                    let peer_dependencies = peer_dependencies.clone();
+                    let virtual_node_modules_dir = virtual_node_modules_dir.clone();
+                    async move {
+                        let dependency_version_range = apply_workspace_root_peer_override(
+                            config,
+                            workspace_root_peer_overrides,
+                            peer_dependencies.as_ref(),
+                            &dependency_name,
+                            &dependency_version_range,
+                        );
+                        let resolved_dependency = Self::install_and_snapshot_package(
+                            tarball_mem_cache,
+                            resolved_packages,
+                            http_client,
+                            config,
+                            lockfile_dir,
+                            pnpmfile,
+                            ignore_pnpmfile,
+                            package_snapshots,
+                            workspace_root_peer_overrides,
+                            &virtual_node_modules_dir,
+                            &dependency_name,
+                            &dependency_version_range,
+                            dependency_optional,
+                            offline,
+                            prefer_offline,
+                            force,
+                        )
+                        .await?;
+                        Ok::<_, miette::Report>((
+                            dependency_optional,
+                            dependency_name,
+                            resolved_dependency,
+                        ))
+                    }
+                })
+                .buffer_unordered(dependency_concurrency)
+                .collect::<Vec<miette::Result<_>>>()
                 .await;
 
+            for resolved_dependency in resolved_dependencies {
+                let (dependency_optional, dependency_name, resolved_dependency) =
+                    resolved_dependency?;
                 insert_snapshot_dependency(
                     &mut snapshot_dependencies,
                     &mut snapshot_optional_dependencies,
@@ -544,7 +617,7 @@ where
             package_snapshots.insert(dependency_path, package_snapshot);
         }
 
-        ResolvedPackage::new(resolved_version)
+        Ok(ResolvedPackage::new(resolved_version))
     }
 
     #[async_recursion]
@@ -565,7 +638,7 @@ where
         normalized_ref: &str,
         prefer_offline: bool,
         offline: bool,
-    ) -> ResolvedPackage {
+    ) -> miette::Result<ResolvedPackage> {
         let local_manifest = PackageManifest::from_path(local_dep_path.join("package.json")).ok();
         let local_manifest_value = local_manifest.as_ref().and_then(|manifest| {
             crate::apply_read_package_hook_to_manifest(
@@ -593,36 +666,59 @@ where
         let peer_dependencies = local_manifest_value
             .as_ref()
             .and_then(|manifest| json_string_map(manifest.get("peerDependencies")));
+        let peer_dependency_entries = peer_dependencies
+            .as_ref()
+            .map(|dependencies| {
+                dependencies
+                    .iter()
+                    .map(|(name, range)| (name.clone(), range.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let mut resolved_local_peers = BTreeMap::<String, ResolvedDependencyVersion>::new();
         let mut snapshot_dependencies = HashMap::new();
+        let dependency_concurrency = std::thread::available_parallelism()
+            .map(|parallelism| parallelism.get().clamp(4, 32))
+            .unwrap_or(16);
 
         if let Some(peer_dependencies) = peer_dependencies.as_ref() {
-            for (peer_name, peer_range) in peer_dependencies {
-                let resolved_range = apply_workspace_root_peer_override(
-                    config,
-                    workspace_root_peer_overrides,
-                    Some(peer_dependencies),
-                    peer_name,
-                    peer_range,
-                );
-                let Some(resolved_peer) = Self::resolve_local_peer_dependency(
-                    resolved_packages,
-                    http_client,
-                    config,
-                    package_snapshots,
-                    workspace_packages,
-                    workspace_root_peer_overrides,
-                    current_manifest_path,
-                    lockfile_dir,
-                    pnpmfile,
-                    ignore_pnpmfile,
-                    peer_name,
-                    &resolved_range,
-                    prefer_offline,
-                    offline,
-                )
-                .await
-                else {
+            let resolved_peers = stream::iter(peer_dependency_entries)
+                .map(|(peer_name, peer_range)| async move {
+                    let resolved_range = apply_workspace_root_peer_override(
+                        config,
+                        workspace_root_peer_overrides,
+                        Some(peer_dependencies),
+                        &peer_name,
+                        &peer_range,
+                    );
+                    let resolved_peer = Self::resolve_local_peer_dependency(
+                        resolved_packages,
+                        http_client,
+                        config,
+                        package_snapshots,
+                        workspace_packages,
+                        workspace_root_peer_overrides,
+                        current_manifest_path,
+                        lockfile_dir,
+                        pnpmfile,
+                        ignore_pnpmfile,
+                        &peer_name,
+                        &resolved_range,
+                        prefer_offline,
+                        offline,
+                    )
+                    .await?;
+
+                    Ok::<_, miette::Report>(
+                        resolved_peer.map(|resolved_peer| (peer_name, resolved_peer)),
+                    )
+                })
+                .buffer_unordered(dependency_concurrency)
+                .collect::<Vec<miette::Result<Option<(String, ResolvedPackage)>>>>()
+                .await;
+
+            for resolved_peer in resolved_peers {
+                let Some((peer_name, resolved_peer)) = resolved_peer? else {
                     continue;
                 };
 
@@ -632,124 +728,130 @@ where
                     &resolved_peer.peer_suffixes,
                 );
                 snapshot_dependencies.insert(
-                    Self::parse_pkg_name(peer_name),
-                    resolved_version_to_snapshot_dependency(peer_name, &resolved_peer.version),
+                    Self::parse_pkg_name(&peer_name),
+                    resolved_version_to_snapshot_dependency(&peer_name, &resolved_peer.version),
                 );
             }
         }
 
         if let Some(local_manifest) = &local_manifest {
-            for (child_name, child_version_range) in &local_dependency_entries {
-                if let Some((resolved_local, local_child_path, should_symlink)) =
-                    resolve_local_dependency(local_manifest.path(), child_version_range)
-                {
-                    if should_symlink {
-                        snapshot_dependencies.insert(
-                            Self::parse_pkg_name(child_name),
-                            PackageSnapshotDependency::Link(resolved_local.version.to_string()),
+            let local_manifest_path = local_manifest.path().to_path_buf();
+            let resolved_children = stream::iter(local_dependency_entries.iter().cloned())
+                .map(|(child_name, child_version_range)| {
+                    let local_manifest_path = local_manifest_path.clone();
+                    async move {
+                        if let Some((resolved_local, local_child_path, should_symlink)) =
+                            resolve_local_dependency(&local_manifest_path, &child_version_range)
+                        {
+                            if should_symlink {
+                                return Ok::<_, miette::Report>((child_name, resolved_local, true));
+                            }
+
+                            let normalized_child_ref =
+                                normalized_local_file_reference(lockfile_dir, &local_child_path)
+                                    .replace('\\', "/");
+                            let resolved_local = Self::snapshot_local_directory_package(
+                                resolved_packages,
+                                http_client,
+                                config,
+                                package_snapshots,
+                                workspace_packages,
+                                workspace_root_peer_overrides,
+                                current_manifest_path,
+                                lockfile_dir,
+                                pnpmfile,
+                                ignore_pnpmfile,
+                                &child_name,
+                                &local_child_path,
+                                &normalized_child_ref,
+                                prefer_offline,
+                                offline,
+                            )
+                            .await?;
+                            return Ok((child_name, resolved_local, true));
+                        }
+
+                        if let Some(workspace_package) = resolve_workspace_dependency(
+                            workspace_packages,
+                            &child_name,
+                            &child_version_range,
+                        ) {
+                            let normalized_child_ref = normalized_local_file_reference(
+                                lockfile_dir,
+                                &workspace_package.root_dir,
+                            )
+                            .replace('\\', "/");
+                            let resolved_local = Self::snapshot_local_directory_package(
+                                resolved_packages,
+                                http_client,
+                                config,
+                                package_snapshots,
+                                workspace_packages,
+                                workspace_root_peer_overrides,
+                                current_manifest_path,
+                                lockfile_dir,
+                                pnpmfile,
+                                ignore_pnpmfile,
+                                &child_name,
+                                &workspace_package.root_dir,
+                                &normalized_child_ref,
+                                prefer_offline,
+                                offline,
+                            )
+                            .await?;
+                            return Ok((child_name, resolved_local, true));
+                        }
+
+                        let resolved_range = apply_workspace_root_peer_override(
+                            config,
+                            workspace_root_peer_overrides,
+                            None,
+                            &child_name,
+                            &child_version_range,
                         );
-                        continue;
+                        let resolved_dependency = Self::resolve_and_snapshot_package(
+                            resolved_packages,
+                            http_client,
+                            config,
+                            lockfile_dir,
+                            pnpmfile,
+                            ignore_pnpmfile,
+                            package_snapshots,
+                            workspace_root_peer_overrides,
+                            &child_name,
+                            &resolved_range,
+                            false,
+                            prefer_offline,
+                            offline,
+                        )
+                        .await?;
+                        Ok((child_name, resolved_dependency, false))
                     }
-
-                    let normalized_child_ref =
-                        normalized_local_file_reference(lockfile_dir, &local_child_path)
-                            .replace('\\', "/");
-                    let resolved_local = Self::snapshot_local_directory_package(
-                        resolved_packages,
-                        http_client,
-                        config,
-                        package_snapshots,
-                        workspace_packages,
-                        workspace_root_peer_overrides,
-                        current_manifest_path,
-                        lockfile_dir,
-                        pnpmfile,
-                        ignore_pnpmfile,
-                        child_name,
-                        &local_child_path,
-                        &normalized_child_ref,
-                        prefer_offline,
-                        offline,
-                    )
-                    .await;
-                    merge_resolved_peer_suffixes(
-                        &mut resolved_local_peers,
-                        &resolved_local.peer_suffixes,
-                    );
-                    snapshot_dependencies.insert(
-                        Self::parse_pkg_name(child_name),
-                        PackageSnapshotDependency::Link(resolved_local.version.to_string()),
-                    );
-                    continue;
-                }
-
-                if let Some(workspace_package) = resolve_workspace_dependency(
-                    workspace_packages,
-                    child_name,
-                    child_version_range,
-                ) {
-                    let normalized_child_ref =
-                        normalized_local_file_reference(lockfile_dir, &workspace_package.root_dir)
-                            .replace('\\', "/");
-                    let resolved_local = Self::snapshot_local_directory_package(
-                        resolved_packages,
-                        http_client,
-                        config,
-                        package_snapshots,
-                        workspace_packages,
-                        workspace_root_peer_overrides,
-                        current_manifest_path,
-                        lockfile_dir,
-                        pnpmfile,
-                        ignore_pnpmfile,
-                        child_name,
-                        &workspace_package.root_dir,
-                        &normalized_child_ref,
-                        prefer_offline,
-                        offline,
-                    )
-                    .await;
-                    merge_resolved_peer_suffixes(
-                        &mut resolved_local_peers,
-                        &resolved_local.peer_suffixes,
-                    );
-                    snapshot_dependencies.insert(
-                        Self::parse_pkg_name(child_name),
-                        PackageSnapshotDependency::Link(resolved_local.version.to_string()),
-                    );
-                    continue;
-                }
-
-                let resolved_range = apply_workspace_root_peer_override(
-                    config,
-                    workspace_root_peer_overrides,
-                    None,
-                    child_name,
-                    child_version_range,
-                );
-                let resolved_dependency = Self::resolve_and_snapshot_package(
-                    resolved_packages,
-                    http_client,
-                    config,
-                    lockfile_dir,
-                    pnpmfile,
-                    ignore_pnpmfile,
-                    package_snapshots,
-                    workspace_root_peer_overrides,
-                    child_name,
-                    &resolved_range,
-                    false,
-                    prefer_offline,
-                    offline,
-                )
+                })
+                .buffer_unordered(dependency_concurrency)
+                .collect::<Vec<miette::Result<(String, ResolvedPackage, bool)>>>()
                 .await;
-                snapshot_dependencies.insert(
-                    Self::parse_pkg_name(child_name),
-                    resolved_version_to_snapshot_dependency(
-                        child_name,
-                        &resolved_dependency.version,
-                    ),
-                );
+
+            for resolved_child in resolved_children {
+                let (child_name, resolved_dependency, is_link) = resolved_child?;
+                if is_link {
+                    merge_resolved_peer_suffixes(
+                        &mut resolved_local_peers,
+                        &resolved_dependency.peer_suffixes,
+                    );
+                    snapshot_dependencies.insert(
+                        Self::parse_pkg_name(&child_name),
+                        PackageSnapshotDependency::Link(resolved_dependency.version.to_string()),
+                    );
+                } else {
+                    snapshot_dependencies.insert(
+                        Self::parse_pkg_name(&child_name),
+                        resolved_version_to_snapshot_dependency(
+                            &child_name,
+                            &resolved_dependency.version,
+                        ),
+                    );
+                }
             }
         }
 
@@ -790,10 +892,10 @@ where
             },
         );
 
-        ResolvedPackage {
+        Ok(ResolvedPackage {
             version: ResolvedDependencyVersion::Link(normalized_ref_with_peers.to_string()),
             peer_suffixes: resolved_local_peers,
-        }
+        })
     }
 
     #[async_recursion]
@@ -813,7 +915,7 @@ where
         version_range: &str,
         prefer_offline: bool,
         offline: bool,
-    ) -> Option<ResolvedPackage> {
+    ) -> miette::Result<Option<ResolvedPackage>> {
         let available_specs = read_dependency_specs(current_manifest_path);
         let requested_range =
             available_specs.get(name).map(String::as_str).unwrap_or(version_range);
@@ -823,10 +925,10 @@ where
                 resolve_workspace_dependency(workspace_packages, name, requested_range)
         {
             let relative = to_relative_path(lockfile_dir, &workspace_package.root_dir);
-            return Some(ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
+            return Ok(Some(ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
                 "link:{}",
                 relative.replace('\\', "/")
-            ))));
+            )))));
         }
 
         if let Some((_, local_dep_path, should_symlink)) =
@@ -842,10 +944,12 @@ where
                 .replace('\\', "/")
             );
             if should_symlink {
-                return Some(ResolvedPackage::new(ResolvedDependencyVersion::Link(normalized_ref)));
+                return Ok(Some(ResolvedPackage::new(ResolvedDependencyVersion::Link(
+                    normalized_ref,
+                ))));
             }
 
-            return Some(
+            return Ok(Some(
                 Self::snapshot_local_directory_package(
                     resolved_packages,
                     http_client,
@@ -863,8 +967,8 @@ where
                     prefer_offline,
                     offline,
                 )
-                .await,
-            );
+                .await?,
+            ));
         }
 
         if let Some(workspace_package) =
@@ -873,7 +977,7 @@ where
             let normalized_ref =
                 normalized_local_file_reference(lockfile_dir, &workspace_package.root_dir)
                     .replace('\\', "/");
-            return Some(
+            return Ok(Some(
                 Self::snapshot_local_directory_package(
                     resolved_packages,
                     http_client,
@@ -891,12 +995,12 @@ where
                     prefer_offline,
                     offline,
                 )
-                .await,
-            );
+                .await?,
+            ));
         }
 
         if available_specs.contains_key(name) || config.auto_install_peers {
-            return Some(
+            return Ok(Some(
                 Self::resolve_and_snapshot_package(
                     resolved_packages,
                     http_client,
@@ -912,11 +1016,11 @@ where
                     prefer_offline,
                     offline,
                 )
-                .await,
-            );
+                .await?,
+            ));
         }
 
-        None
+        Ok(None)
     }
 
     fn build_project_snapshot(
@@ -1046,6 +1150,24 @@ where
             optional: optional.then_some(true),
         }
     }
+}
+
+fn unique_direct_dependencies(
+    manifest_value: &serde_json::Value,
+    dependency_groups: &[DependencyGroup],
+) -> Vec<(DependencyGroup, String, String)> {
+    let mut seen = HashSet::<(String, String)>::new();
+    let mut dependencies = Vec::new();
+    for (group, name, version_range) in crate::dependencies_from_manifest_value_grouped(
+        manifest_value,
+        dependency_groups.iter().copied(),
+    ) {
+        let key = (name.to_string(), version_range.to_string());
+        if seen.insert(key.clone()) {
+            dependencies.push((group, key.0, key.1));
+        }
+    }
+    dependencies
 }
 
 fn package_dependency_entries(
@@ -1729,7 +1851,7 @@ async fn resolve_package_version(
     ctx: ResolvePackageVersionContext<'_>,
     name: &str,
     version_range: &str,
-) -> PackageVersion {
+) -> miette::Result<PackageVersion> {
     if is_tarball_spec(version_range) {
         crate::progress_reporter::resolved();
         return crate::apply_read_package_hook_to_package_version(
@@ -1738,9 +1860,13 @@ async fn resolve_package_version(
             ctx.ignore_pnpmfile,
             &resolve_package_version_from_tarball_spec(ctx.config, ctx.http_client, version_range)
                 .await
-                .expect("resolve package version from tarball spec"),
+                .map_err(|error| {
+                    miette::miette!("resolve package version from tarball spec: {error}")
+                })?,
         )
-        .expect("apply .pnpmfile.cjs readPackage hook to tarball package");
+        .map_err(|error| {
+            miette::miette!("apply .pnpmfile.cjs readPackage hook to tarball package: {error}")
+        });
     }
     if is_git_spec(version_range) {
         crate::progress_reporter::resolved();
@@ -1750,9 +1876,13 @@ async fn resolve_package_version(
             ctx.ignore_pnpmfile,
             &resolve_package_version_from_git_spec(ctx.config, ctx.http_client, version_range)
                 .await
-                .expect("resolve package version from git spec"),
+                .map_err(|error| {
+                    miette::miette!("resolve package version from git spec: {error}")
+                })?,
         )
-        .expect("apply .pnpmfile.cjs readPackage hook to git package");
+        .map_err(|error| {
+            miette::miette!("apply .pnpmfile.cjs readPackage hook to git package: {error}")
+        });
     }
     let (requested_name, requested_range) =
         parse_npm_alias(version_range).unwrap_or((name, version_range));
@@ -1763,7 +1893,8 @@ async fn resolve_package_version(
         ctx.prefer_offline,
         ctx.offline,
     )
-    .await;
+    .await
+    .map_err(|error| miette::miette!("fetch package metadata from registry: {error}"))?;
     let resolve = |package: &pacquet_registry::Package| {
         if let Ok(version) = requested_range.parse::<node_semver::Version>() {
             return package.versions.get(&version.to_string()).cloned();
@@ -1787,7 +1918,9 @@ async fn resolve_package_version(
         let fresh =
             fetch_package_from_registry_and_cache(ctx.config, ctx.http_client, requested_name)
                 .await
-                .expect("fetch package metadata from registry");
+                .map_err(|error| {
+                    miette::miette!("fetch package metadata from registry: {error}")
+                })?;
         package_version = resolve(&fresh);
     }
 
@@ -1796,9 +1929,15 @@ async fn resolve_package_version(
         ctx.lockfile_dir,
         ctx.pnpmfile,
         ctx.ignore_pnpmfile,
-        &package_version.expect("resolve package version from metadata"),
+        &package_version.ok_or_else(|| {
+            miette::miette!(
+                "resolve package version from metadata: no matching version for `{requested_name}@{requested_range}`"
+            )
+        })?,
     )
-    .expect("apply .pnpmfile.cjs readPackage hook to package metadata")
+    .map_err(|error| {
+        miette::miette!("apply .pnpmfile.cjs readPackage hook to package metadata: {error}")
+    })
 }
 
 fn apply_workspace_root_peer_override(
@@ -2777,6 +2916,30 @@ mod tests {
                 .expect("registry specifier")
                 .suffix
                 .to_string()
+        );
+    }
+
+    #[test]
+    fn unique_direct_dependencies_dedupes_same_name_and_spec_across_groups() {
+        let manifest = serde_json::json!({
+            "dependencies": {
+                "foo": "^1.0.0"
+            },
+            "devDependencies": {
+                "foo": "^1.0.0",
+                "bar": "^2.0.0"
+            }
+        });
+
+        let items =
+            unique_direct_dependencies(&manifest, &[DependencyGroup::Prod, DependencyGroup::Dev]);
+
+        assert_eq!(
+            items,
+            vec![
+                (DependencyGroup::Prod, "foo".to_string(), "^1.0.0".to_string()),
+                (DependencyGroup::Dev, "bar".to_string(), "^2.0.0".to_string()),
+            ]
         );
     }
 }

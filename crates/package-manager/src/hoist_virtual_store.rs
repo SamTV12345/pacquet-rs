@@ -2,6 +2,7 @@ use crate::{collect_bin_entries, link_package, write_bin_wrapper};
 use miette::Context;
 use pacquet_npmrc::{NodeLinker, Npmrc};
 use pacquet_package_manifest::PackageManifest;
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -51,6 +52,28 @@ fn discover_package_dirs(virtual_store_dir: &Path) -> Vec<PathBuf> {
     }
 
     package_dirs
+}
+
+#[derive(Clone)]
+struct HoistablePackage {
+    name: String,
+    version: node_semver::Version,
+    package_dir: PathBuf,
+}
+
+fn load_hoistable_packages(virtual_store_dir: &Path) -> Vec<HoistablePackage> {
+    discover_package_dirs(virtual_store_dir)
+        .into_par_iter()
+        .filter_map(|package_dir| {
+            let manifest_path = package_dir.join("package.json");
+            let manifest_text = fs::read_to_string(&manifest_path).ok()?;
+            let manifest = serde_json::from_str::<serde_json::Value>(&manifest_text).ok()?;
+            let name = manifest.get("name").and_then(|v| v.as_str())?.to_string();
+            let version_text = manifest.get("version").and_then(|v| v.as_str())?;
+            let version = version_text.parse::<node_semver::Version>().ok()?;
+            Some(HoistablePackage { name, version, package_dir })
+        })
+        .collect()
 }
 
 fn wildcard_match(value: &str, pattern: &str) -> bool {
@@ -103,39 +126,23 @@ fn matches_patterns(name: &str, patterns: &[String]) -> bool {
 }
 
 fn select_packages_by_patterns(
-    virtual_store_dir: &Path,
+    packages: &[HoistablePackage],
     patterns: &[String],
     include_all: bool,
 ) -> BTreeMap<String, (node_semver::Version, PathBuf)> {
-    if !virtual_store_dir.exists() {
-        return BTreeMap::new();
-    }
-
     let mut selected = BTreeMap::<String, (node_semver::Version, PathBuf)>::new();
-    for package_dir in discover_package_dirs(virtual_store_dir) {
-        let manifest_path = package_dir.join("package.json");
-        let Ok(manifest_text) = fs::read_to_string(&manifest_path) else {
-            continue;
-        };
-        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&manifest_text) else {
-            continue;
-        };
-        let Some(name) = manifest.get("name").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if !include_all && !matches_patterns(name, patterns) {
+    for package in packages {
+        if !include_all && !matches_patterns(&package.name, patterns) {
             continue;
         }
-        let Some(version_text) = manifest.get("version").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Ok(version) = version_text.parse::<node_semver::Version>() else {
-            continue;
-        };
 
-        let should_replace = selected.get(name).is_none_or(|(current, _)| version > *current);
+        let should_replace =
+            selected.get(&package.name).is_none_or(|(current, _)| package.version > *current);
         if should_replace {
-            selected.insert(name.to_string(), (version, package_dir));
+            selected.insert(
+                package.name.clone(),
+                (package.version.clone(), package.package_dir.clone()),
+            );
         }
     }
 
@@ -163,17 +170,13 @@ fn hoist_selected_packages(
     Ok(())
 }
 
-fn link_bins_for_hoisted_packages(config: &Npmrc, root_dir: &Path) -> miette::Result<()> {
-    let Ok(entries) = fs::read_dir(root_dir) else {
-        return Ok(());
-    };
+fn link_bins_for_hoisted_packages(
+    config: &Npmrc,
+    root_dir: &Path,
+    selected: &BTreeMap<String, (node_semver::Version, PathBuf)>,
+) -> miette::Result<()> {
     let bin_dir = root_dir.join(".bin");
-    for entry in entries.flatten() {
-        let package_dir = entry.path();
-        let file_name = entry.file_name();
-        if file_name.to_string_lossy() == ".bin" {
-            continue;
-        }
+    for (_, package_dir) in selected.values() {
         let package_manifest_path = package_dir.join("package.json");
         if !package_manifest_path.is_file() {
             continue;
@@ -194,6 +197,10 @@ pub(crate) fn hoist_virtual_store_packages(config: &Npmrc) -> miette::Result<()>
     if !config.virtual_store_dir.exists() {
         return Ok(());
     }
+    if !needs_hoistable_package_scan(config) {
+        return Ok(());
+    }
+    let hoistable_packages = load_hoistable_packages(&config.virtual_store_dir);
 
     let shared_modules_dir = config
         .virtual_store_dir
@@ -203,24 +210,24 @@ pub(crate) fn hoist_virtual_store_packages(config: &Npmrc) -> miette::Result<()>
 
     if config.hoist || config.shamefully_hoist {
         let selected = select_packages_by_patterns(
-            &config.virtual_store_dir,
+            &hoistable_packages,
             &config.hoist_pattern,
             config.shamefully_hoist,
         );
         let virtual_hoisted_root = config.virtual_store_dir.join("node_modules");
-        hoist_selected_packages(config, &virtual_hoisted_root, selected)?;
-        link_bins_for_hoisted_packages(config, &virtual_hoisted_root)?;
+        hoist_selected_packages(config, &virtual_hoisted_root, selected.clone())?;
+        link_bins_for_hoisted_packages(config, &virtual_hoisted_root, &selected)?;
     }
 
     match config.node_linker {
         NodeLinker::Hoisted => {
-            let selected = select_packages_by_patterns(&config.virtual_store_dir, &[], true);
+            let selected = select_packages_by_patterns(&hoistable_packages, &[], true);
             hoist_selected_packages(config, &shared_modules_dir, selected)?;
         }
         NodeLinker::Pnp => {}
         _ if config.hoist || config.shamefully_hoist => {
             let selected = select_packages_by_patterns(
-                &config.virtual_store_dir,
+                &hoistable_packages,
                 &config.public_hoist_pattern,
                 config.shamefully_hoist,
             );
@@ -232,6 +239,11 @@ pub(crate) fn hoist_virtual_store_packages(config: &Npmrc) -> miette::Result<()>
     }
 
     Ok(())
+}
+
+fn needs_hoistable_package_scan(config: &Npmrc) -> bool {
+    matches!(config.node_linker, NodeLinker::Hoisted)
+        || (config.symlink && (config.hoist || config.shamefully_hoist))
 }
 
 #[cfg(test)]
@@ -270,6 +282,25 @@ mod tests {
         let link_path = modules_dir.join("dep");
         assert!(link_path.exists());
         assert!(is_symlink_or_junction(&link_path).expect("read link metadata"));
+    }
+
+    #[test]
+    fn isolated_without_hoist_should_skip_hoistable_package_scan() {
+        let mut config = Npmrc::new();
+        config.node_linker = NodeLinker::Isolated;
+        config.hoist = false;
+        config.shamefully_hoist = false;
+        config.symlink = true;
+
+        assert!(!needs_hoistable_package_scan(&config));
+    }
+
+    #[test]
+    fn hoisted_node_linker_requires_hoistable_package_scan() {
+        let mut config = Npmrc::new();
+        config.node_linker = NodeLinker::Hoisted;
+
+        assert!(needs_hoistable_package_scan(&config));
     }
 
     #[test]

@@ -79,6 +79,14 @@ pub fn execute_lifecycle_script(opts: ExecuteLifecycleScript<'_>) -> Result<(), 
         return Ok(());
     }
 
+    if opts.script_shell.is_none()
+        && let Some(mut command) =
+            try_build_direct_lifecycle_command_windows(&command_line, &common_env)
+    {
+        apply_common_env(&mut command, opts.pkg_root, &common_env);
+        return wait_for_command(&mut command);
+    }
+
     let mut command = shell_command(opts.script_shell, &command_line)?;
     apply_common_env(&mut command, opts.pkg_root, &common_env);
     wait_for_command(&mut command)
@@ -91,9 +99,7 @@ pub fn execute_command(opts: ExecuteCommand<'_>) -> Result<(), ExecutorError> {
     let mut command = if opts.shell_mode {
         shell_command(None, &append_args_to_script(opts.program, opts.args))?
     } else {
-        let mut command = Command::new(resolve_program_for_emulator(opts.program, &common_env));
-        command.args(opts.args);
-        command
+        build_program_command(opts.program, opts.args, &common_env)
     };
     command.current_dir(opts.current_dir.unwrap_or(opts.pkg_root));
     command.env("PATH", path_var);
@@ -112,9 +118,7 @@ pub fn execute_command_capture(
     let mut command = if opts.shell_mode {
         shell_command(None, &append_args_to_script(opts.program, opts.args))?
     } else {
-        let mut command = Command::new(resolve_program_for_emulator(opts.program, &common_env));
-        command.args(opts.args);
-        command
+        build_program_command(opts.program, opts.args, &common_env)
     };
     command.current_dir(opts.current_dir.unwrap_or(opts.pkg_root));
     command.env("PATH", path_var);
@@ -133,6 +137,14 @@ pub fn execute_lifecycle_script_capture(
 
     if opts.shell_emulator {
         return execute_with_shell_emulator(opts.pkg_root, &command_line, &common_env, true);
+    }
+
+    if opts.script_shell.is_none()
+        && let Some(mut command) =
+            try_build_direct_lifecycle_command_windows(&command_line, &common_env)
+    {
+        apply_common_env(&mut command, opts.pkg_root, &common_env);
+        return wait_for_command_capture(&mut command);
     }
 
     let mut command = shell_command(opts.script_shell, &command_line)?;
@@ -310,10 +322,7 @@ fn execute_with_shell_emulator(
             continue;
         }
 
-        let mut command = Command::new(resolve_program_for_emulator(&argv[0], common_env));
-        if argv.len() > 1 {
-            command.args(&argv[1..]);
-        }
+        let mut command = build_program_command(&argv[0], &argv[1..], common_env);
         apply_common_env(&mut command, pkg_root, common_env);
         for (key, value) in assignments {
             command.env(key, value);
@@ -329,20 +338,53 @@ fn execute_with_shell_emulator(
     Ok(output)
 }
 
-fn resolve_program_for_emulator(program: &str, common_env: &[(OsString, OsString)]) -> OsString {
+fn build_program_command(
+    program: &str,
+    args: &[String],
+    common_env: &[(OsString, OsString)],
+) -> Command {
     if !cfg!(windows) {
-        return OsString::from(program);
+        let mut command = Command::new(program);
+        command.args(args);
+        return command;
     }
-    resolve_program_for_emulator_windows(program, common_env)
+
+    match resolve_program_for_emulator_windows(program, common_env) {
+        WindowsResolvedProgram::Direct(target) => {
+            let mut command = Command::new(target);
+            command.args(args);
+            command
+        }
+        WindowsResolvedProgram::PowerShellScript(target) => {
+            let mut command = Command::new("powershell.exe");
+            command
+                .args(["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+                .arg(target)
+                .args(args);
+            command
+        }
+        WindowsResolvedProgram::BatchScript(target) => {
+            let mut command = Command::new("cmd");
+            command.args(["/d", "/c"]).arg(build_windows_batch_command_line(&target, args));
+            command
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WindowsResolvedProgram {
+    Direct(OsString),
+    PowerShellScript(PathBuf),
+    BatchScript(PathBuf),
 }
 
 fn resolve_program_for_emulator_windows(
     program: &str,
     common_env: &[(OsString, OsString)],
-) -> OsString {
+) -> WindowsResolvedProgram {
     let program_path = Path::new(program);
     if program_path.is_absolute() || program.contains('\\') || program.contains('/') {
-        return OsString::from(program);
+        return classify_windows_program_target(PathBuf::from(program), OsString::from(program));
     }
 
     let path_var = common_env
@@ -352,16 +394,11 @@ fn resolve_program_for_emulator_windows(
         })
         .or_else(|| env::var_os("PATH"));
     let Some(path_var) = path_var else {
-        return OsString::from(program);
+        return WindowsResolvedProgram::Direct(OsString::from(program));
     };
 
     let has_extension = program_path.extension().is_some();
-    let pathext = env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-    let pathext = if has_extension {
-        vec![String::new()]
-    } else {
-        pathext.split(';').filter(|ext| !ext.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>()
-    };
+    let pathext = windows_candidate_extensions(has_extension);
 
     for dir in env::split_paths(&path_var) {
         let base = dir.join(program);
@@ -374,12 +411,86 @@ fn resolve_program_for_emulator_windows(
                 PathBuf::from(os)
             };
             if candidate.is_file() {
-                return candidate.into_os_string();
+                return classify_windows_program_target(
+                    candidate.clone(),
+                    candidate.into_os_string(),
+                );
             }
         }
     }
 
-    OsString::from(program)
+    WindowsResolvedProgram::Direct(OsString::from(program))
+}
+
+fn try_build_direct_lifecycle_command_windows(
+    command_line: &str,
+    common_env: &[(OsString, OsString)],
+) -> Option<Command> {
+    if !cfg!(windows) || contains_windows_shell_metacharacters(command_line) {
+        return None;
+    }
+
+    let tokens = shlex::split(command_line.trim())?;
+    let (assignments, argv) = split_env_assignments(&tokens);
+    if !assignments.is_empty() || argv.is_empty() {
+        return None;
+    }
+
+    Some(build_program_command(&argv[0], &argv[1..], common_env))
+}
+
+fn contains_windows_shell_metacharacters(command_line: &str) -> bool {
+    command_line.chars().any(|ch| matches!(ch, '|' | '>' | '<' | '&' | '(' | ')' | '%' | '!'))
+}
+
+fn build_windows_batch_command_line(target: &Path, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(shell_quote_windows_cmd(&target.to_string_lossy()));
+    parts.extend(args.iter().map(|arg| shell_quote_windows_cmd(arg)));
+    format!("call {}", parts.join(" "))
+}
+
+fn shell_quote_windows_cmd(input: &str) -> String {
+    serde_json::to_string(input).expect("serialize Windows cmd arg to JSON string")
+}
+
+fn windows_candidate_extensions(has_extension: bool) -> Vec<String> {
+    if has_extension {
+        return vec![String::new()];
+    }
+
+    let mut extensions = vec![
+        ".ps1".to_string(),
+        ".exe".to_string(),
+        ".com".to_string(),
+        ".cmd".to_string(),
+        ".bat".to_string(),
+    ];
+    if let Ok(pathext) = env::var("PATHEXT") {
+        for ext in pathext.split(';').filter(|ext| !ext.is_empty()) {
+            let ext = ext.to_ascii_lowercase();
+            if !extensions.iter().any(|existing| existing.eq_ignore_ascii_case(&ext)) {
+                extensions.push(ext);
+            }
+        }
+    }
+    extensions
+}
+
+fn classify_windows_program_target(
+    candidate: PathBuf,
+    fallback: OsString,
+) -> WindowsResolvedProgram {
+    let Some(extension) = candidate.extension().and_then(|ext| ext.to_str()) else {
+        return WindowsResolvedProgram::Direct(fallback);
+    };
+    if extension.eq_ignore_ascii_case("ps1") {
+        return WindowsResolvedProgram::PowerShellScript(candidate);
+    }
+    if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
+        return WindowsResolvedProgram::BatchScript(candidate);
+    }
+    WindowsResolvedProgram::Direct(fallback)
 }
 
 fn split_by_double_and(command_line: &str) -> Vec<&str> {
@@ -571,8 +682,8 @@ mod tests {
 
         #[cfg(windows)]
         {
-            fs::write(bin_dir.join("hello.cmd"), "@echo off\r\necho ok> exec-result.txt\r\n")
-                .expect("write .cmd");
+            fs::write(bin_dir.join("hello.ps1"), "Set-Content -Path exec-result.txt -Value ok\r\n")
+                .expect("write .ps1");
         }
 
         #[cfg(unix)]
@@ -599,5 +710,75 @@ mod tests {
 
         let result = fs::read_to_string(dir.path().join("exec-result.txt")).expect("read result");
         assert_eq!(result.trim(), "ok");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_resolution_prefers_powershell_shim_over_cmd() {
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("node_modules/.bin");
+        fs::create_dir_all(&bin_dir).expect("create .bin");
+        fs::write(bin_dir.join("vite.cmd"), "@echo off\r\n").expect("write .cmd");
+        fs::write(bin_dir.join("vite.ps1"), "& 'vite.js' @args\r\n").expect("write .ps1");
+
+        let resolved = resolve_program_for_emulator_windows(
+            "vite",
+            &[(OsString::from("PATH"), bin_dir.as_os_str().to_os_string())],
+        );
+
+        match resolved {
+            WindowsResolvedProgram::PowerShellScript(path) => {
+                assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("vite.ps1"));
+            }
+            other => panic!("expected PowerShell script target, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn simple_windows_lifecycle_command_bypasses_cmd_shell() {
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("node_modules/.bin");
+        fs::create_dir_all(&bin_dir).expect("create .bin");
+        fs::write(bin_dir.join("vite.ps1"), "& 'vite.js' @args\r\n").expect("write .ps1");
+
+        let command = try_build_direct_lifecycle_command_windows(
+            "vite --host",
+            &[(OsString::from("PATH"), bin_dir.as_os_str().to_os_string())],
+        )
+        .expect("build direct lifecycle command");
+
+        assert_eq!(command.get_program(), OsStr::new("powershell.exe"));
+        let args =
+            command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                bin_dir.join("vite.ps1").to_string_lossy().into_owned(),
+                "--host".to_string(),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lifecycle_command_with_shell_syntax_keeps_shell_path() {
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("node_modules/.bin");
+        fs::create_dir_all(&bin_dir).expect("create .bin");
+        fs::write(bin_dir.join("vite.ps1"), "& 'vite.js' @args\r\n").expect("write .ps1");
+
+        assert!(
+            try_build_direct_lifecycle_command_windows(
+                "vite && echo done",
+                &[(OsString::from("PATH"), bin_dir.as_os_str().to_os_string())],
+            )
+            .is_none()
+        );
     }
 }

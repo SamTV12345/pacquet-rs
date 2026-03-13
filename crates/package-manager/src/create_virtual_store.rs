@@ -6,6 +6,7 @@ use futures_util::stream::{self, StreamExt};
 use pacquet_lockfile::{DependencyPath, PackageSnapshot, PkgNameVerPeer};
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::{NodeLinker, Npmrc};
+use rayon::prelude::*;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
@@ -83,20 +84,20 @@ impl<'a> CreateVirtualStore<'a> {
         }
 
         // Second pass: after all virtual package directories exist, wire dependency links.
-        for (dependency_path, package_snapshot) in packages {
+        packages.par_iter().for_each(|(dependency_path, package_snapshot)| {
             let dependencies = package_dependency_map(package_snapshot);
             if dependencies.is_empty() {
-                continue;
+                return;
             }
             if !config.symlink && !matches!(config.node_linker, NodeLinker::Hoisted) {
-                continue;
+                return;
             }
             let virtual_node_modules_dir = config
                 .virtual_store_dir
                 .join(dependency_path.package_specifier.to_virtual_store_name())
                 .join("node_modules");
             if dependency_layout_is_present(&dependencies, &virtual_node_modules_dir) {
-                continue;
+                return;
             }
             create_symlink_layout(
                 &dependencies,
@@ -105,7 +106,7 @@ impl<'a> CreateVirtualStore<'a> {
                 &virtual_node_modules_dir,
                 config.symlink,
             );
-        }
+        });
 
         hoist_virtual_store_dependencies(config, packages);
         prune_orphaned_virtual_store_entries(config, packages);
