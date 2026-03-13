@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs, io,
     path::{Path, PathBuf},
+    process::Command,
     sync::OnceLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -123,7 +124,22 @@ pub(crate) fn write_modules_manifest(
 
 fn detect_pnpm_package_manager() -> String {
     static PACKAGE_MANAGER: OnceLock<String> = OnceLock::new();
-    PACKAGE_MANAGER.get_or_init(|| format!("pacquet@{}", env!("CARGO_PKG_VERSION"))).clone()
+    PACKAGE_MANAGER
+        .get_or_init(|| {
+            detect_pnpm_version()
+                .map(|version| format!("pnpm@{version}"))
+                .unwrap_or_else(|| format!("pacquet@{}", env!("CARGO_PKG_VERSION")))
+        })
+        .clone()
+}
+
+fn detect_pnpm_version() -> Option<String> {
+    let output = Command::new("pnpm").arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!version.is_empty()).then_some(version)
 }
 
 fn canonical_store_dir(config: &Npmrc) -> String {
@@ -417,7 +433,7 @@ mod tests {
         assert!(content.contains("- b@1.0.0"));
         assert!(content.contains("layoutVersion: 5"));
         assert!(content.contains("nodeLinker: isolated"));
-        assert!(content.contains("packageManager: pacquet@"));
+        assert!(content.contains("packageManager: "));
         assert!(content.contains("injectedDeps: {}"));
         assert!(content.contains("virtualStoreDir: .pnpm"));
         assert!(content.contains("dependencies: true"));
@@ -425,8 +441,12 @@ mod tests {
     }
 
     #[test]
-    fn detect_package_manager_is_pacquet_and_does_not_shell_out() {
-        assert_eq!(detect_pnpm_package_manager(), format!("pacquet@{}", env!("CARGO_PKG_VERSION")));
+    fn detect_package_manager_prefers_pnpm_version_with_fallback() {
+        let package_manager = detect_pnpm_package_manager();
+        assert!(
+            package_manager.starts_with("pnpm@")
+                || package_manager == format!("pacquet@{}", env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]
