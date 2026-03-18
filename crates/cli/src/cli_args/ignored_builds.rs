@@ -108,8 +108,8 @@ fn parse_slash_prefixed_dep_path(rest: &str) -> Option<String> {
 }
 
 fn split_name_and_version(value: &str) -> (&str, Option<&str>) {
-    match value.rsplit_once('@') {
-        Some((name, version)) => (name, Some(version)),
+    match value.find('@') {
+        Some(index) => (&value[..index], Some(&value[index + 1..])),
         None => (value, None),
     }
 }
@@ -121,6 +121,10 @@ mod tests {
     #[test]
     fn parse_package_name_supports_store_dep_paths() {
         assert_eq!(parse_package_name("/is-positive@3.1.0"), Some("is-positive".to_string()));
+        assert_eq!(
+            parse_package_name("/is-positive@3.1.0(peer@2.0.0)"),
+            Some("is-positive".to_string())
+        );
         assert_eq!(
             parse_package_name("/@scope/pkg@1.0.0(peer@2.0.0)"),
             Some("@scope/pkg".to_string())
