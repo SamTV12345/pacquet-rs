@@ -131,7 +131,7 @@ jobs:
 
       - name: Upload pacquet artifact (Unix)
         if: runner.os != 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pacquet-${{ matrix.os }}
           path: target/release/pacquet
@@ -139,7 +139,7 @@ jobs:
 
       - name: Upload pacquet artifact (Windows)
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pacquet-${{ matrix.os }}
           path: target/release/pacquet.exe
