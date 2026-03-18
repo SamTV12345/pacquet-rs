@@ -5,7 +5,8 @@ use crate::{
     direct_dependency_virtual_store_location, filter_installable_optional_dependencies,
     get_outdated_lockfile_setting, hoist_virtual_store_packages, importer_dependencies_ready,
     included_dependencies, link_bins_for_manifest, progress_reporter, read_modules_manifest,
-    satisfies_package_manifest, write_modules_manifest, write_pnp_manifest_if_needed,
+    satisfies_package_manifest, satisfies_root_lockfile_config, write_modules_manifest,
+    write_pnp_manifest_if_needed,
 };
 use pacquet_lockfile::{
     DependencyPath, Lockfile, PackageSnapshot, PackageSnapshotDependency, PkgName, PkgNameVerPeer,
@@ -38,6 +39,7 @@ where
     pub lockfile_dir: &'a Path,
     pub lockfile_importer_id: &'a str,
     pub workspace_packages: &'a WorkspacePackages,
+    pub preferred_versions: Option<&'a crate::PreferredVersions>,
     pub dependency_groups: DependencyGroupList,
     pub frozen_lockfile: bool,
     pub lockfile_only: bool,
@@ -115,6 +117,14 @@ impl<'a> InstallFrozenWorkspace<'a> {
                     target.config.exclude_links_from_lockfile,
                     lockfile.lockfile_version.major >= 9,
                 ) {
+                    return Err(miette::miette!(
+                        "Cannot install with --frozen-lockfile because pnpm-lock.yaml is not up to date with {} ({reason})",
+                        target.manifest.path().display(),
+                    ));
+                }
+                if let Err(reason) =
+                    satisfies_root_lockfile_config(lockfile, &target.manifest, lockfile_dir)
+                {
                     return Err(miette::miette!(
                         "Cannot install with --frozen-lockfile because pnpm-lock.yaml is not up to date with {} ({reason})",
                         target.manifest.path().display(),
@@ -231,6 +241,7 @@ where
             lockfile_dir,
             lockfile_importer_id,
             workspace_packages,
+            preferred_versions,
             dependency_groups,
             frozen_lockfile,
             lockfile_only,
@@ -318,6 +329,7 @@ where
                             lockfile.lockfile_version.major >= 9,
                         )
                         .is_ok()
+                        && satisfies_root_lockfile_config(lockfile, manifest, lockfile_dir).is_ok()
                 });
 
                 let has_local_directory_dependency_specs = manifest_has_local_directory_dependency(
@@ -370,6 +382,7 @@ where
                         lockfile_dir,
                         lockfile_importer_id,
                         workspace_packages,
+                        preferred_versions,
                         dependency_groups: dependency_groups.clone(),
                         lockfile_only,
                         force,
@@ -393,6 +406,7 @@ where
                     lockfile_dir,
                     lockfile_importer_id,
                     workspace_packages,
+                    preferred_versions,
                     dependency_groups: dependency_groups.clone(),
                     lockfile_only,
                     force,
@@ -450,6 +464,13 @@ where
                     config.exclude_links_from_lockfile,
                     lockfile_version.major >= 9,
                 ) {
+                    miette::bail!(
+                        "Cannot install with --frozen-lockfile because pnpm-lock.yaml is not up to date with {} ({reason})",
+                        manifest.path().display(),
+                    );
+                }
+                if let Err(reason) = satisfies_root_lockfile_config(lockfile, manifest, lockfile_dir)
+                {
                     miette::bail!(
                         "Cannot install with --frozen-lockfile because pnpm-lock.yaml is not up to date with {} ({reason})",
                         manifest.path().display(),
@@ -1285,6 +1306,7 @@ mod tests {
                     lockfile_dir: dir.path(),
                     lockfile_importer_id: ".",
                     workspace_packages: &Default::default(),
+                    preferred_versions: None,
                     dependency_groups: [
                         DependencyGroup::Prod,
                         DependencyGroup::Dev,
@@ -1365,6 +1387,7 @@ mod tests {
                     lockfile_dir: project_root.as_path(),
                     lockfile_importer_id: ".",
                     workspace_packages: &Default::default(),
+                    preferred_versions: None,
                     dependency_groups: [
                         DependencyGroup::Prod,
                         DependencyGroup::Dev,

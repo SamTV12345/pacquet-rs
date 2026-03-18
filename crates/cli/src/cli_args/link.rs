@@ -125,6 +125,7 @@ async fn install_linked_project(
         lockfile_dir,
         lockfile_importer_id,
         workspace_packages,
+        preferred_versions: None,
         dependency_groups: [DependencyGroup::Prod, DependencyGroup::Dev, DependencyGroup::Optional],
         frozen_lockfile: false,
         lockfile_only: false,

@@ -131,6 +131,7 @@ async fn unlink_recursive(
             lockfile_dir,
             lockfile_importer_id: &importer_id,
             workspace_packages,
+            preferred_versions: None,
             dependency_groups: [
                 DependencyGroup::Prod,
                 DependencyGroup::Dev,
@@ -205,6 +206,7 @@ async fn reinstall_project(
         lockfile_dir,
         lockfile_importer_id,
         workspace_packages,
+        preferred_versions: None,
         dependency_groups: [DependencyGroup::Prod, DependencyGroup::Dev, DependencyGroup::Optional],
         frozen_lockfile: false,
         lockfile_only: false,

@@ -275,6 +275,22 @@ pub(crate) fn satisfies_package_manifest(
     Ok(())
 }
 
+pub(crate) fn satisfies_root_lockfile_config(
+    lockfile: &Lockfile,
+    manifest: &PackageManifest,
+    lockfile_dir: &Path,
+) -> Result<(), String> {
+    let root_package = read_root_package_json(lockfile_dir, manifest);
+    let root_patched_dependencies =
+        extract_patched_dependencies_from_package_json(root_package.as_ref());
+    if lockfile.patched_dependencies != root_patched_dependencies {
+        return Err(
+            "\"patchedDependencies\" in the lockfile doesn't match package.json".to_string()
+        );
+    }
+    Ok(())
+}
+
 fn parse_semver_from_dep(value: &str) -> Option<node_semver::Version> {
     let base = value.split('(').next().unwrap_or(value);
     base.parse::<node_semver::Version>().ok()
@@ -437,6 +453,22 @@ fn extract_package_extensions_from_package_json(
         .and_then(|json| json.get("pnpm"))
         .and_then(|pnpm| pnpm.get("packageExtensions"))
         .cloned()
+}
+
+fn extract_patched_dependencies_from_package_json(
+    package_json: Option<&JsonValue>,
+) -> Option<HashMap<String, YamlValue>> {
+    let patched_dependencies = package_json
+        .and_then(|json| json.get("pnpm"))
+        .and_then(|pnpm| pnpm.get("patchedDependencies"))
+        .and_then(JsonValue::as_object)?;
+    let mapped = patched_dependencies
+        .iter()
+        .filter_map(|(key, value)| {
+            value.as_str().map(|value| (key.clone(), YamlValue::String(value.to_string())))
+        })
+        .collect::<HashMap<_, _>>();
+    (!mapped.is_empty()).then_some(mapped)
 }
 
 fn merge_json_objects(left: Option<JsonValue>, right: Option<JsonValue>) -> Option<JsonValue> {
@@ -786,6 +818,27 @@ mod tests {
         };
 
         assert!(satisfies_package_manifest(&snapshot, &manifest, true, false, true).is_ok());
+    }
+
+    #[test]
+    fn root_lockfile_config_detects_patched_dependencies_drift() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = load_manifest_from_json(
+            dir.path(),
+            serde_json::json!({
+                "name": "workspace",
+                "pnpm": {
+                    "patchedDependencies": {
+                        "foo@1.0.0": "patches/foo.patch"
+                    }
+                }
+            }),
+        );
+        let lockfile = empty_lockfile(ProjectSnapshot::default());
+
+        let error =
+            satisfies_root_lockfile_config(&lockfile, &manifest, dir.path()).expect_err("drift");
+        assert!(error.contains("\"patchedDependencies\""));
     }
 
     #[test]

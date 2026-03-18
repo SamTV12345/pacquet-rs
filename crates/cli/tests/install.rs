@@ -161,6 +161,71 @@ fn should_install_dependencies() {
 }
 
 #[test]
+fn install_should_apply_patched_dependencies_and_refresh_virtual_store_package() {
+    let CommandTempCwd { root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin": "1.0.0",
+            },
+        })
+        .to_string(),
+    )
+    .expect("write package.json");
+
+    pacquet_command(&workspace).with_arg("install").assert().success();
+
+    fs::create_dir_all(workspace.join("patches")).expect("create patches dir");
+    fs::write(
+        workspace.join("patches/hello-world-js-bin.patch"),
+        "\
+diff --git a/index.js b/index.js
+--- a/index.js
++++ b/index.js
+@@ -1,2 +1,2 @@
+ #!/usr/bin/env node
+-console.log('Hello world!')
++console.log('Hello patched world!')
+",
+    )
+    .expect("write patch file");
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "dependencies": {
+                "@pnpm.e2e/hello-world-js-bin": "1.0.0",
+            },
+            "pnpm": {
+                "patchedDependencies": {
+                    "@pnpm.e2e/hello-world-js-bin@1.0.0": "patches/hello-world-js-bin.patch"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("rewrite package.json");
+
+    pacquet_command(&workspace).with_arg("install").assert().success();
+
+    let installed_file =
+        find_virtual_store_file(&workspace, "@pnpm.e2e/hello-world-js-bin", "index.js");
+    let installed_text = fs::read_to_string(installed_file).expect("read patched file");
+    assert!(installed_text.contains("Hello patched world!"));
+
+    let lockfile_text =
+        fs::read_to_string(workspace.join("pnpm-lock.yaml")).expect("read pnpm lockfile");
+    assert!(lockfile_text.contains("patchedDependencies:"));
+    assert!(lockfile_text.contains("'@pnpm.e2e/hello-world-js-bin@1.0.0':"));
+    assert!(lockfile_text.contains("patches/hello-world-js-bin.patch"));
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
 fn install_should_write_modules_manifest_with_pruned_at() {
     let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();

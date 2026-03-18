@@ -40,7 +40,7 @@ impl StoreDir {
         self.root.join(Self::STORE_LAYOUT_VERSION)
     }
 
-    pub(crate) fn version_dir(&self) -> PathBuf {
+    pub fn version_dir(&self) -> PathBuf {
         self.v10()
     }
 

@@ -133,6 +133,7 @@ where
             lockfile_dir,
             lockfile_importer_id,
             workspace_packages,
+            preferred_versions: None,
             dependency_groups: list_dependency_groups(),
             frozen_lockfile: false,
             lockfile_only: false,

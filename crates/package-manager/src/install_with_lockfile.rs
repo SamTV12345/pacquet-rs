@@ -26,6 +26,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub type PreferredVersions = HashMap<String, HashSet<String>>;
+
 /// Install dependencies from package.json and update `pnpm-lock.yaml`.
 #[must_use]
 pub struct InstallWithLockfile<'a, DependencyGroupList>
@@ -41,6 +43,7 @@ where
     pub lockfile_dir: &'a Path,
     pub lockfile_importer_id: &'a str,
     pub workspace_packages: &'a WorkspacePackages,
+    pub preferred_versions: Option<&'a PreferredVersions>,
     pub dependency_groups: DependencyGroupList,
     pub lockfile_only: bool,
     pub force: bool,
@@ -78,6 +81,7 @@ where
             lockfile_dir,
             lockfile_importer_id,
             workspace_packages,
+            preferred_versions,
             dependency_groups,
             lockfile_only,
             force,
@@ -138,6 +142,7 @@ where
                                     lockfile_dir,
                                     pnpmfile,
                                     ignore_pnpmfile,
+                                    preferred_versions,
                                     &name,
                                     &local_dep_path,
                                     &normalized_ref,
@@ -172,6 +177,7 @@ where
                                     lockfile_dir,
                                     pnpmfile,
                                     ignore_pnpmfile,
+                                    preferred_versions,
                                     &name,
                                     &workspace_package.root_dir,
                                     &normalized_ref,
@@ -216,6 +222,7 @@ where
                                 ignore_pnpmfile,
                                 package_snapshots,
                                 workspace_root_peer_overrides,
+                                preferred_versions,
                                 &name,
                                 &version_range,
                                 matches!(group, DependencyGroup::Optional),
@@ -237,6 +244,7 @@ where
                                 ignore_pnpmfile,
                                 package_snapshots,
                                 workspace_root_peer_overrides,
+                                preferred_versions,
                                 &config.modules_dir,
                                 &name,
                                 &version_range,
@@ -311,8 +319,7 @@ where
                 .and_then(|lockfile| lockfile.ignored_optional_dependencies.clone()),
             overrides: runtime_lockfile_config.overrides,
             package_extensions_checksum: runtime_lockfile_config.package_extensions_checksum,
-            patched_dependencies: existing_lockfile
-                .and_then(|lockfile| lockfile.patched_dependencies.clone()),
+            patched_dependencies: crate::manifest_patched_dependencies_for_lockfile(lockfile_dir)?,
             pnpmfile_checksum: runtime_lockfile_config.pnpmfile_checksum,
             catalogs: existing_lockfile.and_then(|lockfile| lockfile.catalogs.clone()),
             time: existing_lockfile.and_then(|lockfile| lockfile.time.clone()),
@@ -373,6 +380,7 @@ where
         ignore_pnpmfile: bool,
         package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
         workspace_root_peer_overrides: &HashMap<String, String>,
+        preferred_versions: Option<&PreferredVersions>,
         name: &str,
         version_range: &str,
         optional: bool,
@@ -388,6 +396,7 @@ where
                 ignore_pnpmfile,
                 prefer_offline,
                 offline,
+                preferred_versions,
             },
             name,
             version_range,
@@ -441,6 +450,7 @@ where
                             ignore_pnpmfile,
                             package_snapshots,
                             workspace_root_peer_overrides,
+                            preferred_versions,
                             &dependency_name,
                             &dependency_version_range,
                             dependency_optional,
@@ -502,6 +512,7 @@ where
         ignore_pnpmfile: bool,
         package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
         workspace_root_peer_overrides: &HashMap<String, String>,
+        preferred_versions: Option<&PreferredVersions>,
         node_modules_dir: &Path,
         name: &str,
         version_range: &str,
@@ -581,6 +592,7 @@ where
                             ignore_pnpmfile,
                             package_snapshots,
                             workspace_root_peer_overrides,
+                            preferred_versions,
                             &virtual_node_modules_dir,
                             &dependency_name,
                             &dependency_version_range,
@@ -645,6 +657,7 @@ where
         lockfile_dir: &Path,
         pnpmfile: Option<&Path>,
         ignore_pnpmfile: bool,
+        preferred_versions: Option<&PreferredVersions>,
         dependency_name: &str,
         local_dep_path: &Path,
         normalized_ref: &str,
@@ -714,6 +727,7 @@ where
                         lockfile_dir,
                         pnpmfile,
                         ignore_pnpmfile,
+                        preferred_versions,
                         &peer_name,
                         &resolved_range,
                         prefer_offline,
@@ -773,6 +787,7 @@ where
                                 lockfile_dir,
                                 pnpmfile,
                                 ignore_pnpmfile,
+                                preferred_versions,
                                 &child_name,
                                 &local_child_path,
                                 &normalized_child_ref,
@@ -804,6 +819,7 @@ where
                                 lockfile_dir,
                                 pnpmfile,
                                 ignore_pnpmfile,
+                                preferred_versions,
                                 &child_name,
                                 &workspace_package.root_dir,
                                 &normalized_child_ref,
@@ -830,6 +846,7 @@ where
                             ignore_pnpmfile,
                             package_snapshots,
                             workspace_root_peer_overrides,
+                            preferred_versions,
                             &child_name,
                             &resolved_range,
                             false,
@@ -923,6 +940,7 @@ where
         lockfile_dir: &Path,
         pnpmfile: Option<&Path>,
         ignore_pnpmfile: bool,
+        preferred_versions: Option<&PreferredVersions>,
         name: &str,
         version_range: &str,
         prefer_offline: bool,
@@ -973,6 +991,7 @@ where
                     lockfile_dir,
                     pnpmfile,
                     ignore_pnpmfile,
+                    preferred_versions,
                     name,
                     &local_dep_path,
                     &normalized_ref,
@@ -1001,6 +1020,7 @@ where
                     lockfile_dir,
                     pnpmfile,
                     ignore_pnpmfile,
+                    preferred_versions,
                     name,
                     &workspace_package.root_dir,
                     &normalized_ref,
@@ -1022,6 +1042,7 @@ where
                     ignore_pnpmfile,
                     package_snapshots,
                     workspace_root_peer_overrides,
+                    preferred_versions,
                     name,
                     requested_range,
                     false,
@@ -1870,6 +1891,7 @@ struct ResolvePackageVersionContext<'a> {
     ignore_pnpmfile: bool,
     prefer_offline: bool,
     offline: bool,
+    preferred_versions: Option<&'a PreferredVersions>,
 }
 
 async fn resolve_package_version(
@@ -1920,17 +1942,15 @@ async fn resolve_package_version(
     )
     .await
     .map_err(|error| miette::miette!("fetch package metadata from registry: {error}"))?;
+    let preferred_versions_for_package = ctx
+        .preferred_versions
+        .and_then(|preferred_versions| preferred_versions.get(requested_name));
     let resolve = |package: &pacquet_registry::Package| {
-        if let Ok(version) = requested_range.parse::<node_semver::Version>() {
-            return package.versions.get(&version.to_string()).cloned();
-        }
-        if let Ok(tag) = requested_range.parse::<PackageTag>() {
-            return match tag {
-                PackageTag::Latest => Some(package.latest().clone()),
-                PackageTag::Version(version) => package.versions.get(&version.to_string()).cloned(),
-            };
-        }
-        package.pinned_version(requested_range).cloned()
+        resolve_package_version_from_metadata(
+            package,
+            requested_range,
+            preferred_versions_for_package,
+        )
     };
 
     let maybe_cached = if ctx.prefer_offline && !ctx.offline {
@@ -1963,6 +1983,36 @@ async fn resolve_package_version(
     .map_err(|error| {
         miette::miette!("apply .pnpmfile.cjs readPackage hook to package metadata: {error}")
     })
+}
+
+fn resolve_package_version_from_metadata(
+    package: &pacquet_registry::Package,
+    requested_range: &str,
+    preferred_versions: Option<&HashSet<String>>,
+) -> Option<PackageVersion> {
+    if let Ok(version) = requested_range.parse::<node_semver::Version>() {
+        return package.versions.get(&version.to_string()).cloned();
+    }
+    if let Ok(tag) = requested_range.parse::<PackageTag>() {
+        return match tag {
+            PackageTag::Latest => Some(package.latest().clone()),
+            PackageTag::Version(version) => package.versions.get(&version.to_string()).cloned(),
+        };
+    }
+    if let Some(preferred_versions) = preferred_versions
+        && let Ok(range) = requested_range.parse::<node_semver::Range>()
+    {
+        let mut preferred_matches = preferred_versions
+            .iter()
+            .filter_map(|version| package.versions.get(version))
+            .filter(|package_version| package_version.version.satisfies(&range))
+            .collect::<Vec<_>>();
+        preferred_matches.sort_by(|left, right| left.version.partial_cmp(&right.version).unwrap());
+        if let Some(package_version) = preferred_matches.last() {
+            return Some((*package_version).clone());
+        }
+    }
+    package.pinned_version(requested_range).cloned()
 }
 
 fn apply_workspace_root_peer_override(
@@ -3004,5 +3054,59 @@ mod tests {
                 (DependencyGroup::Dev, "bar".to_string(), "^2.0.0".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn resolve_package_version_from_metadata_prefers_matching_legacy_lockfile_version() {
+        let package: pacquet_registry::Package = serde_json::from_value(serde_json::json!({
+            "name": "foo",
+            "dist-tags": { "latest": "2.0.0" },
+            "versions": {
+                "1.0.0": {
+                    "name": "foo",
+                    "version": "1.0.0",
+                    "dist": { "tarball": "https://registry.example/foo/-/foo-1.0.0.tgz" }
+                },
+                "2.0.0": {
+                    "name": "foo",
+                    "version": "2.0.0",
+                    "dist": { "tarball": "https://registry.example/foo/-/foo-2.0.0.tgz" }
+                }
+            }
+        }))
+        .expect("parse package metadata");
+
+        let preferred = std::collections::HashSet::from(["1.0.0".to_string()]);
+        let resolved = resolve_package_version_from_metadata(&package, "*", Some(&preferred))
+            .expect("resolved version");
+
+        assert_eq!(resolved.version.to_string(), "1.0.0");
+    }
+
+    #[test]
+    fn resolve_package_version_from_metadata_falls_back_when_preferred_version_misses_range() {
+        let package: pacquet_registry::Package = serde_json::from_value(serde_json::json!({
+            "name": "foo",
+            "dist-tags": { "latest": "2.0.0" },
+            "versions": {
+                "1.0.0": {
+                    "name": "foo",
+                    "version": "1.0.0",
+                    "dist": { "tarball": "https://registry.example/foo/-/foo-1.0.0.tgz" }
+                },
+                "2.0.0": {
+                    "name": "foo",
+                    "version": "2.0.0",
+                    "dist": { "tarball": "https://registry.example/foo/-/foo-2.0.0.tgz" }
+                }
+            }
+        }))
+        .expect("parse package metadata");
+
+        let preferred = std::collections::HashSet::from(["1.0.0".to_string()]);
+        let resolved = resolve_package_version_from_metadata(&package, "^2.0.0", Some(&preferred))
+            .expect("resolved version");
+
+        assert_eq!(resolved.version.to_string(), "2.0.0");
     }
 }

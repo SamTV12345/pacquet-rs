@@ -50,6 +50,7 @@ pub enum InstallPackageFromRegistryError {
     ResolveGitSpec(#[error(not(source))] String),
     DownloadTarballToStore(#[error(source)] TarballError),
     CreateCasFiles(#[error(source)] CreateCasFilesError),
+    ApplyPatch(#[error(not(source))] String),
     SymlinkPackage(#[error(source)] SymlinkPackageError),
 }
 
@@ -237,6 +238,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
             tarball_mem_cache,
             http_client,
             config,
+            lockfile_dir,
             node_modules_dir,
             force,
             ..
@@ -251,9 +253,16 @@ impl<'a> InstallPackageFromRegistry<'a> {
             .join(&package_version.name);
         let symlink_path = node_modules_dir.join(symlink_name);
         let should_link = should_materialize_root_links(config);
+        let selected_patch = crate::selected_patch_for_package(
+            lockfile_dir,
+            &package_version.name,
+            &package_version.version.to_string(),
+        )
+        .map_err(|error| InstallPackageFromRegistryError::ApplyPatch(error.to_string()))?;
+        let has_patch = selected_patch.is_some();
 
         // Fast warm-install check: this package is already imported to the virtual store.
-        if force && save_path.exists() {
+        if (force || has_patch) && save_path.exists() {
             std::fs::remove_dir_all(&save_path).unwrap_or_else(|error| {
                 panic!(
                     "remove existing virtual store package during --force should succeed: {error}"
@@ -261,7 +270,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
             });
         }
 
-        if !force && save_path.join("package.json").is_file() {
+        if !force && !has_patch && save_path.join("package.json").is_file() {
             if should_link {
                 link_package(config.symlink, &save_path, &symlink_path)
                     .map_err(InstallPackageFromRegistryError::SymlinkPackage)?;
@@ -271,6 +280,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
         }
 
         if !force
+            && !has_patch
             && let Some(index) = config.store_dir.read_index_file(
                 package_version.dist.integrity.as_ref().expect("has integrity field"),
                 &package_id,
@@ -325,6 +335,13 @@ impl<'a> InstallPackageFromRegistry<'a> {
 
         create_cas_files(config.package_import_method, &save_path, &cas_paths)
             .map_err(InstallPackageFromRegistryError::CreateCasFiles)?;
+        crate::apply_patch_if_needed(
+            lockfile_dir,
+            &package_version.name,
+            &package_version.version.to_string(),
+            &save_path,
+        )
+        .map_err(|error| InstallPackageFromRegistryError::ApplyPatch(error.to_string()))?;
 
         if should_link {
             link_package(config.symlink, &save_path, &symlink_path)

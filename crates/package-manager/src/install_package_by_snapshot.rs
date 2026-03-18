@@ -32,6 +32,8 @@ pub enum InstallPackageBySnapshotError {
     DownloadTarball(TarballError),
     CreateVirtualDir(CreateVirtualDirError),
     #[display("{_0}")]
+    ApplyPatch(#[error(not(source))] String),
+    #[display("{_0}")]
     CopyLocalDir(#[error(not(source))] String),
 }
 
@@ -65,6 +67,19 @@ impl<'a> InstallPackageBySnapshot<'a> {
             .join(package_specifier.to_virtual_store_name())
             .join("node_modules")
             .join(package_specifier.name().to_string());
+        let selected_patch = package_specifier
+            .registry_specifier()
+            .map(|registry_specifier| {
+                crate::selected_patch_for_package(
+                    lockfile_dir,
+                    &registry_specifier.name.to_string(),
+                    &registry_specifier.suffix.version().to_string(),
+                )
+            })
+            .transpose()
+            .map_err(|error| InstallPackageBySnapshotError::ApplyPatch(error.to_string()))?
+            .flatten();
+        let has_patch = selected_patch.is_some();
 
         let directory_source = match resolution {
             LockfileResolution::Directory(directory_resolution) => {
@@ -134,7 +149,7 @@ impl<'a> InstallPackageBySnapshot<'a> {
         let package_id =
             format!("{}@{}", registry_specifier.name, registry_specifier.suffix.version());
 
-        if force && save_path.exists() {
+        if (force || has_patch) && save_path.exists() {
             std::fs::remove_dir_all(&save_path).unwrap_or_else(|error| {
                 panic!(
                     "remove existing virtual store package during --force should succeed: {error}"
@@ -144,13 +159,16 @@ impl<'a> InstallPackageBySnapshot<'a> {
 
         // Fast warm-install check: if package.json already exists in the virtual store package
         // directory, the package contents are present and can be reused.
-        if !force && save_path.join("package.json").is_file() {
+        if !force && !has_patch && save_path.join("package.json").is_file() {
             return Ok(false);
         }
 
         // pnpm skips import work when package contents are already present in virtual store.
         // Keep the check cheap by probing a representative file from the store index.
-        if !force && let Some(index) = config.store_dir.read_index_file(integrity, &package_id) {
+        if !force
+            && !has_patch
+            && let Some(index) = config.store_dir.read_index_file(integrity, &package_id)
+        {
             if package_is_already_imported(&save_path, &index.files) {
                 progress_reporter::reused();
                 progress_reporter::added();
@@ -171,6 +189,13 @@ impl<'a> InstallPackageBySnapshot<'a> {
                 }
                 .run()
                 .map_err(InstallPackageBySnapshotError::CreateVirtualDir)?;
+                crate::apply_patch_if_needed(
+                    lockfile_dir,
+                    &registry_specifier.name.to_string(),
+                    &registry_specifier.suffix.version().to_string(),
+                    &save_path,
+                )
+                .map_err(|error| InstallPackageBySnapshotError::ApplyPatch(error.to_string()))?;
                 progress_reporter::added();
                 return Ok(true);
             }
@@ -201,6 +226,13 @@ impl<'a> InstallPackageBySnapshot<'a> {
         }
         .run()
         .map_err(InstallPackageBySnapshotError::CreateVirtualDir)?;
+        crate::apply_patch_if_needed(
+            lockfile_dir,
+            &registry_specifier.name.to_string(),
+            &registry_specifier.suffix.version().to_string(),
+            &save_path,
+        )
+        .map_err(|error| InstallPackageBySnapshotError::ApplyPatch(error.to_string()))?;
         progress_reporter::added();
 
         Ok(true)

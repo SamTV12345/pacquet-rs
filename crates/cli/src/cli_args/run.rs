@@ -29,6 +29,7 @@ pub struct RunArgs {
     pub command: String,
 
     /// Any additional arguments passed after the script name.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub args: Vec<String>,
 
     /// Avoid exiting with a non-zero exit code when the script is undefined.
@@ -209,12 +210,24 @@ impl RunArgs {
     }
 }
 
-pub fn run_test(manifest_path: PathBuf, config: &Npmrc) -> miette::Result<()> {
-    run_named_script(manifest_path, "test", &[], false, false, config)
+pub fn run_test(
+    manifest_path: PathBuf,
+    passed_thru_args: &[std::ffi::OsString],
+    config: &Npmrc,
+) -> miette::Result<()> {
+    let args =
+        passed_thru_args.iter().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+    run_named_script(manifest_path, "test", &args, false, false, config)
 }
 
-pub fn run_start(manifest_path: PathBuf, config: &Npmrc) -> miette::Result<()> {
-    run_named_script(manifest_path, "start", &[], false, true, config)
+pub fn run_start(
+    manifest_path: PathBuf,
+    passed_thru_args: &[std::ffi::OsString],
+    config: &Npmrc,
+) -> miette::Result<()> {
+    let args =
+        passed_thru_args.iter().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+    run_named_script(manifest_path, "start", &args, false, true, config)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

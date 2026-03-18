@@ -152,7 +152,7 @@ impl AddArgs {
                 } else {
                     filter.iter().any(|selector| {
                         let normalized = selector.trim_start_matches("./").replace('\\', "/");
-                        normalized == importer_id || normalized == name.as_str()
+                        normalized == importer_id || normalized == *name
                     })
                 };
                 if matches {

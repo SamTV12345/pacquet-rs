@@ -21,6 +21,10 @@ use std::{
 
 #[derive(Debug, Args)]
 pub struct ExecArgs {
+    /// Run the command through the system shell.
+    #[clap(short = 'c', long = "shell-mode")]
+    pub shell_mode: bool,
+
     /// The command to run.
     pub command: String,
 
@@ -84,6 +88,7 @@ pub struct ExecArgs {
 impl ExecArgs {
     pub fn run(self, dir: PathBuf) -> miette::Result<()> {
         let ExecArgs {
+            shell_mode,
             command,
             args,
             recursive,
@@ -102,14 +107,14 @@ impl ExecArgs {
         } = self;
 
         if !recursive && filter.is_empty() && resume_from.is_none() && !report_summary {
-            execute_command_in_dir(&dir, &command, &args)?;
+            execute_command_in_dir(&dir, &command, &args, shell_mode)?;
             return Ok(());
         }
 
         let workspace_root_dir = find_workspace_root(&dir).unwrap_or_else(|| dir.clone());
         let graph = WorkspaceGraph::from_workspace_root(&workspace_root_dir);
         if graph.projects.is_empty() {
-            execute_command_in_dir(&dir, &command, &args)?;
+            execute_command_in_dir(&dir, &command, &args, shell_mode)?;
             return Ok(());
         }
 
@@ -178,6 +183,7 @@ impl ExecArgs {
                     project,
                     &command,
                     &args,
+                    shell_mode,
                     if show_prefix {
                         CommandOutputMode::Capture
                     } else {
@@ -232,7 +238,13 @@ impl ExecArgs {
             }
             let outcomes = run_targets_parallel(
                 run_targets,
-                ParallelExecOptions { command: &command, args: &args, concurrency, capture_output },
+                ParallelExecOptions {
+                    command: &command,
+                    args: &args,
+                    shell_mode,
+                    concurrency,
+                    capture_output,
+                },
             );
             for outcome in outcomes {
                 if capture_output {
@@ -271,7 +283,12 @@ impl ExecArgs {
     }
 }
 
-fn execute_command_in_dir(dir: &Path, command: &str, args: &[String]) -> miette::Result<()> {
+fn execute_command_in_dir(
+    dir: &Path,
+    command: &str,
+    args: &[String],
+    shell_mode: bool,
+) -> miette::Result<()> {
     let extra_env = command_extra_env(dir)?;
     execute_command(ExecuteCommand {
         pkg_root: dir,
@@ -279,7 +296,7 @@ fn execute_command_in_dir(dir: &Path, command: &str, args: &[String]) -> miette:
         program: command,
         args,
         extra_env: &extra_env,
-        shell_mode: false,
+        shell_mode,
     })
     .into_diagnostic()?;
     Ok(())
@@ -295,6 +312,7 @@ fn execute_command_in_project(
     project: &WorkspaceProject,
     command: &str,
     args: &[String],
+    shell_mode: bool,
     output_mode: CommandOutputMode,
 ) -> miette::Result<LifecycleScriptOutput> {
     let extra_env = command_extra_env(&project.package_dir)?;
@@ -304,7 +322,7 @@ fn execute_command_in_project(
         program: command,
         args,
         extra_env: &extra_env,
-        shell_mode: false,
+        shell_mode,
     };
     match output_mode {
         CommandOutputMode::Inherit => {
@@ -656,6 +674,7 @@ struct ParallelExecOutcome {
 struct ParallelExecOptions<'a> {
     command: &'a str,
     args: &'a [String],
+    shell_mode: bool,
     concurrency: usize,
     capture_output: bool,
 }
@@ -677,6 +696,7 @@ fn run_targets_parallel(
         let should_stop = Arc::clone(&should_stop);
         let command = opts.command.to_string();
         let args = opts.args.to_vec();
+        let shell_mode = opts.shell_mode;
         let capture_output = opts.capture_output;
         workers.push(thread::spawn(move || {
             loop {
@@ -710,6 +730,7 @@ fn run_targets_parallel(
                     &project,
                     &command,
                     &args,
+                    shell_mode,
                     if capture_output {
                         CommandOutputMode::Capture
                     } else {

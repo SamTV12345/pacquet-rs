@@ -118,7 +118,7 @@ impl RemoveArgs {
                 } else {
                     filter.iter().any(|selector| {
                         let normalized = selector.trim_start_matches("./").replace('\\', "/");
-                        normalized == importer_id || normalized == name.as_str()
+                        normalized == importer_id || normalized == *name
                     })
                 };
                 if recursive || matches {
@@ -138,7 +138,7 @@ impl RemoveArgs {
                             || workspace_packages.iter().any(|(name, info)| {
                                 to_lockfile_importer_id(lockfile_dir, &info.root_dir)
                                     == *importer_id
-                                    && normalized == name.as_str()
+                                    && normalized == *name
                             })
                             || (manifest_path == manifest.path() && normalized == ".")
                     })
@@ -186,6 +186,7 @@ impl RemoveArgs {
                     lockfile_dir,
                     lockfile_importer_id: &importer_id,
                     workspace_packages,
+                    preferred_versions: None,
                     dependency_groups: [
                         DependencyGroup::Prod,
                         DependencyGroup::Dev,
@@ -254,6 +255,7 @@ impl RemoveArgs {
             lockfile_dir,
             lockfile_importer_id,
             workspace_packages,
+            preferred_versions: None,
             dependency_groups: [
                 DependencyGroup::Prod,
                 DependencyGroup::Dev,

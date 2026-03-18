@@ -17,6 +17,7 @@ mod link_file;
 mod link_policy;
 mod lockfile_check;
 mod modules_manifest;
+mod patching;
 mod pnp_manifest;
 mod pnpmfile;
 mod progress_reporter;
@@ -45,6 +46,7 @@ pub use link_file::*;
 pub(crate) use link_policy::*;
 pub(crate) use lockfile_check::*;
 pub(crate) use modules_manifest::*;
+pub(crate) use patching::*;
 pub(crate) use pnp_manifest::*;
 pub(crate) use pnpmfile::*;
 pub use progress_reporter::{

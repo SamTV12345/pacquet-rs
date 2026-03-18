@@ -5,9 +5,9 @@ use pacquet_executor::{ExecuteLifecycleScript, execute_lifecycle_script};
 use pacquet_lockfile::Lockfile;
 use pacquet_npmrc::{NodeLinker, Npmrc};
 use pacquet_package_manager::{
-    Install, InstallFrozenWorkspace, InstallReporter, WorkspaceFrozenInstallTarget,
-    WorkspacePackages, current_lockfile_for_installers, finish_progress_reporter,
-    start_progress_reporter, warn_progress_reporter,
+    Install, InstallFrozenWorkspace, InstallReporter, PreferredVersions,
+    WorkspaceFrozenInstallTarget, WorkspacePackages, current_lockfile_for_installers,
+    finish_progress_reporter, start_progress_reporter, warn_progress_reporter,
 };
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_store_dir::StoreDir;
@@ -123,6 +123,14 @@ pub struct InstallArgs {
 
 impl InstallArgs {
     pub async fn run(self, state: State) -> miette::Result<()> {
+        self.run_with_preferred_versions(state, None).await
+    }
+
+    pub(crate) async fn run_with_preferred_versions(
+        self,
+        state: State,
+        preferred_versions: Option<PreferredVersions>,
+    ) -> miette::Result<()> {
         let State {
             tarball_mem_cache,
             http_client,
@@ -341,6 +349,7 @@ impl InstallArgs {
                     lockfile_dir,
                     lockfile_importer_id: &importer_id,
                     workspace_packages,
+                    preferred_versions: preferred_versions.as_ref(),
                     dependency_groups: dependency_groups.iter().copied(),
                     frozen_lockfile,
                     lockfile_only,
@@ -473,7 +482,10 @@ fn apply_workspace_filters(
     Ok(selected)
 }
 
-fn run_install_lifecycle_scripts(manifest_path: PathBuf, config: &Npmrc) -> miette::Result<()> {
+pub(crate) fn run_install_lifecycle_scripts(
+    manifest_path: PathBuf,
+    config: &Npmrc,
+) -> miette::Result<()> {
     let manifest = PackageManifest::from_path(manifest_path.clone())
         .wrap_err("reload package.json for lifecycle scripts")?;
     let package_dir =

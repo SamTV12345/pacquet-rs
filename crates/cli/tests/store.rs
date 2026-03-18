@@ -90,6 +90,103 @@ fn store_status_should_succeed_for_unmodified_store() {
 }
 
 #[test]
+fn cat_file_should_print_cas_file_contents_for_integrity_hash() {
+    let CommandTempCwd { root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let store_dir = npmrc_info.store_dir.clone();
+    let mock_instance = npmrc_info.mock_instance;
+
+    pacquet_command(&workspace)
+        .with_args(["add", "@pnpm.e2e/hello-world-js-bin@1.0.0"])
+        .assert()
+        .success();
+
+    let index_path = first_index_path(&store_dir);
+    let index_file = fs::File::open(&index_path).expect("open index file");
+    let index: PackageFilesIndex = serde_json::from_reader(index_file).expect("parse index");
+    let file_info = index.files.values().next().expect("file entry in index");
+    let executable = (file_info.mode & 0o111) != 0;
+    let cas_path = pacquet_store_dir::StoreDir::new(&store_dir)
+        .cas_file_path_by_integrity(&file_info.integrity, executable)
+        .expect("resolve cas path");
+    let expected = fs::read_to_string(&cas_path).expect("read cas file");
+
+    let output = pacquet_command(&workspace)
+        .with_args(["cat-file", &file_info.integrity])
+        .output()
+        .expect("run pacquet cat-file");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+
+    drop((root, mock_instance));
+}
+
+#[test]
+fn cat_index_should_print_matching_store_index_json() {
+    let CommandTempCwd { root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let store_dir = npmrc_info.store_dir.clone();
+    let mock_instance = npmrc_info.mock_instance;
+
+    pacquet_command(&workspace)
+        .with_args(["add", "@pnpm.e2e/hello-world-js-bin@1.0.0"])
+        .assert()
+        .success();
+
+    let index_path = first_index_path(&store_dir);
+    let index_file = fs::File::open(&index_path).expect("open index file");
+    let index: PackageFilesIndex = serde_json::from_reader(index_file).expect("parse index");
+    let package_id = format!(
+        "{}@{}",
+        index.name.as_deref().expect("index name"),
+        index.version.as_deref().expect("index version")
+    );
+
+    let output = pacquet_command(&workspace)
+        .with_args(["cat-index", &package_id])
+        .output()
+        .expect("run pacquet cat-index");
+    assert!(output.status.success());
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse cat-index output");
+    assert_eq!(value["name"], index.name.unwrap());
+    assert_eq!(value["version"], index.version.unwrap());
+
+    drop((root, mock_instance));
+}
+
+#[test]
+fn find_hash_should_list_packages_that_reference_the_hash() {
+    let CommandTempCwd { root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let store_dir = npmrc_info.store_dir.clone();
+    let mock_instance = npmrc_info.mock_instance;
+
+    pacquet_command(&workspace)
+        .with_args(["add", "@pnpm.e2e/hello-world-js-bin@1.0.0"])
+        .assert()
+        .success();
+
+    let index_path = first_index_path(&store_dir);
+    let index_file = fs::File::open(&index_path).expect("open index file");
+    let index: PackageFilesIndex = serde_json::from_reader(index_file).expect("parse index");
+    let file_info = index.files.values().next().expect("file entry in index");
+
+    let output = pacquet_command(&workspace)
+        .with_args(["find-hash", &file_info.integrity])
+        .output()
+        .expect("run pacquet find-hash");
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(index.name.as_deref().expect("index name")));
+    assert!(stdout.contains(index.version.as_deref().expect("index version")));
+
+    drop((root, mock_instance));
+}
+
+#[test]
 fn store_status_should_fail_when_store_entry_is_missing() {
     let CommandTempCwd { root, workspace, npmrc_info, .. } =
         CommandTempCwd::init().add_mocked_registry();
