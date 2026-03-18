@@ -18,6 +18,20 @@ fn pacquet_command(workspace: &Path) -> Command {
     Command::cargo_bin("pacquet").expect("find pacquet binary").with_current_dir(workspace)
 }
 
+fn normalize_reported_path(path: &str) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        return path
+            .strip_prefix("/private/var/")
+            .map_or_else(|| path.to_string(), |suffix| format!("/var/{suffix}"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        path.to_string()
+    }
+}
+
 fn write_bin_success_script(workspace: &Path, name: &str) {
     let bin_dir = workspace.join("node_modules/.bin");
     fs::create_dir_all(&bin_dir).expect("create node_modules/.bin");
@@ -419,8 +433,10 @@ fn root_should_print_local_node_modules_dir() {
     let CommandTempCwd { root, workspace, .. } = CommandTempCwd::init();
 
     let assert = pacquet_command(&workspace).with_arg("root").assert().success();
-    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).trim().to_string();
-    assert_eq!(stdout, workspace.join("node_modules").display().to_string());
+    let stdout =
+        normalize_reported_path(String::from_utf8_lossy(&assert.get_output().stdout).trim());
+    let expected = normalize_reported_path(&workspace.join("node_modules").display().to_string());
+    assert_eq!(stdout, expected);
 
     drop(root);
 }
