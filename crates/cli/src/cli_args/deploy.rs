@@ -70,9 +70,11 @@ impl DeployArgs {
             current_dir.join(self.target_dir)
         };
 
-        let source_dir = fs::canonicalize(&source_dir)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("canonicalize {}", source_dir.display()))?;
+        let source_dir = normalize_fs_path(
+            fs::canonicalize(&source_dir)
+                .into_diagnostic()
+                .wrap_err_with(|| format!("canonicalize {}", source_dir.display()))?,
+        );
         if target_dir.starts_with(&source_dir) {
             miette::bail!("Deploy target must not be inside the source package directory");
         }
@@ -238,7 +240,8 @@ fn collect_importers(
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| lockfile_dir.to_path_buf());
-        let canonical_dir = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        let canonical_dir =
+            normalize_fs_path(fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone()));
         let name = manifest
             .value()
             .get("name")
@@ -393,7 +396,7 @@ fn rewrite_package_snapshot(
         LockfileResolution::Directory(resolution) => {
             let source_dir = resolve_local_target(lockfile_dir, &resolution.directory);
             LockfileResolution::Directory(DirectoryResolution {
-                directory: to_relative_path(target_dir, &source_dir),
+                directory: normalized_relative_path(target_dir, &source_dir),
             })
         }
         _ => snapshot.resolution.clone(),
@@ -532,7 +535,7 @@ fn project_snapshot_to_package_snapshot(
 
     PackageSnapshot {
         resolution: LockfileResolution::Directory(DirectoryResolution {
-            directory: to_relative_path(target_dir, project_dir),
+            directory: normalized_relative_path(target_dir, project_dir),
         }),
         id: None,
         name: None,
@@ -600,7 +603,7 @@ fn rewrite_patched_dependencies(
                 _ => return None,
             };
             let absolute = resolve_local_target(lockfile_dir, &path);
-            Some((key.clone(), YamlValue::String(to_relative_path(target_dir, &absolute))))
+            Some((key.clone(), YamlValue::String(normalized_relative_path(target_dir, &absolute))))
         })
         .collect::<HashMap<_, _>>();
     (!rewritten.is_empty()).then_some(rewritten)
@@ -864,12 +867,15 @@ fn rewrite_local_reference(
         return reference.to_string();
     };
     let resolved_path = resolve_local_target(base_dir, path_part);
-    let canonical_resolved = fs::canonicalize(&resolved_path).unwrap_or(resolved_path.clone());
-    if canonical_resolved == *selected_project_dir {
+    let canonical_resolved =
+        normalize_fs_path(fs::canonicalize(&resolved_path).unwrap_or(resolved_path.clone()));
+    let target_dir = normalize_fs_path(target_dir.to_path_buf());
+    let selected_project_dir = normalize_fs_path(selected_project_dir.to_path_buf());
+    if canonical_resolved == selected_project_dir {
         return format!("link:.{suffix}");
     }
     let protocol = if use_file_protocol { "file:" } else { protocol };
-    format!("{protocol}{}{suffix}", to_relative_path(target_dir, &canonical_resolved))
+    format!("{protocol}{}{suffix}", normalized_relative_path(&target_dir, &canonical_resolved))
 }
 
 fn split_local_reference(reference: &str) -> Option<(&str, &str, &str)> {
@@ -890,7 +896,7 @@ fn resolve_local_target(base_dir: &Path, value: &str) -> PathBuf {
 }
 
 fn file_reference_to_target(target_dir: &Path, source_dir: &Path) -> String {
-    format!("file:{}", to_relative_path(target_dir, source_dir))
+    format!("file:{}", normalized_relative_path(target_dir, source_dir))
 }
 
 fn to_relative_path(from: &Path, to: &Path) -> String {
@@ -916,6 +922,24 @@ fn to_relative_path(from: &Path, to: &Path) -> String {
     }
 
     if relative_parts.is_empty() { ".".to_string() } else { relative_parts.join("/") }
+}
+
+fn normalized_relative_path(from: &Path, to: &Path) -> String {
+    let from = normalize_fs_path(from.to_path_buf());
+    let to = normalize_fs_path(to.to_path_buf());
+    to_relative_path(&from, &to)
+}
+
+fn normalize_fs_path(path: PathBuf) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let alias_prefix = Path::new("/private/var");
+        if let Ok(stripped) = path.strip_prefix(alias_prefix) {
+            return Path::new("/var").join(stripped);
+        }
+    }
+
+    path
 }
 
 fn to_importer_id(workspace_root: &Path, project_dir: &Path) -> String {
