@@ -1,7 +1,6 @@
 use crate::cli_args::bin::global_bin_dir;
 use clap::Args;
-use miette::IntoDiagnostic;
-use std::{env, path::PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Args)]
 pub struct RootArgs {
@@ -11,13 +10,27 @@ pub struct RootArgs {
 }
 
 impl RootArgs {
-    pub fn run(self, _dir: PathBuf) -> miette::Result<()> {
+    pub fn run(self, dir: PathBuf) -> miette::Result<()> {
         let root = if self.global {
             global_bin_dir()?.join("global").join("node_modules")
         } else {
-            env::current_dir().into_diagnostic()?.join("node_modules")
+            normalize_path(&dir).join("node_modules")
         };
         println!("{}", root.display());
         Ok(())
     }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
