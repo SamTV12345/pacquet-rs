@@ -165,7 +165,35 @@ fn local_link_target(
 
     let relative =
         link.strip_prefix("link:").or_else(|| link.strip_prefix("file:")).unwrap_or(link);
-    (config.modules_dir.parent().unwrap_or(config.modules_dir.as_path()).join(relative), false)
+    let base_target =
+        config.modules_dir.parent().unwrap_or(config.modules_dir.as_path()).join(relative);
+    (link_target_with_publish_config_directory(&base_target), false)
+}
+
+pub(crate) fn link_target_with_publish_config_directory(target: &Path) -> PathBuf {
+    let manifest_path = target.join("package.json");
+    let Ok(content) = fs::read_to_string(&manifest_path) else {
+        return target.to_path_buf();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return target.to_path_buf();
+    };
+    let Some(publish_config) = value.get("publishConfig") else {
+        return target.to_path_buf();
+    };
+    let link_directory =
+        publish_config.get("linkDirectory").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    if !link_directory {
+        return target.to_path_buf();
+    }
+    let Some(directory) = publish_config.get("directory").and_then(serde_json::Value::as_str)
+    else {
+        return target.to_path_buf();
+    };
+    if directory.is_empty() {
+        return target.to_path_buf();
+    }
+    target.join(directory)
 }
 
 fn materialize_virtual_store_package(

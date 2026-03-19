@@ -20,6 +20,7 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 | ✅    | prefer_symlinked_executables | defaults to true for `node-linker=hoisted`; POSIX `.bin` entries symlink non-Node executables instead of wrapping them, and `run` exports pnpm-style `NODE_PATH`/verify-deps env overrides |
 | ✅    | virtual_store_dir     |                                     |
 | ✅    | package_import_method | `auto`, `copy`, `hardlink`, `clone`, and `clone-or-copy` wired for store imports plus local directory materialization/relink; local source `node_modules` is ignored during import (`clone` depends on reflink support) |
+| ✅    | link_workspace_packages | defaults to pnpm-style `false`; non-`workspace:` ranges resolve from the registry unless this is `true` (direct deps) or `deep` (transitive too), while explicit `workspace:` specs still resolve locally |
 | ✅    | disable_relink_local_dir_deps | skips refreshing/relinking already-installed local directory dependencies on reinstall, including injected workspace deps, hardlinked local dirs, and frozen installs |
 | ✅    | modules_cache_max_age | stale orphan virtual-store entries are pruned using pnpm-like `node_modules/.modules.yaml` `prunedAt` age gating |
 

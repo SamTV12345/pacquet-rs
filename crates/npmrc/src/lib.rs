@@ -21,9 +21,9 @@ use crate::custom_deserializer::{
     default_hoist_pattern, default_modules_cache_max_age, default_modules_dir,
     default_network_concurrency, default_peers_suffix_max_length, default_public_hoist_pattern,
     default_registry, default_store_dir, default_virtual_store_dir, deserialize_bool,
-    deserialize_optional_bool, deserialize_optional_pathbuf, deserialize_pathbuf,
-    deserialize_registry, deserialize_store_dir, deserialize_string_vec, deserialize_u16,
-    deserialize_u64,
+    deserialize_link_workspace_packages, deserialize_optional_bool, deserialize_optional_pathbuf,
+    deserialize_pathbuf, deserialize_registry, deserialize_store_dir, deserialize_string_vec,
+    deserialize_u16, deserialize_u64,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -48,6 +48,24 @@ pub enum NodeLinker {
     /// Yarn Berry. It is recommended to also set symlink setting to false when using pnp as
     /// your linker.
     Pnp,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LinkWorkspacePackages {
+    #[default]
+    False,
+    Direct,
+    Deep,
+}
+
+impl LinkWorkspacePackages {
+    pub fn links_at_depth(self, depth: usize) -> bool {
+        match self {
+            Self::False => false,
+            Self::Direct => depth == 0,
+            Self::Deep => true,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -242,6 +260,15 @@ pub struct Npmrc {
     /// Controls whether workspace packages are injected by default.
     #[serde(default, alias = "inject_workspace_packages", deserialize_with = "deserialize_bool")]
     pub inject_workspace_packages: bool,
+
+    /// Controls whether dependencies are linked from the workspace without using the
+    /// `workspace:` protocol. `true` links direct dependencies, `deep` links transitively too.
+    #[serde(
+        default,
+        alias = "link_workspace_packages",
+        deserialize_with = "deserialize_link_workspace_packages"
+    )]
+    pub link_workspace_packages: LinkWorkspacePackages,
 
     /// When enabled, injected workspace dependencies may be deduplicated back to links when the
     /// target workspace project already provides a compatible dependency set.
@@ -842,6 +869,7 @@ mod tests {
         assert!(value.prefer_frozen_lockfile);
         assert!(!value.exclude_links_from_lockfile);
         assert!(!value.inject_workspace_packages);
+        assert_eq!(value.link_workspace_packages, LinkWorkspacePackages::False);
         assert!(value.dedupe_injected_deps);
         assert!(!value.disable_relink_local_dir_deps);
         assert_eq!(value.peers_suffix_max_length, 1000);
@@ -891,6 +919,16 @@ mod tests {
         assert!(!value.dedupe_injected_deps);
         assert!(value.disable_relink_local_dir_deps);
         assert_eq!(value.peers_suffix_max_length, 77);
+    }
+
+    #[test]
+    pub fn parse_link_workspace_packages() {
+        let direct: Npmrc = serde_ini::from_str("link-workspace-packages=true").unwrap();
+        let deep: Npmrc = serde_ini::from_str("link-workspace-packages=deep").unwrap();
+        let disabled: Npmrc = serde_ini::from_str("link-workspace-packages=false").unwrap();
+        assert_eq!(direct.link_workspace_packages, LinkWorkspacePackages::Direct);
+        assert_eq!(deep.link_workspace_packages, LinkWorkspacePackages::Deep);
+        assert_eq!(disabled.link_workspace_packages, LinkWorkspacePackages::False);
     }
 
     #[test]
@@ -1004,12 +1042,13 @@ mod tests {
     #[test]
     pub fn parse_local_dependency_and_lockfile_bool_settings_from_underscore_keys() {
         let value: Npmrc = serde_ini::from_str(
-            "lockfile_include_tarball_url=true\nexclude_links_from_lockfile=true\ninject_workspace_packages=true\ndedupe_injected_deps=false\ndisable_relink_local_dir_deps=true\npeers_suffix_max_length=77",
+            "lockfile_include_tarball_url=true\nexclude_links_from_lockfile=true\ninject_workspace_packages=true\nlink_workspace_packages=deep\ndedupe_injected_deps=false\ndisable_relink_local_dir_deps=true\npeers_suffix_max_length=77",
         )
         .unwrap();
         assert!(value.lockfile_include_tarball_url);
         assert!(value.exclude_links_from_lockfile);
         assert!(value.inject_workspace_packages);
+        assert_eq!(value.link_workspace_packages, LinkWorkspacePackages::Deep);
         assert!(!value.dedupe_injected_deps);
         assert!(value.disable_relink_local_dir_deps);
         assert_eq!(value.peers_suffix_max_length, 77);

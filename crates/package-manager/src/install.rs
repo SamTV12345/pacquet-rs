@@ -146,6 +146,17 @@ impl<'a> InstallFrozenWorkspace<'a> {
 
         let (filtered_targets, filtered_packages, skipped) =
             filter_installable_workspace_targets(targets, packages, &dependency_groups);
+        let selected_importer_ids = filtered_targets
+            .iter()
+            .map(|target| target.importer_id.clone())
+            .collect::<HashSet<_>>();
+        let (filtered_packages, skipped) = preserve_current_packages_for_unselected_importers(
+            shared_config,
+            filtered_packages,
+            skipped,
+            &selected_importer_ids,
+            &dependency_groups,
+        );
 
         if force
             || filtered_targets.iter().any(|target| {
@@ -605,6 +616,57 @@ fn filter_installable_workspace_targets(
     (filtered_targets, Some(filtered_packages), skipped)
 }
 
+fn preserve_current_packages_for_unselected_importers(
+    config: &Npmrc,
+    filtered_packages: Option<HashMap<DependencyPath, PackageSnapshot>>,
+    skipped: Vec<String>,
+    selected_importer_ids: &HashSet<String>,
+    dependency_groups: &[DependencyGroup],
+) -> (Option<HashMap<DependencyPath, PackageSnapshot>>, Vec<String>) {
+    let Some(mut merged_packages) = filtered_packages else {
+        return (None, skipped);
+    };
+
+    let Some(current_lockfile) =
+        Lockfile::load_from_path(&config.virtual_store_dir.join("lock.yaml")).ok().flatten()
+    else {
+        return (Some(merged_packages), skipped);
+    };
+
+    let current_importer_ids = match &current_lockfile.project_snapshot {
+        RootProjectSnapshot::Single(_) => HashSet::from([".".to_string()]),
+        RootProjectSnapshot::Multi(snapshot) => snapshot.importers.keys().cloned().collect(),
+    };
+    let extra_importer_ids =
+        current_importer_ids.difference(selected_importer_ids).cloned().collect::<HashSet<_>>();
+    if extra_importer_ids.is_empty() {
+        return (Some(merged_packages), skipped);
+    }
+
+    let existing_skipped = read_modules_manifest(&config.modules_dir)
+        .map(|manifest| manifest.skipped().iter().cloned().collect::<HashSet<_>>())
+        .unwrap_or_default();
+    let preserved_lockfile = current_lockfile_for_installers(
+        &current_lockfile,
+        &extra_importer_ids,
+        dependency_groups,
+        &existing_skipped,
+    );
+
+    if let Some(current_packages) = preserved_lockfile.packages {
+        for (dependency_path, snapshot) in current_packages {
+            merged_packages.entry(dependency_path).or_insert(snapshot);
+        }
+    }
+
+    let mut merged_skipped = skipped.into_iter().collect::<HashSet<_>>();
+    merged_skipped.extend(existing_skipped);
+    let mut merged_skipped = merged_skipped.into_iter().collect::<Vec<_>>();
+    merged_skipped.sort();
+
+    (Some(merged_packages), merged_skipped)
+}
+
 pub fn current_lockfile_for_installers(
     lockfile: &Lockfile,
     importer_ids: &std::collections::HashSet<String>,
@@ -650,6 +712,63 @@ pub fn current_lockfile_for_installers(
     }
 
     Lockfile { project_snapshot, packages: Some(filtered_packages), ..lockfile.clone() }
+}
+
+pub fn current_lockfile_for_installers_preserving_unselected_importers(
+    lockfile: &Lockfile,
+    config: &Npmrc,
+    importer_ids: &HashSet<String>,
+    dependency_groups: &[DependencyGroup],
+    skipped: &HashSet<String>,
+) -> Lockfile {
+    let mut filtered =
+        current_lockfile_for_installers(lockfile, importer_ids, dependency_groups, skipped);
+
+    let Some(existing_current_lockfile) =
+        Lockfile::load_from_path(&config.virtual_store_dir.join("lock.yaml")).ok().flatten()
+    else {
+        return filtered;
+    };
+
+    let existing_importer_ids = match &existing_current_lockfile.project_snapshot {
+        RootProjectSnapshot::Single(_) => HashSet::from([".".to_string()]),
+        RootProjectSnapshot::Multi(snapshot) => snapshot.importers.keys().cloned().collect(),
+    };
+    let extra_importer_ids =
+        existing_importer_ids.difference(importer_ids).cloned().collect::<HashSet<_>>();
+    if extra_importer_ids.is_empty() {
+        return filtered;
+    }
+
+    let existing_skipped = read_modules_manifest(&config.modules_dir)
+        .map(|manifest| manifest.skipped().iter().cloned().collect::<HashSet<_>>())
+        .unwrap_or_default();
+    let preserved = current_lockfile_for_installers(
+        &existing_current_lockfile,
+        &extra_importer_ids,
+        dependency_groups,
+        &existing_skipped,
+    );
+
+    match (&mut filtered.project_snapshot, preserved.project_snapshot) {
+        (
+            RootProjectSnapshot::Multi(filtered_snapshot),
+            RootProjectSnapshot::Multi(preserved_snapshot),
+        ) => {
+            filtered_snapshot.importers.extend(preserved_snapshot.importers);
+        }
+        (RootProjectSnapshot::Single(_), RootProjectSnapshot::Single(_)) => {}
+        _ => {}
+    }
+
+    if let Some(preserved_packages) = preserved.packages {
+        let filtered_packages = filtered.packages.get_or_insert_with(HashMap::new);
+        for (dependency_path, snapshot) in preserved_packages {
+            filtered_packages.entry(dependency_path).or_insert(snapshot);
+        }
+    }
+
+    filtered
 }
 
 fn direct_dependency_paths(
@@ -2141,6 +2260,240 @@ mod tests {
             ".",
             &[DependencyGroup::Prod],
         ));
+    }
+
+    #[test]
+    fn preserve_current_packages_for_unselected_importers_keeps_current_workspace_subset_packages()
+    {
+        use pacquet_lockfile::ResolvedDependencyMap;
+
+        let dir = tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let virtual_store_dir = modules_dir.join(".pnpm");
+        fs::create_dir_all(&virtual_store_dir).expect("create virtual store dir");
+
+        let mut config = Npmrc::new();
+        config.modules_dir = modules_dir.clone();
+        config.virtual_store_dir = virtual_store_dir.clone();
+        config.store_dir = pacquet_store_dir::StoreDir::new(dir.path().join("store"));
+        write_modules_manifest(
+            &modules_dir,
+            &config,
+            &[DependencyGroup::Prod],
+            &["skipped-from-current".to_string()],
+            None,
+            None,
+        )
+        .expect("write modules manifest");
+
+        let app_dep_path =
+            DependencyPath::registry(None, "dep-a@1.0.0".parse().expect("app dep path"));
+        let lib_dep_path =
+            DependencyPath::registry(None, "dep-b@1.0.0".parse().expect("lib dep path"));
+
+        let registry_snapshot = |integrity: &str| PackageSnapshot {
+            resolution: pacquet_lockfile::LockfileResolution::Registry(
+                pacquet_lockfile::RegistryResolution {
+                    integrity: integrity.parse().expect("integrity"),
+                },
+            ),
+            id: None,
+            name: None,
+            version: None,
+            engines: None,
+            cpu: None,
+            os: None,
+            libc: None,
+            deprecated: None,
+            has_bin: None,
+            prepare: None,
+            requires_build: None,
+            bundled_dependencies: None,
+            peer_dependencies: None,
+            peer_dependencies_meta: None,
+            dependencies: None,
+            optional_dependencies: None,
+            transitive_peer_dependencies: None,
+            dev: None,
+            optional: None,
+        };
+
+        let current_lockfile = Lockfile {
+            lockfile_version: "9.0".parse().expect("lockfile version"),
+            settings: None,
+            project_snapshot: RootProjectSnapshot::Multi(pacquet_lockfile::MultiProjectSnapshot {
+                importers: HashMap::from([
+                    (
+                        "packages/app".to_string(),
+                        pacquet_lockfile::ProjectSnapshot {
+                            dependencies: Some(ResolvedDependencyMap::from([(
+                                "dep-a".parse().expect("dep-a alias"),
+                                pacquet_lockfile::ResolvedDependencySpec {
+                                    specifier: "1.0.0".to_string(),
+                                    version: ResolvedDependencyVersion::PkgVerPeer(
+                                        "1.0.0".parse().expect("dep-a version"),
+                                    ),
+                                },
+                            )])),
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        "packages/lib".to_string(),
+                        pacquet_lockfile::ProjectSnapshot {
+                            dependencies: Some(ResolvedDependencyMap::from([(
+                                "dep-b".parse().expect("dep-b alias"),
+                                pacquet_lockfile::ResolvedDependencySpec {
+                                    specifier: "1.0.0".to_string(),
+                                    version: ResolvedDependencyVersion::PkgVerPeer(
+                                        "1.0.0".parse().expect("dep-b version"),
+                                    ),
+                                },
+                            )])),
+                            ..Default::default()
+                        },
+                    ),
+                ]),
+            }),
+            packages: Some(HashMap::from([
+                (app_dep_path.clone(), registry_snapshot("sha512-Bw==")),
+                (lib_dep_path.clone(), registry_snapshot("sha512-CA==")),
+            ])),
+            never_built_dependencies: None,
+            overrides: None,
+            package_extensions_checksum: None,
+            patched_dependencies: None,
+            pnpmfile_checksum: None,
+            catalogs: None,
+            time: None,
+            ignored_optional_dependencies: None,
+            extra_fields: Default::default(),
+        };
+        current_lockfile
+            .save_to_path(&virtual_store_dir.join("lock.yaml"))
+            .expect("write current lockfile");
+
+        let (packages, skipped) = preserve_current_packages_for_unselected_importers(
+            &config,
+            Some(HashMap::from([(app_dep_path.clone(), registry_snapshot("sha512-Bw=="))])),
+            Vec::new(),
+            &HashSet::from(["packages/app".to_string()]),
+            &[DependencyGroup::Prod],
+        );
+
+        let packages = packages.expect("merged packages");
+        assert!(packages.contains_key(&app_dep_path));
+        assert!(packages.contains_key(&lib_dep_path));
+        assert_eq!(skipped, vec!["skipped-from-current".to_string()]);
+    }
+
+    #[test]
+    fn current_lockfile_for_installers_contains_only_selected_importer_packages() {
+        use pacquet_lockfile::ResolvedDependencyMap;
+
+        let dep_a_path =
+            DependencyPath::registry(None, "dep-a@1.0.0".parse().expect("dep-a dependency path"));
+        let dep_b_path =
+            DependencyPath::registry(None, "dep-b@1.0.0".parse().expect("dep-b dependency path"));
+
+        let registry_snapshot = |integrity: &str| PackageSnapshot {
+            resolution: pacquet_lockfile::LockfileResolution::Registry(
+                pacquet_lockfile::RegistryResolution {
+                    integrity: integrity.parse().expect("integrity"),
+                },
+            ),
+            id: None,
+            name: None,
+            version: None,
+            engines: None,
+            cpu: None,
+            os: None,
+            libc: None,
+            deprecated: None,
+            has_bin: None,
+            prepare: None,
+            requires_build: None,
+            bundled_dependencies: None,
+            peer_dependencies: None,
+            peer_dependencies_meta: None,
+            dependencies: None,
+            optional_dependencies: None,
+            transitive_peer_dependencies: None,
+            dev: None,
+            optional: None,
+        };
+
+        let lockfile = Lockfile {
+            lockfile_version: "9.0".parse().expect("lockfile version"),
+            settings: None,
+            project_snapshot: RootProjectSnapshot::Multi(pacquet_lockfile::MultiProjectSnapshot {
+                importers: HashMap::from([
+                    (
+                        "packages/project-1".to_string(),
+                        pacquet_lockfile::ProjectSnapshot {
+                            dependencies: Some(ResolvedDependencyMap::from([(
+                                "dep-a".parse().expect("dep-a alias"),
+                                pacquet_lockfile::ResolvedDependencySpec {
+                                    specifier: "1.0.0".to_string(),
+                                    version: ResolvedDependencyVersion::PkgVerPeer(
+                                        "1.0.0".parse().expect("dep-a version"),
+                                    ),
+                                },
+                            )])),
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        "packages/project-2".to_string(),
+                        pacquet_lockfile::ProjectSnapshot {
+                            dependencies: Some(ResolvedDependencyMap::from([(
+                                "dep-b".parse().expect("dep-b alias"),
+                                pacquet_lockfile::ResolvedDependencySpec {
+                                    specifier: "1.0.0".to_string(),
+                                    version: ResolvedDependencyVersion::PkgVerPeer(
+                                        "1.0.0".parse().expect("dep-b version"),
+                                    ),
+                                },
+                            )])),
+                            ..Default::default()
+                        },
+                    ),
+                ]),
+            }),
+            packages: Some(HashMap::from([
+                (dep_a_path.clone(), registry_snapshot("sha512-Bw==")),
+                (dep_b_path.clone(), registry_snapshot("sha512-CA==")),
+            ])),
+            never_built_dependencies: None,
+            overrides: None,
+            package_extensions_checksum: None,
+            patched_dependencies: None,
+            pnpmfile_checksum: None,
+            catalogs: None,
+            time: None,
+            ignored_optional_dependencies: None,
+            extra_fields: Default::default(),
+        };
+
+        let filtered = current_lockfile_for_installers(
+            &lockfile,
+            &HashSet::from(["packages/project-2".to_string()]),
+            &[DependencyGroup::Prod],
+            &HashSet::new(),
+        );
+
+        let RootProjectSnapshot::Multi(filtered_snapshot) = &filtered.project_snapshot else {
+            panic!("expected multi-importer current lockfile");
+        };
+        assert_eq!(
+            filtered_snapshot.importers.keys().collect::<Vec<_>>(),
+            vec![&"packages/project-2".to_string()]
+        );
+
+        let filtered_packages = filtered.packages.expect("filtered packages");
+        assert_eq!(filtered_packages.len(), 1);
+        assert!(filtered_packages.contains_key(&dep_b_path));
+        assert!(!filtered_packages.contains_key(&dep_a_path));
     }
 
     #[test]

@@ -150,6 +150,21 @@ where
     bool::from_str(&s).map(Some).map_err(de::Error::custom)
 }
 
+pub fn deserialize_link_workspace_packages<'de, D>(
+    deserializer: D,
+) -> Result<crate::LinkWorkspacePackages, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    match s.trim() {
+        "true" => Ok(crate::LinkWorkspacePackages::Direct),
+        "false" => Ok(crate::LinkWorkspacePackages::False),
+        "deep" => Ok(crate::LinkWorkspacePackages::Deep),
+        other => Err(de::Error::custom(format!("expected true, false, or deep, got {other}"))),
+    }
+}
+
 pub fn deserialize_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,

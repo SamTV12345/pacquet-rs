@@ -4,7 +4,9 @@ use clap::Args;
 use miette::Context;
 use pacquet_lockfile::Lockfile;
 use pacquet_npmrc::Npmrc;
-use pacquet_package_manager::{Add, current_lockfile_for_installers};
+use pacquet_package_manager::{
+    Add, current_lockfile_for_installers_preserving_unselected_importers,
+};
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -220,12 +222,14 @@ impl AddArgs {
             if config.lockfile
                 && let Some(lockfile) = current_lockfile.as_ref()
             {
-                let current_lockfile = current_lockfile_for_installers(
-                    lockfile,
-                    &selected_importers,
-                    &[DependencyGroup::Prod, DependencyGroup::Dev, DependencyGroup::Optional],
-                    &skipped_dep_paths,
-                );
+                let current_lockfile =
+                    current_lockfile_for_installers_preserving_unselected_importers(
+                        lockfile,
+                        config,
+                        &selected_importers,
+                        &[DependencyGroup::Prod, DependencyGroup::Dev, DependencyGroup::Optional],
+                        &skipped_dep_paths,
+                    );
                 current_lockfile
                     .save_to_path(&config.virtual_store_dir.join("lock.yaml"))
                     .wrap_err("write node_modules/.pnpm/lock.yaml after add")?;
@@ -271,12 +275,14 @@ impl AddArgs {
             let current_lockfile =
                 Lockfile::load_from_dir(lockfile_dir).wrap_err("reload lockfile after add")?;
             if let Some(lockfile) = current_lockfile.as_ref() {
-                let current_lockfile = current_lockfile_for_installers(
-                    lockfile,
-                    &HashSet::from([lockfile_importer_id.clone()]),
-                    &[DependencyGroup::Prod, DependencyGroup::Dev, DependencyGroup::Optional],
-                    &skipped.into_iter().collect::<HashSet<_>>(),
-                );
+                let current_lockfile =
+                    current_lockfile_for_installers_preserving_unselected_importers(
+                        lockfile,
+                        config,
+                        &HashSet::from([lockfile_importer_id.clone()]),
+                        &[DependencyGroup::Prod, DependencyGroup::Dev, DependencyGroup::Optional],
+                        &skipped.into_iter().collect::<HashSet<_>>(),
+                    );
                 current_lockfile
                     .save_to_path(&config.virtual_store_dir.join("lock.yaml"))
                     .wrap_err("write node_modules/.pnpm/lock.yaml after add")?;

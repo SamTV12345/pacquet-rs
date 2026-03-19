@@ -2,8 +2,10 @@ use crate::{
     InstallPackageFromRegistry, ResolvedPackages, WorkspacePackages,
     collect_runtime_lockfile_config, fetch_package_from_registry_and_cache,
     fetch_package_with_metadata_cache, is_git_spec, is_tarball_spec, link_package,
-    package_dependency_map, read_cached_package_from_config, resolve_package_version_from_git_spec,
+    link_target_with_publish_config_directory, package_dependency_map,
+    read_cached_package_from_config, resolve_package_version_from_git_spec,
     resolve_package_version_from_tarball_spec, resolve_workspace_dependency,
+    resolve_workspace_dependency_by_plain_spec,
 };
 use async_recursion::async_recursion;
 use dashmap::DashMap;
@@ -95,6 +97,7 @@ where
         let package_snapshots = DashMap::<DependencyPath, PackageSnapshot>::new();
         let mut resolved_direct_dependencies = HashMap::<(String, String), ResolvedPackage>::new();
         let workspace_root_peer_overrides = workspace_root_peer_overrides(manifest.path());
+        let workspace_root_overrides = workspace_root_overrides(manifest.path());
 
         let hooked_manifest = crate::apply_read_package_hook_to_manifest(
             lockfile_dir,
@@ -113,8 +116,14 @@ where
             .map(|(group, name, version_range)| {
                 let package_snapshots = &package_snapshots;
                 let workspace_root_peer_overrides = &workspace_root_peer_overrides;
+                let workspace_root_overrides = &workspace_root_overrides;
                 async move {
                     let key = (name.clone(), version_range.clone());
+                    let version_range = apply_workspace_root_override(
+                        workspace_root_overrides,
+                        &name,
+                        &version_range,
+                    );
 
                     let resolved_package =
                         if let Some((resolved_package, local_dep_path, should_symlink)) =
@@ -136,6 +145,7 @@ where
                                     http_client,
                                     config,
                                     package_snapshots,
+                                    workspace_root_overrides,
                                     workspace_packages,
                                     workspace_root_peer_overrides,
                                     manifest.path(),
@@ -152,9 +162,13 @@ where
                                 .await
                                 .wrap_err_with(|| format!("snapshot local dependency `{name}`"))?
                             }
-                        } else if let Some(workspace_package) =
-                            resolve_workspace_dependency(workspace_packages, &name, &version_range)
-                        {
+                        } else if let Some(workspace_package) = try_resolve_workspace_dependency(
+                            config,
+                            workspace_packages,
+                            &name,
+                            &version_range,
+                            0,
+                        ) {
                             if should_inject_workspace_dependency(
                                 manifest,
                                 &name,
@@ -171,6 +185,7 @@ where
                                     http_client,
                                     config,
                                     package_snapshots,
+                                    workspace_root_overrides,
                                     workspace_packages,
                                     workspace_root_peer_overrides,
                                     manifest.path(),
@@ -191,16 +206,15 @@ where
                             } else {
                                 if !lockfile_only {
                                     let symlink_path = config.modules_dir.join(&name);
-                                    link_package(
-                                        config.symlink,
+                                    let symlink_target = link_target_with_publish_config_directory(
                                         &workspace_package.root_dir,
-                                        &symlink_path,
-                                    )
-                                    .map_err(|error| {
-                                        miette::miette!(
-                                            "symlink workspace package `{name}`: {error}"
-                                        )
-                                    })?;
+                                    );
+                                    link_package(config.symlink, &symlink_target, &symlink_path)
+                                        .map_err(|error| {
+                                            miette::miette!(
+                                                "symlink workspace package `{name}`: {error}"
+                                            )
+                                        })?;
                                 }
 
                                 let project_dir =
@@ -221,6 +235,8 @@ where
                                 pnpmfile,
                                 ignore_pnpmfile,
                                 package_snapshots,
+                                workspace_packages,
+                                workspace_root_overrides,
                                 workspace_root_peer_overrides,
                                 preferred_versions,
                                 &name,
@@ -243,6 +259,8 @@ where
                                 pnpmfile,
                                 ignore_pnpmfile,
                                 package_snapshots,
+                                workspace_packages,
+                                workspace_root_overrides,
                                 workspace_root_peer_overrides,
                                 &config.modules_dir,
                                 &name,
@@ -378,6 +396,8 @@ where
         pnpmfile: Option<&Path>,
         ignore_pnpmfile: bool,
         package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
+        workspace_packages: &WorkspacePackages,
+        workspace_root_overrides: &HashMap<String, String>,
         workspace_root_peer_overrides: &HashMap<String, String>,
         preferred_versions: Option<&PreferredVersions>,
         name: &str,
@@ -440,6 +460,29 @@ where
                             &dependency_name,
                             &dependency_version_range,
                         );
+                        let dependency_version_range = apply_workspace_root_override(
+                            workspace_root_overrides,
+                            &dependency_name,
+                            &dependency_version_range,
+                        );
+                        if let Some(workspace_package) = try_resolve_workspace_dependency(
+                            config,
+                            workspace_packages,
+                            &dependency_name,
+                            &dependency_version_range,
+                            1,
+                        ) {
+                            let relative =
+                                to_relative_path(lockfile_dir, &workspace_package.root_dir);
+                            return Ok::<_, miette::Report>((
+                                dependency_optional,
+                                dependency_name,
+                                ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
+                                    "link:{}",
+                                    relative.replace('\\', "/")
+                                ))),
+                            ));
+                        }
                         let resolved_dependency = Self::resolve_and_snapshot_package(
                             resolved_packages,
                             http_client,
@@ -448,6 +491,8 @@ where
                             pnpmfile,
                             ignore_pnpmfile,
                             package_snapshots,
+                            workspace_packages,
+                            workspace_root_overrides,
                             workspace_root_peer_overrides,
                             preferred_versions,
                             &dependency_name,
@@ -510,6 +555,8 @@ where
         pnpmfile: Option<&Path>,
         ignore_pnpmfile: bool,
         package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
+        workspace_packages: &WorkspacePackages,
+        workspace_root_overrides: &HashMap<String, String>,
         workspace_root_peer_overrides: &HashMap<String, String>,
         node_modules_dir: &Path,
         name: &str,
@@ -580,6 +627,29 @@ where
                             &dependency_name,
                             &dependency_version_range,
                         );
+                        let dependency_version_range = apply_workspace_root_override(
+                            workspace_root_overrides,
+                            &dependency_name,
+                            &dependency_version_range,
+                        );
+                        if let Some(workspace_package) = try_resolve_workspace_dependency(
+                            config,
+                            workspace_packages,
+                            &dependency_name,
+                            &dependency_version_range,
+                            1,
+                        ) {
+                            let relative =
+                                to_relative_path(lockfile_dir, &workspace_package.root_dir);
+                            return Ok::<_, miette::Report>((
+                                dependency_optional,
+                                dependency_name,
+                                ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
+                                    "link:{}",
+                                    relative.replace('\\', "/")
+                                ))),
+                            ));
+                        }
                         let resolved_dependency = Self::install_and_snapshot_package(
                             tarball_mem_cache,
                             resolved_packages,
@@ -589,6 +659,8 @@ where
                             pnpmfile,
                             ignore_pnpmfile,
                             package_snapshots,
+                            workspace_packages,
+                            workspace_root_overrides,
                             workspace_root_peer_overrides,
                             &virtual_node_modules_dir,
                             &dependency_name,
@@ -648,6 +720,7 @@ where
         http_client: &ThrottledClient,
         config: &'static Npmrc,
         package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
+        workspace_root_overrides: &HashMap<String, String>,
         workspace_packages: &WorkspacePackages,
         workspace_root_peer_overrides: &HashMap<String, String>,
         current_manifest_path: &Path,
@@ -713,11 +786,17 @@ where
                         &peer_name,
                         &peer_range,
                     );
+                    let resolved_range = apply_workspace_root_override(
+                        workspace_root_overrides,
+                        &peer_name,
+                        &resolved_range,
+                    );
                     let resolved_peer = Self::resolve_local_peer_dependency(
                         resolved_packages,
                         http_client,
                         config,
                         package_snapshots,
+                        workspace_root_overrides,
                         workspace_packages,
                         workspace_root_peer_overrides,
                         current_manifest_path,
@@ -778,6 +857,7 @@ where
                                 http_client,
                                 config,
                                 package_snapshots,
+                                workspace_root_overrides,
                                 workspace_packages,
                                 workspace_root_peer_overrides,
                                 current_manifest_path,
@@ -795,10 +875,12 @@ where
                             return Ok((child_name, resolved_local, true));
                         }
 
-                        if let Some(workspace_package) = resolve_workspace_dependency(
+                        if let Some(workspace_package) = try_resolve_workspace_dependency(
+                            config,
                             workspace_packages,
                             &child_name,
                             &child_version_range,
+                            1,
                         ) {
                             let normalized_child_ref = normalized_local_file_reference(
                                 lockfile_dir,
@@ -810,6 +892,7 @@ where
                                 http_client,
                                 config,
                                 package_snapshots,
+                                workspace_root_overrides,
                                 workspace_packages,
                                 workspace_root_peer_overrides,
                                 current_manifest_path,
@@ -834,6 +917,11 @@ where
                             &child_name,
                             &child_version_range,
                         );
+                        let resolved_range = apply_workspace_root_override(
+                            workspace_root_overrides,
+                            &child_name,
+                            &resolved_range,
+                        );
                         let resolved_dependency = Self::resolve_and_snapshot_package(
                             resolved_packages,
                             http_client,
@@ -842,6 +930,8 @@ where
                             pnpmfile,
                             ignore_pnpmfile,
                             package_snapshots,
+                            workspace_packages,
+                            workspace_root_overrides,
                             workspace_root_peer_overrides,
                             preferred_versions,
                             &child_name,
@@ -931,6 +1021,7 @@ where
         http_client: &ThrottledClient,
         config: &'static Npmrc,
         package_snapshots: &DashMap<DependencyPath, PackageSnapshot>,
+        workspace_root_overrides: &HashMap<String, String>,
         workspace_packages: &WorkspacePackages,
         workspace_root_peer_overrides: &HashMap<String, String>,
         current_manifest_path: &Path,
@@ -946,10 +1037,17 @@ where
         let available_specs = read_dependency_specs(current_manifest_path);
         let requested_range =
             available_specs.get(name).map(String::as_str).unwrap_or(version_range);
+        let requested_range =
+            apply_workspace_root_override(workspace_root_overrides, name, requested_range);
 
         if available_specs.contains_key(name)
-            && let Some(workspace_package) =
-                resolve_workspace_dependency(workspace_packages, name, requested_range)
+            && let Some(workspace_package) = try_resolve_workspace_dependency(
+                config,
+                workspace_packages,
+                name,
+                &requested_range,
+                1,
+            )
         {
             let relative = to_relative_path(lockfile_dir, &workspace_package.root_dir);
             return Ok(Some(ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
@@ -959,7 +1057,7 @@ where
         }
 
         if let Some((_, local_dep_path, should_symlink)) =
-            resolve_local_dependency(current_manifest_path, requested_range)
+            resolve_local_dependency(current_manifest_path, &requested_range)
         {
             let protocol = if should_symlink { "link:" } else { "file:" };
             let normalized_ref = format!(
@@ -982,6 +1080,7 @@ where
                     http_client,
                     config,
                     package_snapshots,
+                    workspace_root_overrides,
                     workspace_packages,
                     workspace_root_peer_overrides,
                     current_manifest_path,
@@ -1000,32 +1099,13 @@ where
         }
 
         if let Some(workspace_package) =
-            resolve_workspace_dependency(workspace_packages, name, requested_range)
+            try_resolve_workspace_dependency(config, workspace_packages, name, &requested_range, 1)
         {
-            let normalized_ref =
-                normalized_local_file_reference(lockfile_dir, &workspace_package.root_dir)
-                    .replace('\\', "/");
-            return Ok(Some(
-                Self::snapshot_local_directory_package(
-                    resolved_packages,
-                    http_client,
-                    config,
-                    package_snapshots,
-                    workspace_packages,
-                    workspace_root_peer_overrides,
-                    current_manifest_path,
-                    lockfile_dir,
-                    pnpmfile,
-                    ignore_pnpmfile,
-                    preferred_versions,
-                    name,
-                    &workspace_package.root_dir,
-                    &normalized_ref,
-                    prefer_offline,
-                    offline,
-                )
-                .await?,
-            ));
+            let relative = to_relative_path(lockfile_dir, &workspace_package.root_dir);
+            return Ok(Some(ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
+                "link:{}",
+                relative.replace('\\', "/")
+            )))));
         }
 
         if available_specs.contains_key(name) || config.auto_install_peers {
@@ -1038,10 +1118,12 @@ where
                     pnpmfile,
                     ignore_pnpmfile,
                     package_snapshots,
+                    workspace_packages,
+                    workspace_root_overrides,
                     workspace_root_peer_overrides,
                     preferred_versions,
                     name,
-                    requested_range,
+                    &requested_range,
                     false,
                     prefer_offline,
                     offline,
@@ -1107,7 +1189,12 @@ where
             optional_dependencies,
             dev_dependencies,
             dependencies_meta: project_dependencies_meta(manifest),
-            publish_directory: None,
+            publish_directory: manifest
+                .value()
+                .get("publishConfig")
+                .and_then(|publish_config| publish_config.get("directory"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string),
         }
     }
 
@@ -1252,8 +1339,15 @@ fn insert_snapshot_dependency(
                 );
             }
         }
-        ResolvedDependencyVersion::Link(_) => {
-            panic!("workspace links are not supported in transitive dependencies")
+        ResolvedDependencyVersion::Link(link) => {
+            if optional {
+                optional_dependencies.insert(dependency_name.to_string(), link);
+            } else {
+                dependencies.insert(
+                    dependency_name.parse().expect("registry package name"),
+                    PackageSnapshotDependency::Link(link),
+                );
+            }
         }
     }
 }
@@ -1346,9 +1440,13 @@ fn dedupe_injected_dependency_map(
             continue;
         }
 
-        let Some(workspace_package) =
-            resolve_workspace_dependency(ctx.workspace_packages, dependency_name, specifier)
-        else {
+        let Some(workspace_package) = try_resolve_workspace_dependency(
+            ctx.config,
+            ctx.workspace_packages,
+            dependency_name,
+            specifier,
+            0,
+        ) else {
             continue;
         };
 
@@ -1778,6 +1876,22 @@ fn should_inject_workspace_dependency(
         || dependency_meta_injected_json(manifest.value().get("dependenciesMeta"), dependency_name)
 }
 
+fn try_resolve_workspace_dependency<'a>(
+    config: &Npmrc,
+    workspace_packages: &'a WorkspacePackages,
+    dependency_name: &str,
+    specifier: &str,
+    depth: usize,
+) -> Option<&'a crate::WorkspacePackageInfo> {
+    if specifier.starts_with("workspace:") {
+        return resolve_workspace_dependency(workspace_packages, dependency_name, specifier);
+    }
+    if !config.link_workspace_packages.links_at_depth(depth) {
+        return None;
+    }
+    resolve_workspace_dependency_by_plain_spec(workspace_packages, dependency_name, specifier)
+}
+
 fn project_dependencies_meta(manifest: &PackageManifest) -> Option<serde_yaml::Value> {
     let value = manifest.value().get("dependenciesMeta")?;
     if value.as_object().is_some_and(|object| object.is_empty()) {
@@ -2031,6 +2145,14 @@ fn apply_workspace_root_peer_override(
     workspace_root_peer_overrides.get(name).cloned().unwrap_or_else(|| requested_range.to_string())
 }
 
+fn apply_workspace_root_override(
+    workspace_root_overrides: &HashMap<String, String>,
+    name: &str,
+    requested_range: &str,
+) -> String {
+    workspace_root_overrides.get(name).cloned().unwrap_or_else(|| requested_range.to_string())
+}
+
 fn workspace_root_peer_overrides(manifest_path: &Path) -> HashMap<String, String> {
     let Some(start_dir) = manifest_path.parent() else {
         return HashMap::new();
@@ -2039,6 +2161,42 @@ fn workspace_root_peer_overrides(manifest_path: &Path) -> HashMap<String, String
         return HashMap::new();
     };
     read_dependency_specs(&workspace_root.join("package.json"))
+}
+
+fn workspace_root_overrides(manifest_path: &Path) -> HashMap<String, String> {
+    let Some(start_dir) = manifest_path.parent() else {
+        return HashMap::new();
+    };
+    let Some(workspace_root) = find_workspace_root(start_dir) else {
+        return HashMap::new();
+    };
+
+    let mut overrides = HashMap::new();
+    if let Ok(text) = fs::read_to_string(workspace_root.join("package.json"))
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&text)
+        && let Some(package_overrides) = value
+            .get("pnpm")
+            .and_then(|pnpm| pnpm.get("overrides"))
+            .and_then(serde_json::Value::as_object)
+    {
+        overrides.extend(package_overrides.iter().filter_map(|(name, spec)| {
+            spec.as_str().map(|spec| (name.to_string(), spec.to_string()))
+        }));
+    }
+
+    if let Ok(text) = fs::read_to_string(workspace_root.join("pnpm-workspace.yaml"))
+        && let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&text)
+        && let Some(workspace_overrides) = value
+            .as_mapping()
+            .and_then(|root| root.get(serde_yaml::Value::String("overrides".to_string())))
+            .and_then(serde_yaml::Value::as_mapping)
+    {
+        overrides.extend(workspace_overrides.iter().filter_map(|(name, spec)| {
+            Some((name.as_str()?.to_string(), spec.as_str()?.to_string()))
+        }));
+    }
+
+    overrides
 }
 
 fn find_workspace_root(start_dir: &Path) -> Option<PathBuf> {

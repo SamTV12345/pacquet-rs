@@ -6,12 +6,13 @@ use pacquet_lockfile::Lockfile;
 use pacquet_npmrc::{NodeLinker, Npmrc};
 use pacquet_package_manager::{
     Install, InstallFrozenWorkspace, InstallReporter, PreferredVersions,
-    WorkspaceFrozenInstallTarget, WorkspacePackages, current_lockfile_for_installers,
-    finish_progress_reporter, start_progress_reporter, warn_progress_reporter,
+    WorkspaceFrozenInstallTarget, WorkspacePackages,
+    current_lockfile_for_installers_preserving_unselected_importers, finish_progress_reporter,
+    link_bins_for_manifest, start_progress_reporter, warn_progress_reporter,
 };
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_store_dir::StoreDir;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Args)]
@@ -211,9 +212,14 @@ impl InstallArgs {
         let install_target_entries = install_targets.into_iter().collect::<Vec<_>>();
         let mut skipped_dep_paths = HashSet::<String>::new();
         let mut current_lockfile = lockfile.clone();
+        let config_project_dir =
+            manifest.path().parent().map(Path::to_path_buf).unwrap_or_else(|| lockfile_dir.clone());
+        let current_lockfile_virtual_store_dir =
+            effective_virtual_store_dir(config, lockfile_dir, &config_project_dir);
+
         if lockfile_only
             && reporter != InstallReporter::Silent
-            && config.virtual_store_dir.join("lock.yaml").exists()
+            && current_lockfile_virtual_store_dir.join("lock.yaml").exists()
         {
             warn_progress_reporter(
                 "`node_modules` is present. Lockfile only installation will make it out-of-date",
@@ -230,6 +236,7 @@ impl InstallArgs {
             })?;
             let root_config: &'static Npmrc = config_for_project(
                 config,
+                lockfile_dir,
                 lockfile_dir,
                 shamefully_hoist,
                 prefer_frozen_lockfile_override,
@@ -251,6 +258,7 @@ impl InstallArgs {
                     .unwrap_or_else(|| lockfile_dir.to_path_buf());
                 let target_config: &'static Npmrc = config_for_project(
                     config,
+                    lockfile_dir,
                     &project_dir,
                     shamefully_hoist,
                     prefer_frozen_lockfile_override,
@@ -300,25 +308,8 @@ impl InstallArgs {
             .await;
             let _ = finish_progress_reporter(result.is_ok());
             skipped_dep_paths.extend(result?);
-
-            for (_, manifest_path) in &install_target_entries {
-                if !ignore_scripts && !lockfile_only {
-                    let project_dir = manifest_path
-                        .parent()
-                        .map(Path::to_path_buf)
-                        .unwrap_or_else(|| lockfile_dir.to_path_buf());
-                    let target_config: &'static Npmrc = config_for_project(
-                        config,
-                        &project_dir,
-                        shamefully_hoist,
-                        prefer_frozen_lockfile_override,
-                    )
-                    .leak();
-                    run_install_lifecycle_scripts(manifest_path.clone(), target_config)?;
-                }
-            }
         } else {
-            for (importer_id, manifest_path) in install_target_entries {
+            for (importer_id, manifest_path) in &install_target_entries {
                 let workspace_manifest = if manifest_path == manifest.path() {
                     None
                 } else {
@@ -334,6 +325,7 @@ impl InstallArgs {
                     .unwrap_or_else(|| lockfile_dir.to_path_buf());
                 let target_config: &'static Npmrc = config_for_project(
                     config,
+                    lockfile_dir,
                     &project_dir,
                     shamefully_hoist,
                     prefer_frozen_lockfile_override,
@@ -347,7 +339,7 @@ impl InstallArgs {
                     manifest: target_manifest,
                     lockfile: current_lockfile.as_ref(),
                     lockfile_dir,
-                    lockfile_importer_id: &importer_id,
+                    lockfile_importer_id: importer_id,
                     workspace_packages,
                     preferred_versions: preferred_versions.as_ref(),
                     dependency_groups: dependency_groups.iter().copied(),
@@ -368,13 +360,6 @@ impl InstallArgs {
                 .await?;
                 skipped_dep_paths.extend(skipped);
 
-                if !ignore_scripts && !lockfile_only {
-                    run_install_lifecycle_scripts(
-                        target_manifest.path().to_path_buf(),
-                        target_config,
-                    )?;
-                }
-
                 current_lockfile = if should_reload_lockfile_after_importer(
                     config.lockfile,
                     frozen_lockfile,
@@ -388,19 +373,43 @@ impl InstallArgs {
             }
         }
 
+        if !ignore_scripts && !lockfile_only {
+            run_install_lifecycle_scripts_for_targets(
+                &install_target_entries,
+                config,
+                lockfile_dir,
+                workspace_packages,
+                shamefully_hoist,
+                prefer_frozen_lockfile_override,
+                &dependency_groups,
+            )?;
+        }
+
         if config.lockfile
             && !lockfile_only
             && let Some(lockfile) = current_lockfile.as_ref()
         {
-            let current_lockfile = current_lockfile_for_installers(
+            let current_lockfile = current_lockfile_for_installers_preserving_unselected_importers(
                 lockfile,
+                config,
                 &selected_importers,
                 &dependency_groups,
                 &skipped_dep_paths,
             );
             current_lockfile
-                .save_to_path(&config.virtual_store_dir.join("lock.yaml"))
+                .save_to_path(&current_lockfile_virtual_store_dir.join("lock.yaml"))
                 .wrap_err("write node_modules/.pnpm/lock.yaml")?;
+        }
+
+        if !ignore_scripts && !lockfile_only && multiple_targets {
+            relink_workspace_bins_after_lifecycle(
+                &install_target_entries,
+                config,
+                lockfile_dir,
+                shamefully_hoist,
+                prefer_frozen_lockfile_override,
+                &dependency_groups,
+            )?;
         }
 
         Ok(())
@@ -522,8 +531,21 @@ pub(crate) fn run_install_lifecycle_scripts(
     Ok(())
 }
 
+fn effective_virtual_store_dir(config: &Npmrc, lockfile_dir: &Path, project_dir: &Path) -> PathBuf {
+    let default_project_virtual_store_dir = config.modules_dir.join(".pnpm");
+    if project_dir != lockfile_dir && config.virtual_store_dir == default_project_virtual_store_dir
+    {
+        lockfile_dir.join("node_modules/.pnpm")
+    } else if config.virtual_store_dir.is_absolute() {
+        config.virtual_store_dir.clone()
+    } else {
+        lockfile_dir.join(&config.virtual_store_dir)
+    }
+}
+
 fn config_for_project(
     config: &Npmrc,
+    lockfile_dir: &Path,
     project_dir: &Path,
     shamefully_hoist: bool,
     prefer_frozen_lockfile_override: Option<bool>,
@@ -531,6 +553,7 @@ fn config_for_project(
     let mut next = config.clone();
     next.store_dir = StoreDir::new(config.store_dir.display().to_string());
     next.modules_dir = project_dir.join("node_modules");
+    next.virtual_store_dir = effective_virtual_store_dir(config, lockfile_dir, project_dir);
     next.node_linker = match config.node_linker {
         NodeLinker::Isolated => NodeLinker::Isolated,
         NodeLinker::Hoisted => NodeLinker::Hoisted,
@@ -545,6 +568,166 @@ fn config_for_project(
     }
     next.apply_derived_settings();
     next
+}
+
+fn run_install_lifecycle_scripts_for_targets(
+    install_target_entries: &[(String, PathBuf)],
+    config: &Npmrc,
+    lockfile_dir: &Path,
+    workspace_packages: &WorkspacePackages,
+    shamefully_hoist: bool,
+    prefer_frozen_lockfile_override: Option<bool>,
+    dependency_groups: &[DependencyGroup],
+) -> miette::Result<()> {
+    let ordered_manifests =
+        order_install_targets_for_lifecycle_scripts(install_target_entries, workspace_packages)?;
+    for manifest_path in ordered_manifests {
+        let project_dir = manifest_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| lockfile_dir.to_path_buf());
+        let target_config: &'static Npmrc = config_for_project(
+            config,
+            lockfile_dir,
+            &project_dir,
+            shamefully_hoist,
+            prefer_frozen_lockfile_override,
+        )
+        .leak();
+        run_install_lifecycle_scripts(manifest_path, target_config)?;
+        if install_target_entries.len() > 1 {
+            relink_workspace_bins_after_lifecycle(
+                install_target_entries,
+                config,
+                lockfile_dir,
+                shamefully_hoist,
+                prefer_frozen_lockfile_override,
+                dependency_groups,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn order_install_targets_for_lifecycle_scripts(
+    install_target_entries: &[(String, PathBuf)],
+    workspace_packages: &WorkspacePackages,
+) -> miette::Result<Vec<PathBuf>> {
+    struct LifecycleTarget {
+        manifest_path: PathBuf,
+        dependencies: Vec<PathBuf>,
+    }
+
+    fn normalize_existing_dir(path: PathBuf) -> PathBuf {
+        std::fs::canonicalize(&path).unwrap_or(path)
+    }
+
+    let mut targets = Vec::<LifecycleTarget>::new();
+    let mut target_index_by_dir = std::collections::HashMap::<PathBuf, usize>::new();
+
+    for (_, manifest_path) in install_target_entries {
+        let manifest = PackageManifest::from_path(manifest_path.clone())
+            .wrap_err_with(|| format!("reload workspace manifest: {}", manifest_path.display()))?;
+        let project_dir =
+            manifest.path().parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        let project_dir = normalize_existing_dir(project_dir);
+        let mut dependencies = Vec::new();
+        for (name, specifier) in manifest.dependencies([
+            DependencyGroup::Prod,
+            DependencyGroup::Dev,
+            DependencyGroup::Optional,
+        ]) {
+            if let Some(relative) = specifier.strip_prefix("link:") {
+                dependencies.push(normalize_existing_dir(project_dir.join(relative)));
+                continue;
+            }
+            if specifier.starts_with("workspace:")
+                && let Some(info) = workspace_packages.get(name)
+            {
+                dependencies.push(normalize_existing_dir(info.root_dir.clone()));
+            }
+        }
+        let index = targets.len();
+        target_index_by_dir.insert(project_dir.clone(), index);
+        targets
+            .push(LifecycleTarget { manifest_path: manifest.path().to_path_buf(), dependencies });
+    }
+
+    let mut adjacency = vec![Vec::<usize>::new(); targets.len()];
+    let mut indegree = vec![0usize; targets.len()];
+    for (index, target) in targets.iter().enumerate() {
+        let mut seen = HashSet::new();
+        for dependency_dir in &target.dependencies {
+            let Some(&dependency_index) = target_index_by_dir.get(dependency_dir) else {
+                continue;
+            };
+            if dependency_index == index || !seen.insert(dependency_index) {
+                continue;
+            }
+            adjacency[dependency_index].push(index);
+            indegree[index] += 1;
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for (index, degree) in indegree.iter().enumerate() {
+        if *degree == 0 {
+            queue.push_back(index);
+        }
+    }
+
+    let mut ordered_indices = Vec::with_capacity(targets.len());
+    while let Some(index) = queue.pop_front() {
+        ordered_indices.push(index);
+        for &dependent in &adjacency[index] {
+            indegree[dependent] -= 1;
+            if indegree[dependent] == 0 {
+                queue.push_back(dependent);
+            }
+        }
+    }
+
+    if ordered_indices.len() != targets.len() {
+        for index in 0..targets.len() {
+            if !ordered_indices.contains(&index) {
+                ordered_indices.push(index);
+            }
+        }
+    }
+
+    Ok(ordered_indices.into_iter().map(|index| targets[index].manifest_path.clone()).collect())
+}
+
+fn relink_workspace_bins_after_lifecycle(
+    install_target_entries: &[(String, PathBuf)],
+    config: &Npmrc,
+    lockfile_dir: &Path,
+    shamefully_hoist: bool,
+    prefer_frozen_lockfile_override: Option<bool>,
+    dependency_groups: &[DependencyGroup],
+) -> miette::Result<()> {
+    for (_, manifest_path) in install_target_entries {
+        let manifest = PackageManifest::from_path(manifest_path.clone())
+            .wrap_err_with(|| format!("reload workspace manifest: {}", manifest_path.display()))?;
+        let project_dir = manifest
+            .path()
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| lockfile_dir.to_path_buf());
+        let target_config: &'static Npmrc = config_for_project(
+            config,
+            lockfile_dir,
+            &project_dir,
+            shamefully_hoist,
+            prefer_frozen_lockfile_override,
+        )
+        .leak();
+        link_bins_for_manifest(target_config, &manifest, dependency_groups.iter().copied())
+            .wrap_err_with(|| format!("refresh bins for {}", manifest_path.display()))?;
+    }
+
+    Ok(())
 }
 
 fn to_lockfile_importer_id(workspace_root: &Path, project_dir: &Path) -> String {

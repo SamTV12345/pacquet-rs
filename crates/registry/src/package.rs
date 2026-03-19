@@ -57,7 +57,9 @@ impl Package {
     }
 
     pub fn pinned_version(&self, version_range: &str) -> Option<&PackageVersion> {
-        let range: node_semver::Range = version_range.parse().unwrap(); // TODO: this step should have happened in PackageManifest
+        let Ok(range) = version_range.parse::<node_semver::Range>() else {
+            return None;
+        };
         let mut satisfied_versions = self
             .versions
             .values()
@@ -144,6 +146,37 @@ mod tests {
 
         assert_eq!(version.serialize(true), "3.2.1");
         assert_eq!(version.serialize(false), "^3.2.1");
+    }
+
+    #[test]
+    fn pinned_version_returns_none_for_non_semver_range() {
+        let package = Package {
+            name: "pkg".to_string(),
+            dist_tags: HashMap::new(),
+            versions: HashMap::from([(
+                "1.0.0".to_string(),
+                PackageVersion {
+                    name: "pkg".to_string(),
+                    version: Version::parse("1.0.0").expect("parse version"),
+                    dist: PackageDistribution::default(),
+                    dependencies: None,
+                    optional_dependencies: None,
+                    dev_dependencies: None,
+                    peer_dependencies: None,
+                    engines: None,
+                    cpu: None,
+                    os: None,
+                    libc: None,
+                    deprecated: None,
+                    bin: None,
+                    homepage: None,
+                    repository: None,
+                },
+            )]),
+            mutex: Arc::new(Mutex::new(0)),
+        };
+
+        assert!(package.pinned_version("workspace:*").is_none());
     }
 
     #[tokio::test]

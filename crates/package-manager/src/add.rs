@@ -101,6 +101,7 @@ where
                 http_client,
                 workspace_packages,
                 &project_dir,
+                lockfile,
                 package,
                 save_exact,
                 workspace_only,
@@ -197,11 +198,13 @@ fn print_add_summary(
     let _ = writeln!(out, "Done in {elapsed_ms}ms using pacquet v{}", env!("CARGO_PKG_VERSION"));
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_package_spec(
     config: &Npmrc,
     http_client: &ThrottledClient,
     workspace_packages: &WorkspacePackages,
     project_dir: &Path,
+    lockfile: Option<&Lockfile>,
     package: &str,
     save_exact: bool,
     workspace_only: bool,
@@ -271,18 +274,24 @@ async fn resolve_package_spec(
     let registry = config.registry_for_package_name(package_name);
     let version_range = match requested_spec {
         None => {
-            let auth_header =
-                config.auth_header_for_url(&format!("{registry}{package_name}/latest"));
-            let latest_version = PackageVersion::fetch_from_registry(
-                package_name,
-                PackageTag::Latest,
-                http_client,
-                &registry,
-                auth_header.as_deref(),
-            )
-            .await
-            .map_err(AddError::ResolvePackage)?;
-            latest_version.serialize(save_exact)
+            if let Some(existing_specifier) =
+                find_existing_workspace_direct_dependency_spec(lockfile, package_name)
+            {
+                existing_specifier
+            } else {
+                let auth_header =
+                    config.auth_header_for_url(&format!("{registry}{package_name}/latest"));
+                let latest_version = PackageVersion::fetch_from_registry(
+                    package_name,
+                    PackageTag::Latest,
+                    http_client,
+                    &registry,
+                    auth_header.as_deref(),
+                )
+                .await
+                .map_err(AddError::ResolvePackage)?;
+                latest_version.serialize(save_exact)
+            }
         }
         Some(spec) if spec.parse::<PackageTag>().is_ok() => {
             let auth_header =
@@ -319,6 +328,37 @@ async fn resolve_package_spec(
     };
 
     Ok((package_name.to_string(), version_range))
+}
+
+fn find_existing_workspace_direct_dependency_spec(
+    lockfile: Option<&Lockfile>,
+    package_name: &str,
+) -> Option<String> {
+    let lockfile = lockfile?;
+    match &lockfile.project_snapshot {
+        pacquet_lockfile::RootProjectSnapshot::Single(snapshot) => {
+            find_direct_dependency_spec_in_snapshot(snapshot, package_name)
+        }
+        pacquet_lockfile::RootProjectSnapshot::Multi(snapshot) => snapshot
+            .importers
+            .values()
+            .find_map(|snapshot| find_direct_dependency_spec_in_snapshot(snapshot, package_name)),
+    }
+}
+
+fn find_direct_dependency_spec_in_snapshot(
+    snapshot: &pacquet_lockfile::ProjectSnapshot,
+    package_name: &str,
+) -> Option<String> {
+    [DependencyGroup::Prod, DependencyGroup::Optional, DependencyGroup::Dev]
+        .into_iter()
+        .flat_map(|group| snapshot.get_map_by_group(group))
+        .flatten()
+        .find(|(name, spec)| {
+            name.to_string() == package_name
+                && !matches!(spec.version, pacquet_lockfile::ResolvedDependencyVersion::Link(_))
+        })
+        .map(|(_, spec)| spec.specifier.clone())
 }
 
 async fn resolve_npm_alias_target_spec(

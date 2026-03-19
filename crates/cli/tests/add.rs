@@ -653,6 +653,140 @@ fn add_recursive_from_subproject_should_target_all_workspace_projects_except_roo
 }
 
 #[test]
+fn add_should_reuse_existing_workspace_dependency_version_when_adding_to_another_importer() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+    let pacquet_bin = pacquet.get_program().to_os_string();
+
+    let project_1_dir = workspace.join("project-1");
+    let project_2_dir = workspace.join("project-2");
+    std::fs::create_dir_all(&project_1_dir).expect("create project-1 dir");
+    std::fs::create_dir_all(&project_2_dir).expect("create project-2 dir");
+    std::fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - project-*\n")
+        .expect("write pnpm-workspace.yaml");
+    std::fs::write(
+        project_1_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-1",
+            "version": "1.0.0",
+            "dependencies": {
+                "is-positive": "^1.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-1 manifest");
+    std::fs::write(
+        project_2_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-2",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write project-2 manifest");
+
+    std::process::Command::new(&pacquet_bin)
+        .with_current_dir(&workspace)
+        .with_args(["-C", workspace.to_str().unwrap(), "install", "-r"])
+        .assert()
+        .success();
+
+    std::process::Command::new(&pacquet_bin)
+        .with_current_dir(&workspace)
+        .with_args(["-C", project_2_dir.to_str().unwrap(), "add", "is-positive"])
+        .assert()
+        .success();
+
+    let project_2_manifest =
+        PackageManifest::from_path(project_2_dir.join("package.json")).unwrap();
+    let dependency = project_2_manifest
+        .dependencies([DependencyGroup::Prod])
+        .find(|(name, _)| *name == "is-positive")
+        .map(|(_, version)| version);
+    assert_eq!(dependency, Some("^1.0.0"));
+
+    let current_lockfile = std::fs::read_to_string(workspace.join("node_modules/.pnpm/lock.yaml"))
+        .expect("read current lockfile");
+    assert!(current_lockfile.contains("project-1:"));
+    assert!(current_lockfile.contains("project-2:"));
+    assert!(current_lockfile.contains("specifier: ^1.0.0"));
+    assert!(current_lockfile.contains("version: 1.0.0"));
+    assert!(!current_lockfile.contains("version: 3.1.0"));
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
+fn add_should_not_update_dependency_that_matches_workspace_package_name() {
+    let CommandTempCwd { pacquet, root, workspace, npmrc_info, .. } =
+        CommandTempCwd::init().add_mocked_registry();
+    let AddMockedRegistry { mock_instance, .. } = npmrc_info;
+    let pacquet_bin = pacquet.get_program().to_os_string();
+
+    let project_1_dir = workspace.join("project-1");
+    let project_2_dir = workspace.join("project-2");
+    std::fs::create_dir_all(&project_1_dir).expect("create project-1 dir");
+    std::fs::create_dir_all(&project_2_dir).expect("create project-2 dir");
+    std::fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - project-*\n")
+        .expect("write pnpm-workspace.yaml");
+    std::fs::write(
+        project_1_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-1",
+            "version": "1.0.0",
+            "dependencies": {
+                "is-positive": "^1.0.0"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project-1 manifest");
+    std::fs::write(
+        project_2_dir.join("package.json"),
+        serde_json::json!({
+            "name": "is-positive",
+            "version": "3.1.0"
+        })
+        .to_string(),
+    )
+    .expect("write project-2 manifest");
+
+    std::fs::write(workspace.join(".npmrc"), "link-workspace-packages=false\n")
+        .expect("write workspace .npmrc");
+
+    std::process::Command::new(&pacquet_bin)
+        .with_current_dir(&workspace)
+        .with_args(["-C", workspace.to_str().unwrap(), "install", "-r"])
+        .assert()
+        .success();
+
+    std::process::Command::new(&pacquet_bin)
+        .with_current_dir(&workspace)
+        .with_args(["-C", project_1_dir.to_str().unwrap(), "add", "is-negative@2.1.0"])
+        .assert()
+        .success();
+
+    let project_1_manifest =
+        PackageManifest::from_path(project_1_dir.join("package.json")).unwrap();
+    assert!(
+        project_1_manifest
+            .dependencies([DependencyGroup::Prod])
+            .any(|(name, version)| name == "is-negative" && version == "2.1.0")
+    );
+
+    let current_lockfile = std::fs::read_to_string(workspace.join("node_modules/.pnpm/lock.yaml"))
+        .expect("read current lockfile");
+    assert!(current_lockfile.contains("is-positive@1.0.0"));
+    assert!(!current_lockfile.contains("is-positive@3.1.0"));
+    assert!(current_lockfile.contains("is-positive:"));
+    assert!(current_lockfile.contains("version: 1.0.0"));
+
+    drop((root, mock_instance)); // cleanup
+}
+
+#[test]
 fn should_add_local_relative_path_dependency() {
     let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
 
