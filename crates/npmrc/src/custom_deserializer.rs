@@ -131,6 +131,10 @@ pub fn default_peers_suffix_max_length() -> u16 {
     1000
 }
 
+pub fn default_save_workspace_protocol() -> crate::SaveWorkspaceProtocol {
+    crate::SaveWorkspaceProtocol::Rolling
+}
+
 pub fn deserialize_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
     D: Deserializer<'de>,
@@ -162,6 +166,21 @@ where
         "false" => Ok(crate::LinkWorkspacePackages::False),
         "deep" => Ok(crate::LinkWorkspacePackages::Deep),
         other => Err(de::Error::custom(format!("expected true, false, or deep, got {other}"))),
+    }
+}
+
+pub fn deserialize_save_workspace_protocol<'de, D>(
+    deserializer: D,
+) -> Result<crate::SaveWorkspaceProtocol, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    match s.trim() {
+        "true" => Ok(crate::SaveWorkspaceProtocol::True),
+        "false" => Ok(crate::SaveWorkspaceProtocol::False),
+        "rolling" => Ok(crate::SaveWorkspaceProtocol::Rolling),
+        other => Err(de::Error::custom(format!("expected true, false, or rolling, got {other}"))),
     }
 }
 

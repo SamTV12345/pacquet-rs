@@ -12,6 +12,11 @@ use std::fs;
 use std::{ffi::OsStr, path::PathBuf};
 use tempfile::TempDir;
 
+fn pacquet_command() -> std::process::Command {
+    #[allow(deprecated)]
+    std::process::Command::cargo_bin("pacquet").expect("find pacquet binary")
+}
+
 fn exec_pacquet_in_temp_cwd<Args>(args: Args) -> (TempDir, PathBuf, AddMockedRegistry)
 where
     Args: IntoIterator,
@@ -359,7 +364,7 @@ fn workspace_flag_should_add_workspace_protocol_dependency() {
     assert!(
         app_manifest
             .dependencies([DependencyGroup::Prod])
-            .any(|(name, spec)| name == "@repo/lib" && spec == "workspace:*")
+            .any(|(name, spec)| name == "@repo/lib" && spec == "workspace:^")
     );
 
     drop(root); // cleanup
@@ -406,6 +411,142 @@ fn workspace_flag_should_fail_for_non_workspace_package() {
 }
 
 #[test]
+fn workspace_flag_should_fail_outside_workspace() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    std::fs::write(
+        workspace.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write package.json");
+
+    let assert = pacquet
+        .with_args([
+            "-C",
+            workspace.to_str().unwrap(),
+            "add",
+            "@repo/lib",
+            "--workspace",
+            "--ignore-workspace-root-check",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(stderr.contains("--workspace can only be used inside a workspace"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn workspace_flag_should_fail_when_link_workspace_packages_is_off_and_save_workspace_protocol_is_false()
+ {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    std::fs::create_dir_all(&app_dir).expect("create app package directory");
+    std::fs::create_dir_all(&lib_dir).expect("create lib package directory");
+    std::fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    std::fs::write(
+        app_dir.join(".npmrc"),
+        "link-workspace-packages=false\nsave-workspace-protocol=false\n",
+    )
+    .expect("write app .npmrc");
+    std::fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+    std::fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "2.3.4"
+        })
+        .to_string(),
+    )
+    .expect("write lib manifest");
+
+    let assert = pacquet
+        .with_args([
+            "-C",
+            app_dir.to_str().unwrap(),
+            "add",
+            "@repo/lib",
+            "--workspace",
+            "--ignore-workspace-root-check",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(stderr.contains("This workspace has link-workspace-packages turned off"));
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn workspace_flag_should_save_versioned_workspace_protocol_when_save_workspace_protocol_is_false() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    std::fs::create_dir_all(&app_dir).expect("create app package directory");
+    std::fs::create_dir_all(&lib_dir).expect("create lib package directory");
+    std::fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    std::fs::write(app_dir.join(".npmrc"), "save-workspace-protocol=false\n")
+        .expect("write app .npmrc");
+    std::fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+    std::fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "2.3.4"
+        })
+        .to_string(),
+    )
+    .expect("write lib manifest");
+
+    pacquet
+        .with_args([
+            "-C",
+            app_dir.to_str().unwrap(),
+            "add",
+            "@repo/lib",
+            "--workspace",
+            "--ignore-workspace-root-check",
+        ])
+        .assert()
+        .success();
+
+    let app_manifest = PackageManifest::from_path(app_dir.join("package.json")).unwrap();
+    assert!(
+        app_manifest
+            .dependencies([DependencyGroup::Prod])
+            .any(|(name, spec)| name == "@repo/lib" && spec == "workspace:^2.3.4")
+    );
+
+    drop(root); // cleanup
+}
+
+#[test]
 fn workspace_protocol_spec_should_add_workspace_dependency_without_workspace_flag() {
     let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
 
@@ -446,6 +587,277 @@ fn workspace_protocol_spec_should_add_workspace_dependency_without_workspace_fla
             .any(|(name, spec)| name == "@repo/lib" && spec == "workspace:*")
     );
     assert!(app_dir.join("node_modules/@repo/lib").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn add_should_use_workspace_protocol_for_local_workspace_package_by_default() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let foo_dir = workspace.join("packages/foo");
+    std::fs::create_dir_all(&app_dir).expect("create app package directory");
+    std::fs::create_dir_all(&foo_dir).expect("create foo package directory");
+    std::fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    std::fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "project-1",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+    std::fs::write(
+        foo_dir.join("package.json"),
+        serde_json::json!({
+            "name": "foo",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write foo manifest");
+
+    pacquet.with_args(["-C", app_dir.to_str().unwrap(), "add", "foo"]).assert().success();
+
+    let app_manifest = PackageManifest::from_path(app_dir.join("package.json")).unwrap();
+    assert!(
+        app_manifest
+            .dependencies([DependencyGroup::Prod])
+            .any(|(name, spec)| name == "foo" && spec == "workspace:^")
+    );
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn workspace_protocol_spec_should_save_versioned_protocol_when_save_workspace_protocol_is_false() {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    std::fs::create_dir_all(&app_dir).expect("create app package directory");
+    std::fs::create_dir_all(&lib_dir).expect("create lib package directory");
+    std::fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    std::fs::write(app_dir.join(".npmrc"), "save-workspace-protocol=false\n")
+        .expect("write app .npmrc");
+    std::fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+    std::fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "2.3.4"
+        })
+        .to_string(),
+    )
+    .expect("write lib manifest");
+
+    pacquet
+        .with_args(["-C", app_dir.to_str().unwrap(), "add", "@repo/lib@workspace:*"])
+        .assert()
+        .success();
+
+    let app_manifest = PackageManifest::from_path(app_dir.join("package.json")).unwrap();
+    assert!(
+        app_manifest
+            .dependencies([DependencyGroup::Prod])
+            .any(|(name, spec)| name == "@repo/lib" && spec == "workspace:^2.3.4")
+    );
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn add_should_save_plain_range_for_local_workspace_package_when_link_workspace_packages_is_true_and_save_workspace_protocol_is_false()
+ {
+    let CommandTempCwd { pacquet, root, workspace, .. } = CommandTempCwd::init();
+
+    let app_dir = workspace.join("packages/app");
+    let lib_dir = workspace.join("packages/lib");
+    std::fs::create_dir_all(&app_dir).expect("create app package directory");
+    std::fs::create_dir_all(&lib_dir).expect("create lib package directory");
+    std::fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+        .expect("write pnpm-workspace.yaml");
+    std::fs::write(
+        app_dir.join(".npmrc"),
+        "link-workspace-packages=true\nsave-workspace-protocol=false\n",
+    )
+    .expect("write app .npmrc");
+    std::fs::write(
+        app_dir.join("package.json"),
+        serde_json::json!({
+            "name": "app",
+            "version": "1.0.0"
+        })
+        .to_string(),
+    )
+    .expect("write app manifest");
+    std::fs::write(
+        lib_dir.join("package.json"),
+        serde_json::json!({
+            "name": "@repo/lib",
+            "version": "2.3.4"
+        })
+        .to_string(),
+    )
+    .expect("write lib manifest");
+
+    pacquet
+        .with_args(["-C", app_dir.to_str().unwrap(), "add", "@repo/lib", "--save-optional"])
+        .assert()
+        .success();
+
+    let app_manifest = PackageManifest::from_path(app_dir.join("package.json")).unwrap();
+    assert!(
+        app_manifest
+            .dependencies([DependencyGroup::Optional])
+            .any(|(name, spec)| name == "@repo/lib" && spec == "^2.3.4")
+    );
+    assert!(app_dir.join("node_modules/@repo/lib").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn add_should_link_workspace_packages_across_dependency_groups_when_link_workspace_packages_is_true()
+ {
+    let CommandTempCwd { pacquet: _, root, workspace, .. } = CommandTempCwd::init();
+
+    let project_1_dir = workspace.join("project-1");
+    let project_2_dir = workspace.join("project-2");
+    let project_3_dir = workspace.join("project-3");
+    let project_4_dir = workspace.join("project-4");
+    std::fs::create_dir_all(&project_1_dir).expect("create project-1 dir");
+    std::fs::create_dir_all(&project_2_dir).expect("create project-2 dir");
+    std::fs::create_dir_all(&project_3_dir).expect("create project-3 dir");
+    std::fs::create_dir_all(&project_4_dir).expect("create project-4 dir");
+    std::fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - '*'\n")
+        .expect("write pnpm-workspace.yaml");
+    std::fs::write(
+        project_1_dir.join(".npmrc"),
+        "link-workspace-packages=true\nsave-workspace-protocol=false\n",
+    )
+    .expect("write project-1 .npmrc");
+    for (dir, name, version) in [
+        (&project_1_dir, "project-1", "1.0.0"),
+        (&project_2_dir, "project-2", "2.0.0"),
+        (&project_3_dir, "project-3", "3.0.0"),
+        (&project_4_dir, "project-4", "4.0.0"),
+    ] {
+        std::fs::write(
+            dir.join("package.json"),
+            serde_json::json!({
+                "name": name,
+                "version": version
+            })
+            .to_string(),
+        )
+        .expect("write workspace package manifest");
+    }
+
+    pacquet_command()
+        .with_args(["-C", project_1_dir.to_str().unwrap(), "add", "project-2"])
+        .assert()
+        .success();
+    pacquet_command()
+        .with_args(["-C", project_1_dir.to_str().unwrap(), "add", "project-3", "--save-dev"])
+        .assert()
+        .success();
+    pacquet_command()
+        .with_args(["-C", project_1_dir.to_str().unwrap(), "add", "project-4", "--save-optional"])
+        .assert()
+        .success();
+
+    let manifest = PackageManifest::from_path(project_1_dir.join("package.json")).unwrap();
+    assert!(
+        manifest
+            .dependencies([DependencyGroup::Prod])
+            .any(|(name, spec)| name == "project-2" && spec == "^2.0.0")
+    );
+    assert!(
+        manifest
+            .dependencies([DependencyGroup::Dev])
+            .any(|(name, spec)| name == "project-3" && spec == "^3.0.0")
+    );
+    assert!(
+        manifest
+            .dependencies([DependencyGroup::Optional])
+            .any(|(name, spec)| name == "project-4" && spec == "^4.0.0")
+    );
+    assert!(project_1_dir.join("node_modules/project-2").exists());
+    assert!(project_1_dir.join("node_modules/project-3").exists());
+    assert!(project_1_dir.join("node_modules/project-4").exists());
+
+    drop(root); // cleanup
+}
+
+#[test]
+fn add_should_use_workspace_protocol_for_prod_and_dev_when_link_workspace_packages_is_true_and_rolling()
+ {
+    let CommandTempCwd { pacquet: _, root, workspace, .. } = CommandTempCwd::init();
+
+    let project_1_dir = workspace.join("project-1");
+    let project_2_dir = workspace.join("project-2");
+    let project_3_dir = workspace.join("project-3");
+    std::fs::create_dir_all(&project_1_dir).expect("create project-1 dir");
+    std::fs::create_dir_all(&project_2_dir).expect("create project-2 dir");
+    std::fs::create_dir_all(&project_3_dir).expect("create project-3 dir");
+    std::fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - '*'\n")
+        .expect("write pnpm-workspace.yaml");
+    std::fs::write(
+        project_1_dir.join(".npmrc"),
+        "link-workspace-packages=true\nsave-workspace-protocol=rolling\n",
+    )
+    .expect("write project-1 .npmrc");
+    for (dir, name, version) in [
+        (&project_1_dir, "project-1", "1.0.0"),
+        (&project_2_dir, "project-2", "2.0.0"),
+        (&project_3_dir, "project-3", "3.0.0"),
+    ] {
+        std::fs::write(
+            dir.join("package.json"),
+            serde_json::json!({
+                "name": name,
+                "version": version
+            })
+            .to_string(),
+        )
+        .expect("write workspace package manifest");
+    }
+
+    pacquet_command()
+        .with_args(["-C", project_1_dir.to_str().unwrap(), "add", "project-2"])
+        .assert()
+        .success();
+    pacquet_command()
+        .with_args(["-C", project_1_dir.to_str().unwrap(), "add", "project-3", "--save-dev"])
+        .assert()
+        .success();
+
+    let manifest = PackageManifest::from_path(project_1_dir.join("package.json")).unwrap();
+    assert!(
+        manifest
+            .dependencies([DependencyGroup::Prod])
+            .any(|(name, spec)| name == "project-2" && spec == "workspace:^")
+    );
+    assert!(
+        manifest
+            .dependencies([DependencyGroup::Dev])
+            .any(|(name, spec)| name == "project-3" && spec == "workspace:^")
+    );
+    assert!(project_1_dir.join("node_modules/project-2").exists());
+    assert!(project_1_dir.join("node_modules/project-3").exists());
 
     drop(root); // cleanup
 }

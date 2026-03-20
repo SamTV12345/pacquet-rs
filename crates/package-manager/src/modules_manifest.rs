@@ -1,5 +1,6 @@
 use crate::create_virtual_store::select_hoisted_packages;
 use httpdate::{fmt_http_date, parse_http_date};
+use pacquet_fs::{is_symlink_or_junction, symlink_or_junction_target};
 use pacquet_lockfile::{DependencyPath, PackageSnapshot};
 use pacquet_npmrc::{NodeLinker, Npmrc};
 use pacquet_package_manifest::DependencyGroup;
@@ -14,6 +15,9 @@ use std::{
 };
 
 const MODULES_MANIFEST_FILE_NAME: &str = ".modules.yaml";
+#[cfg(windows)]
+pub(crate) const DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH: u16 = 60;
+#[cfg(not(windows))]
 pub(crate) const DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH: u16 = 120;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +84,7 @@ pub(crate) fn should_prune_orphaned_virtual_store_entries(
     cache_expired(&pruned_at, modules_cache_max_age_minutes)
 }
 
-pub(crate) fn write_modules_manifest(
+pub fn write_modules_manifest(
     modules_dir: &Path,
     config: &Npmrc,
     dependency_groups: &[DependencyGroup],
@@ -89,7 +93,20 @@ pub(crate) fn write_modules_manifest(
     direct_dependency_names: Option<&[String]>,
 ) -> io::Result<()> {
     fs::create_dir_all(modules_dir)?;
-    let mut skipped = skipped.to_vec();
+    let mut skipped = skipped.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+    if let Some(packages) = packages {
+        for (dependency_path, package_snapshot) in packages {
+            if package_snapshot.optional == Some(true)
+                && crate::installability::should_skip_optional_package_snapshot(
+                    &dependency_path.to_string(),
+                    package_snapshot,
+                )
+            {
+                skipped.insert(modules_manifest_package_id(dependency_path));
+            }
+        }
+    }
+    let mut skipped = skipped.into_iter().collect::<Vec<_>>();
     skipped.sort();
     let included = included_dependencies(dependency_groups);
     let manifest = ModulesManifest {
@@ -118,8 +135,8 @@ pub(crate) fn write_modules_manifest(
         included: Some(included),
         skipped,
     };
-    let yaml = serde_yaml::to_string(&manifest).map_err(io::Error::other)?;
-    fs::write(modules_dir.join(MODULES_MANIFEST_FILE_NAME), yaml)
+    let json = serde_json::to_string_pretty(&manifest).map_err(io::Error::other)? + "\n";
+    fs::write(modules_dir.join(MODULES_MANIFEST_FILE_NAME), json)
 }
 
 fn detect_pnpm_package_manager() -> String {
@@ -134,17 +151,31 @@ fn detect_pnpm_package_manager() -> String {
 }
 
 fn detect_pnpm_version() -> Option<String> {
-    let output = Command::new("pnpm").arg("--version").output().ok()?;
-    if !output.status.success() {
-        return None;
+    for command in if cfg!(windows) { ["pnpm", "pnpm.cmd"] } else { ["pnpm", "pnpm"] } {
+        let Ok(output) = Command::new(command).arg("--version").output() else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !version.is_empty() {
+            return Some(version);
+        }
     }
-    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!version.is_empty()).then_some(version)
+    None
 }
 
 fn canonical_store_dir(config: &Npmrc) -> String {
     let path = PathBuf::from(config.store_dir.display().to_string()).join("v10");
-    fs::canonicalize(&path).unwrap_or(path).display().to_string()
+    normalize_windows_verbatim_path(&fs::canonicalize(&path).unwrap_or(path).display().to_string())
+}
+
+fn normalize_windows_verbatim_path(path: &str) -> String {
+    if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{path}");
+    }
+    path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
 }
 
 fn hoisted_dependencies(
@@ -160,7 +191,15 @@ fn hoisted_dependencies(
 
     let mut hoisted = BTreeMap::<String, BTreeMap<String, String>>::new();
 
-    if config.hoist || config.shamefully_hoist {
+    if (config.hoist || config.shamefully_hoist)
+        && !collect_hoisted_dependencies_from_fs(
+            &config.virtual_store_dir.join("node_modules"),
+            packages,
+            direct_dependency_names,
+            "private",
+            &mut hoisted,
+        )
+    {
         for (name, package_specifier) in
             select_hoisted_packages(packages, config.dedupe_peer_dependents, &config.hoist_pattern)
         {
@@ -174,7 +213,15 @@ fn hoisted_dependencies(
         }
     }
 
-    if !config.public_hoist_pattern.is_empty() {
+    if !config.public_hoist_pattern.is_empty()
+        && !collect_hoisted_dependencies_from_fs(
+            &config.modules_dir,
+            packages,
+            direct_dependency_names,
+            "public",
+            &mut hoisted,
+        )
+    {
         for (name, package_specifier) in select_hoisted_packages(
             packages,
             config.dedupe_peer_dependents,
@@ -193,7 +240,111 @@ fn hoisted_dependencies(
     (!hoisted.is_empty()).then_some(hoisted)
 }
 
+fn collect_hoisted_dependencies_from_fs(
+    hoist_dir: &Path,
+    packages: &HashMap<DependencyPath, PackageSnapshot>,
+    direct_dependency_names: &[String],
+    visibility: &str,
+    hoisted: &mut BTreeMap<String, BTreeMap<String, String>>,
+) -> bool {
+    let Ok(entries) = collect_hoist_dir_entries(hoist_dir) else {
+        return false;
+    };
+    if entries.is_empty() {
+        return false;
+    }
+    let dependency_paths_by_virtual_store_name = packages
+        .keys()
+        .map(|dependency_path| {
+            (dependency_path.to_virtual_store_name(), dependency_path.to_string())
+        })
+        .collect::<HashMap<_, _>>();
+    let mut added_any = false;
+    for (alias, entry_path) in entries {
+        if direct_dependency_names.contains(&alias) {
+            continue;
+        }
+        let Ok(target) = resolve_hoisted_entry_target(&entry_path) else {
+            continue;
+        };
+        let Some(virtual_store_name) = hoisted_virtual_store_name(&target) else {
+            continue;
+        };
+        let Some(dependency_path) = dependency_paths_by_virtual_store_name.get(&virtual_store_name)
+        else {
+            continue;
+        };
+        hoisted.entry(dependency_path.clone()).or_default().insert(alias, visibility.to_string());
+        added_any = true;
+    }
+    added_any
+}
+
+fn collect_hoist_dir_entries(hoist_dir: &Path) -> io::Result<Vec<(String, PathBuf)>> {
+    if !hoist_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(hoist_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if matches!(file_name.as_str(), ".bin" | ".pnpm") {
+            continue;
+        }
+        let entry_path = entry.path();
+        if file_name.starts_with('@') && entry_path.is_dir() {
+            for scoped_entry in fs::read_dir(&entry_path)? {
+                let scoped_entry = scoped_entry?;
+                let scoped_name = scoped_entry.file_name().to_string_lossy().into_owned();
+                let alias = format!("{file_name}/{scoped_name}");
+                entries.push((alias, scoped_entry.path()));
+            }
+            continue;
+        }
+        let alias = file_name.strip_prefix(".ignored_").unwrap_or(&file_name).to_string();
+        entries.push((alias, entry_path));
+    }
+    Ok(entries)
+}
+
+fn resolve_hoisted_entry_target(entry_path: &Path) -> io::Result<PathBuf> {
+    if is_symlink_or_junction(entry_path).unwrap_or(false) {
+        let target = symlink_or_junction_target(entry_path)?;
+        if target.is_absolute() {
+            Ok(target)
+        } else {
+            Ok(entry_path.parent().unwrap_or_else(|| Path::new(".")).join(target))
+        }
+    } else {
+        fs::canonicalize(entry_path)
+    }
+}
+
+fn hoisted_virtual_store_name(target: &Path) -> Option<String> {
+    let mut current = target;
+    loop {
+        if current.file_name().is_some_and(|name| name == "node_modules") {
+            return current.parent().and_then(|parent| {
+                parent.file_name().map(|name| name.to_string_lossy().into_owned())
+            });
+        }
+        current = current.parent()?;
+    }
+}
+
+fn modules_manifest_package_id(dependency_path: &DependencyPath) -> String {
+    match dependency_path.custom_registry.as_deref() {
+        Some(custom_registry) => {
+            format!("{custom_registry}/{}", dependency_path.package_specifier)
+        }
+        None => dependency_path.package_specifier.to_string(),
+    }
+}
+
 fn relative_virtual_store_dir(modules_dir: &Path, virtual_store_dir: &Path) -> String {
+    if cfg!(windows) {
+        return virtual_store_dir.display().to_string();
+    }
     if let Ok(relative) = virtual_store_dir.strip_prefix(modules_dir) {
         let relative = if relative.as_os_str().is_empty() {
             PathBuf::from(".")
@@ -428,16 +579,22 @@ mod tests {
 
         let content =
             fs::read_to_string(dir.path().join(MODULES_MANIFEST_FILE_NAME)).expect("read manifest");
-        assert!(content.contains("skipped:"));
-        assert!(content.contains("- a@1.0.0"));
-        assert!(content.contains("- b@1.0.0"));
-        assert!(content.contains("layoutVersion: 5"));
-        assert!(content.contains("nodeLinker: isolated"));
-        assert!(content.contains("packageManager: "));
-        assert!(content.contains("injectedDeps: {}"));
-        assert!(content.contains("virtualStoreDir: .pnpm"));
-        assert!(content.contains("dependencies: true"));
-        assert!(content.contains("optionalDependencies: true"));
+        assert!(content.contains("\"skipped\": ["));
+        assert!(content.contains("\"a@1.0.0\""));
+        assert!(content.contains("\"b@1.0.0\""));
+        assert!(content.contains("\"layoutVersion\": 5"));
+        assert!(content.contains("\"nodeLinker\": \"isolated\""));
+        assert!(content.contains("\"packageManager\": "));
+        assert!(content.contains("\"injectedDeps\": {}"));
+        if cfg!(windows) {
+            assert!(!content.contains("\\\\?\\"));
+        } else {
+            assert!(content.contains("\"virtualStoreDir\": \".pnpm\""));
+        }
+        let manifest = read_modules_manifest(dir.path()).expect("read modules manifest");
+        assert_eq!(manifest.resolved_virtual_store_dir(dir.path()), config.virtual_store_dir);
+        assert!(content.contains("\"dependencies\": true"));
+        assert!(content.contains("\"optionalDependencies\": true"));
     }
 
     #[test]
@@ -460,9 +617,9 @@ mod tests {
 
         let content =
             fs::read_to_string(dir.path().join(MODULES_MANIFEST_FILE_NAME)).expect("read manifest");
-        assert!(content.contains("dependencies: false"));
-        assert!(content.contains("devDependencies: true"));
-        assert!(content.contains("optionalDependencies: false"));
+        assert!(content.contains("\"dependencies\": false"));
+        assert!(content.contains("\"devDependencies\": true"));
+        assert!(content.contains("\"optionalDependencies\": false"));
     }
 
     #[test]
@@ -478,11 +635,10 @@ mod tests {
 
         let content =
             fs::read_to_string(dir.path().join(MODULES_MANIFEST_FILE_NAME)).expect("read manifest");
-        assert!(content.contains("hoistPattern:"));
-        assert!(content.contains("- '*eslint*'"));
-        assert!(content.contains("publicHoistPattern:"));
-        assert!(content.contains("- '*'"));
-        assert!(content.contains("- '!typescript'"));
+        assert!(content.contains("\"hoistPattern\": ["));
+        assert!(content.contains("\"*eslint*\""));
+        assert!(content.contains("\"publicHoistPattern\": ["));
+        assert!(content.contains("\"!typescript\""));
     }
 
     #[test]
@@ -498,8 +654,8 @@ mod tests {
 
         let content =
             fs::read_to_string(dir.path().join(MODULES_MANIFEST_FILE_NAME)).expect("read manifest");
-        assert!(content.contains("registries:"));
-        assert!(content.contains("default: https://default.example/"));
+        assert!(content.contains("\"registries\": {"));
+        assert!(content.contains("\"default\": \"https://default.example/\""));
         assert!(content.contains("https://foo.example/"));
         assert!(content.contains("@foo"));
         assert!(content.contains("@jsr"));
@@ -525,9 +681,9 @@ mod tests {
 
         let content =
             fs::read_to_string(dir.path().join(MODULES_MANIFEST_FILE_NAME)).expect("read manifest");
-        assert!(content.contains("hoistedDependencies:"));
-        assert!(content.contains("'@scope/pkg@1.0.0':"));
-        assert!(content.contains("'@scope/pkg': private"));
+        assert!(content.contains("\"hoistedDependencies\": {"));
+        assert!(content.contains("\"@scope/pkg@1.0.0\": {"));
+        assert!(content.contains("\"@scope/pkg\": \"private\""));
     }
 
     #[test]
@@ -542,13 +698,66 @@ mod tests {
         let content =
             fs::read_to_string(dir.path().join(MODULES_MANIFEST_FILE_NAME)).expect("read manifest");
         let manifest = read_modules_manifest(dir.path()).expect("read modules manifest");
-        assert!(content.contains("virtualStoreDirMaxLength: 120"));
-        assert!(content.contains("pendingBuilds: []"));
-        assert!(!content.contains("ignoredBuilds"));
-        assert!(content.contains("storeDir:"));
+        assert!(content.contains(&format!(
+            "\"virtualStoreDirMaxLength\": {DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH}"
+        )));
+        assert!(content.contains("\"pendingBuilds\": []"));
+        assert!(!content.contains("\"ignoredBuilds\""));
+        assert!(content.contains("\"storeDir\":"));
         assert!(
             PathBuf::from(manifest.store_dir.expect("store dir")).ends_with(Path::new("store/v10"))
         );
+    }
+
+    #[test]
+    fn writes_skipped_packages_detected_from_optional_installability() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = Npmrc::new();
+        config.store_dir = StoreDir::new(dir.path().join("store"));
+        config.virtual_store_dir = dir.path().join(".pnpm");
+        let packages = HashMap::from([(
+            DependencyPath::registry(
+                None,
+                "@scope/optional@1.0.0".parse().expect("package specifier"),
+            ),
+            PackageSnapshot {
+                resolution: LockfileResolution::Registry(pacquet_lockfile::RegistryResolution {
+                    integrity: "sha512-Bw==".parse().expect("integrity"),
+                }),
+                id: None,
+                name: None,
+                version: None,
+                engines: None,
+                cpu: None,
+                os: Some(vec!["definitely-not-this-os".to_string()]),
+                libc: None,
+                deprecated: None,
+                has_bin: None,
+                prepare: None,
+                requires_build: None,
+                bundled_dependencies: None,
+                peer_dependencies: None,
+                peer_dependencies_meta: None,
+                dependencies: None,
+                optional_dependencies: None,
+                transitive_peer_dependencies: None,
+                dev: None,
+                optional: Some(true),
+            },
+        )]);
+        write_modules_manifest(
+            dir.path(),
+            &config,
+            &[DependencyGroup::Optional],
+            &[],
+            Some(&packages),
+            None,
+        )
+        .expect("write modules manifest");
+
+        let content =
+            fs::read_to_string(dir.path().join(MODULES_MANIFEST_FILE_NAME)).expect("read manifest");
+        assert!(content.contains("\"@scope/optional@1.0.0\""));
     }
 
     #[test]

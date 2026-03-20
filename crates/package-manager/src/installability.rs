@@ -57,6 +57,24 @@ pub(crate) fn check_package_snapshot_installability(
     )
 }
 
+pub(crate) fn should_skip_optional_package_snapshot(
+    package_id: &str,
+    package: &PackageSnapshot,
+) -> bool {
+    matches!(
+        installability_for_values(
+            package.engines.as_ref(),
+            package.cpu.as_deref(),
+            package.os.as_deref(),
+            package.libc.as_deref(),
+            package_id,
+            true,
+            false,
+        ),
+        Installability::SkipOptional
+    )
+}
+
 fn installability_for_values(
     engines: Option<&HashMap<String, String>>,
     cpu: Option<&[String]>,

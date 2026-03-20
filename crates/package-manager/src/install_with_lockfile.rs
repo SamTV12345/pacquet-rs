@@ -3,9 +3,10 @@ use crate::{
     collect_runtime_lockfile_config, fetch_package_from_registry_and_cache,
     fetch_package_with_metadata_cache, is_git_spec, is_tarball_spec, link_package,
     link_target_with_publish_config_directory, package_dependency_map,
-    read_cached_package_from_config, resolve_package_version_from_git_spec,
-    resolve_package_version_from_tarball_spec, resolve_workspace_dependency,
-    resolve_workspace_dependency_by_plain_spec,
+    read_cached_package_from_config, require_workspace_dependency,
+    resolve_package_version_from_git_spec, resolve_package_version_from_tarball_spec,
+    resolve_workspace_dependency, resolve_workspace_dependency_by_plain_spec,
+    resolve_workspace_dependency_by_relative_path,
 };
 use async_recursion::async_recursion;
 use dashmap::DashMap;
@@ -162,13 +163,15 @@ where
                                 .await
                                 .wrap_err_with(|| format!("snapshot local dependency `{name}`"))?
                             }
-                        } else if let Some(workspace_package) = try_resolve_workspace_dependency(
-                            config,
-                            workspace_packages,
-                            &name,
-                            &version_range,
-                            0,
-                        ) {
+                        } else if let Some(workspace_package) =
+                            resolve_workspace_dependency_for_install(
+                                config,
+                                workspace_packages,
+                                &name,
+                                &version_range,
+                                0,
+                            )?
+                        {
                             if should_inject_workspace_dependency(
                                 manifest,
                                 &name,
@@ -465,13 +468,13 @@ where
                             &dependency_name,
                             &dependency_version_range,
                         );
-                        if let Some(workspace_package) = try_resolve_workspace_dependency(
+                        if let Some(workspace_package) = resolve_workspace_dependency_for_install(
                             config,
                             workspace_packages,
                             &dependency_name,
                             &dependency_version_range,
                             1,
-                        ) {
+                        )? {
                             let relative =
                                 to_relative_path(lockfile_dir, &workspace_package.root_dir);
                             return Ok::<_, miette::Report>((
@@ -632,13 +635,13 @@ where
                             &dependency_name,
                             &dependency_version_range,
                         );
-                        if let Some(workspace_package) = try_resolve_workspace_dependency(
+                        if let Some(workspace_package) = resolve_workspace_dependency_for_install(
                             config,
                             workspace_packages,
                             &dependency_name,
                             &dependency_version_range,
                             1,
-                        ) {
+                        )? {
                             let relative =
                                 to_relative_path(lockfile_dir, &workspace_package.root_dir);
                             return Ok::<_, miette::Report>((
@@ -875,13 +878,13 @@ where
                             return Ok((child_name, resolved_local, true));
                         }
 
-                        if let Some(workspace_package) = try_resolve_workspace_dependency(
+                        if let Some(workspace_package) = resolve_workspace_dependency_for_install(
                             config,
                             workspace_packages,
                             &child_name,
                             &child_version_range,
                             1,
-                        ) {
+                        )? {
                             let normalized_child_ref = normalized_local_file_reference(
                                 lockfile_dir,
                                 &workspace_package.root_dir,
@@ -1041,13 +1044,13 @@ where
             apply_workspace_root_override(workspace_root_overrides, name, requested_range);
 
         if available_specs.contains_key(name)
-            && let Some(workspace_package) = try_resolve_workspace_dependency(
+            && let Some(workspace_package) = resolve_workspace_dependency_for_install(
                 config,
                 workspace_packages,
                 name,
                 &requested_range,
                 1,
-            )
+            )?
         {
             let relative = to_relative_path(lockfile_dir, &workspace_package.root_dir);
             return Ok(Some(ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
@@ -1098,9 +1101,13 @@ where
             ));
         }
 
-        if let Some(workspace_package) =
-            try_resolve_workspace_dependency(config, workspace_packages, name, &requested_range, 1)
-        {
+        if let Some(workspace_package) = resolve_workspace_dependency_for_install(
+            config,
+            workspace_packages,
+            name,
+            &requested_range,
+            1,
+        )? {
             let relative = to_relative_path(lockfile_dir, &workspace_package.root_dir);
             return Ok(Some(ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
                 "link:{}",
@@ -1889,7 +1896,42 @@ fn try_resolve_workspace_dependency<'a>(
     if !config.link_workspace_packages.links_at_depth(depth) {
         return None;
     }
-    resolve_workspace_dependency_by_plain_spec(workspace_packages, dependency_name, specifier)
+    let (target_name, target_specifier) =
+        parse_npm_alias(specifier).unwrap_or((dependency_name, specifier));
+    resolve_workspace_dependency_by_plain_spec(workspace_packages, target_name, target_specifier)
+}
+
+fn resolve_workspace_dependency_for_install<'a>(
+    config: &Npmrc,
+    workspace_packages: &'a WorkspacePackages,
+    dependency_name: &str,
+    specifier: &str,
+    depth: usize,
+) -> miette::Result<Option<&'a crate::WorkspacePackageInfo>> {
+    if specifier.starts_with("workspace:") {
+        let project_dir = config.modules_dir.parent().unwrap_or_else(|| Path::new("."));
+        if let Some(workspace_package) = resolve_workspace_dependency_by_relative_path(
+            workspace_packages,
+            project_dir,
+            specifier,
+        ) {
+            return Ok(Some(workspace_package));
+        }
+        let workspace_package =
+            require_workspace_dependency(workspace_packages, dependency_name, specifier)
+                .map_err(|error| miette::miette!("{error}"))?;
+        return Ok(Some(workspace_package));
+    }
+    if !config.link_workspace_packages.links_at_depth(depth) {
+        return Ok(None);
+    }
+    let (target_name, target_specifier) =
+        parse_npm_alias(specifier).unwrap_or((dependency_name, specifier));
+    Ok(resolve_workspace_dependency_by_plain_spec(
+        workspace_packages,
+        target_name,
+        target_specifier,
+    ))
 }
 
 fn project_dependencies_meta(manifest: &PackageManifest) -> Option<serde_yaml::Value> {

@@ -90,8 +90,8 @@ fn approve_builds_should_promote_pending_packages_into_only_built_dependencies()
 
     let modules_yaml = fs::read_to_string(workspace.join("node_modules/.modules.yaml"))
         .expect("read .modules.yaml");
-    assert!(modules_yaml.contains("pendingBuilds: []"));
-    assert!(modules_yaml.contains("ignoredBuilds: []"));
+    assert!(modules_yaml.contains("\"pendingBuilds\": []"));
+    assert!(modules_yaml.contains("\"ignoredBuilds\": []"));
 
     drop(root);
 }

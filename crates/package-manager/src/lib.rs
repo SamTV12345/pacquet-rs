@@ -45,6 +45,7 @@ pub use link_bins::{link_bins_for_manifest, link_bins_from_package_manifest};
 pub use link_file::*;
 pub(crate) use link_policy::*;
 pub(crate) use lockfile_check::*;
+pub use modules_manifest::write_modules_manifest;
 pub(crate) use modules_manifest::*;
 pub(crate) use patching::*;
 pub(crate) use pnp_manifest::*;

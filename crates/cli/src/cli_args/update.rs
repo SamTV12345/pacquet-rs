@@ -4,7 +4,7 @@ use clap::Args;
 use glob::Pattern;
 use miette::Context;
 use pacquet_lockfile::Lockfile;
-use pacquet_npmrc::Npmrc;
+use pacquet_npmrc::{Npmrc, SaveWorkspaceProtocol};
 use pacquet_package_manager::current_lockfile_for_installers;
 use pacquet_package_manifest::PackageManifest;
 use pacquet_registry::{Package, PackageTag, PackageVersion};
@@ -15,6 +15,10 @@ use std::path::{Path, PathBuf};
 pub struct UpdateArgs {
     /// Filter by package name, glob, or explicit package spec.
     packages: Vec<String>,
+
+    /// Update only dependencies that are already present in the workspace.
+    #[clap(long = "workspace")]
+    workspace: bool,
 
     /// --prod, --dev, and --no-optional
     #[clap(flatten)]
@@ -83,6 +87,12 @@ impl UpdateArgs {
         if self.interactive {
             miette::bail!("`pacquet update --interactive` is not implemented yet");
         }
+        if self.workspace && state.workspace_packages.is_empty() {
+            miette::bail!("--workspace can only be used inside a workspace");
+        }
+        if self.workspace && self.latest {
+            miette::bail!("Cannot use --latest with --workspace simultaneously");
+        }
         if self.latest {
             let invalid = self
                 .packages
@@ -99,11 +109,6 @@ impl UpdateArgs {
         }
 
         let reporter = parse_install_reporter(self.reporter.as_deref())?;
-        let requests = self
-            .packages
-            .iter()
-            .map(|value| parse_update_request(value))
-            .collect::<miette::Result<Vec<_>>>()?;
         let config = state.config;
         let manifest = &state.manifest;
         let lockfile = &state.lockfile;
@@ -111,6 +116,19 @@ impl UpdateArgs {
         let lockfile_importer_id = &state.lockfile_importer_id;
         let workspace_packages = &state.workspace_packages;
         let http_client = &state.http_client;
+        let requests = if self.workspace {
+            workspace_update_requests(
+                manifest,
+                &self.dependency_options,
+                workspace_packages,
+                &self.packages,
+            )?
+        } else {
+            self.packages
+                .iter()
+                .map(|value| parse_update_request(value))
+                .collect::<miette::Result<Vec<_>>>()?
+        };
 
         let targets = select_update_targets(
             manifest,
@@ -141,6 +159,7 @@ impl UpdateArgs {
                 self.save_exact,
                 config,
                 http_client,
+                workspace_packages,
             )
             .await?;
 
@@ -157,7 +176,7 @@ impl UpdateArgs {
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| lockfile_dir.to_path_buf());
-            let target_config = config_for_project(config, &project_dir).leak();
+            let target_config = config_for_project(config, lockfile_dir, &project_dir).leak();
             let target_state = State::init(target_manifest.path().to_path_buf(), target_config)
                 .wrap_err("initialize update state")?;
             let target_install_args = self.install_args(reporter);
@@ -224,6 +243,7 @@ impl UpdateArgs {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_updates_to_manifest(
     manifest: &mut PackageManifest,
     requests: &[UpdateRequest],
@@ -232,6 +252,7 @@ async fn apply_updates_to_manifest(
     save_exact: bool,
     config: &Npmrc,
     http_client: &pacquet_network::ThrottledClient,
+    workspace_packages: &pacquet_package_manager::WorkspacePackages,
 ) -> miette::Result<UpdateOutcome> {
     let dependency_groups = dependency_options.dependency_groups().collect::<Vec<_>>();
     let existing = dependency_groups
@@ -262,6 +283,7 @@ async fn apply_updates_to_manifest(
                 save_exact,
                 config,
                 http_client,
+                workspace_packages,
             )
             .await?
             else {
@@ -284,6 +306,7 @@ async fn apply_updates_to_manifest(
             save_exact,
             config,
             http_client,
+            workspace_packages,
         )
         .await?
         else {
@@ -301,6 +324,7 @@ async fn apply_updates_to_manifest(
     Ok(outcome)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_updated_spec(
     package_name: &str,
     current_spec: &str,
@@ -309,9 +333,16 @@ async fn resolve_updated_spec(
     save_exact: bool,
     config: &Npmrc,
     http_client: &pacquet_network::ThrottledClient,
+    workspace_packages: &pacquet_package_manager::WorkspacePackages,
 ) -> miette::Result<Option<String>> {
     if let Some(explicit_spec) = explicit_spec {
         return Ok(Some(explicit_spec.to_string()));
+    }
+    if current_spec.starts_with("workspace:") && workspace_packages.contains_key(package_name) {
+        return Ok(Some(render_updated_workspace_spec(
+            current_spec,
+            config.save_workspace_protocol,
+        )));
     }
     if should_skip_specifier(current_spec) {
         return Ok(None);
@@ -360,6 +391,42 @@ fn render_updated_spec(
     current_spec.to_string()
 }
 
+fn render_updated_workspace_spec(
+    current_spec: &str,
+    save_workspace_protocol: SaveWorkspaceProtocol,
+) -> String {
+    let raw = current_spec.strip_prefix("workspace:").unwrap_or(current_spec);
+    match save_workspace_protocol {
+        SaveWorkspaceProtocol::Rolling => {
+            if raw == "*" || raw == "^" || raw == "~" {
+                return current_spec.to_string();
+            }
+            if raw.starts_with('^') || is_major_like_workspace_range(raw) {
+                return "workspace:^".to_string();
+            }
+            if raw.starts_with('~') || is_minor_like_workspace_range(raw) {
+                return "workspace:~".to_string();
+            }
+            "workspace:*".to_string()
+        }
+        SaveWorkspaceProtocol::True | SaveWorkspaceProtocol::False => current_spec.to_string(),
+    }
+}
+
+fn is_major_like_workspace_range(raw: &str) -> bool {
+    raw.chars().all(|ch| ch.is_ascii_digit()) && !raw.is_empty()
+}
+
+fn is_minor_like_workspace_range(raw: &str) -> bool {
+    let mut parts = raw.split('.');
+    let first = parts.next();
+    let second = parts.next();
+    let third = parts.next();
+    first.is_some_and(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+        && second.is_some_and(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+        && third.is_none()
+}
+
 fn match_request<'a>(
     requests: &'a [UpdateRequest],
     package_name: &str,
@@ -398,6 +465,45 @@ fn parse_update_request(value: &str) -> miette::Result<UpdateRequest> {
         explicit_spec: explicit_spec.map(ToString::to_string),
         pattern,
     })
+}
+
+fn workspace_update_requests(
+    manifest: &PackageManifest,
+    dependency_options: &InstallDependencyOptions,
+    workspace_packages: &pacquet_package_manager::WorkspacePackages,
+    packages: &[String],
+) -> miette::Result<Vec<UpdateRequest>> {
+    if packages.is_empty() {
+        let values = dependency_options
+            .dependency_groups()
+            .flat_map(|group| manifest.dependencies([group]).map(|(name, _)| name.to_string()))
+            .filter(|name| workspace_packages.contains_key(name))
+            .map(|name| format!("{name}@workspace:*"))
+            .collect::<Vec<_>>();
+        return values
+            .iter()
+            .map(|value| parse_update_request(value))
+            .collect::<miette::Result<Vec<_>>>();
+    }
+
+    packages
+        .iter()
+        .map(|value| {
+            let (name, spec) = split_package_spec(value);
+            if name.is_empty() {
+                miette::bail!("Cannot update/install from workspace through \"{value}\"");
+            }
+            if !workspace_packages.contains_key(name) {
+                miette::bail!("\"{name}\" not found in the workspace");
+            }
+            let normalized = match spec {
+                None => format!("{name}@workspace:*"),
+                Some(spec) if spec.starts_with("workspace:") => value.to_string(),
+                Some(spec) => format!("{name}@workspace:{spec}"),
+            };
+            parse_update_request(&normalized)
+        })
+        .collect::<miette::Result<Vec<_>>>()
 }
 
 fn split_package_spec(package: &str) -> (&str, Option<&str>) {
@@ -486,10 +592,22 @@ fn selector_matches(selector: &str, importer_id: &str, package_name: &str) -> bo
     normalized == importer_id || normalized == package_name
 }
 
-fn config_for_project(config: &Npmrc, project_dir: &Path) -> Npmrc {
+fn effective_virtual_store_dir(config: &Npmrc, lockfile_dir: &Path, project_dir: &Path) -> PathBuf {
+    let default_project_virtual_store_dir = config.modules_dir.join(".pnpm");
+    if project_dir != lockfile_dir && config.virtual_store_dir == default_project_virtual_store_dir
+    {
+        lockfile_dir.join("node_modules/.pnpm")
+    } else if config.virtual_store_dir.is_absolute() {
+        config.virtual_store_dir.clone()
+    } else {
+        lockfile_dir.join(&config.virtual_store_dir)
+    }
+}
+
+fn config_for_project(config: &Npmrc, lockfile_dir: &Path, project_dir: &Path) -> Npmrc {
     let mut next = config.clone();
     next.modules_dir = project_dir.join("node_modules");
-    next.virtual_store_dir = next.modules_dir.join(".pnpm");
+    next.virtual_store_dir = effective_virtual_store_dir(config, lockfile_dir, project_dir);
     next
 }
 

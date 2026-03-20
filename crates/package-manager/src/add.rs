@@ -8,7 +8,7 @@ use derive_more::{Display, Error};
 use miette::Diagnostic;
 use pacquet_lockfile::Lockfile;
 use pacquet_network::ThrottledClient;
-use pacquet_npmrc::Npmrc;
+use pacquet_npmrc::{LinkWorkspacePackages, Npmrc, SaveWorkspaceProtocol};
 use pacquet_package_manifest::PackageManifestError;
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_registry::{Package, PackageTag, PackageVersion, RegistryError};
@@ -252,23 +252,54 @@ async fn resolve_package_spec(
     if let Some(spec) = requested_spec
         && spec.starts_with("workspace:")
     {
-        let Some(_) = workspace_packages.get(package_name) else {
+        let Some(workspace_package) = workspace_packages.get(package_name) else {
             return Err(AddError::WorkspacePackageNotFound { package: package_name.to_string() });
         };
-        return Ok((package_name.to_string(), spec.to_string()));
+        let workspace_spec = match config.save_workspace_protocol {
+            SaveWorkspaceProtocol::Rolling => spec.to_string(),
+            SaveWorkspaceProtocol::True | SaveWorkspaceProtocol::False => {
+                workspace_spec_with_prefix(workspace_package.version.as_str(), spec)
+            }
+        };
+        return Ok((package_name.to_string(), workspace_spec));
     }
 
     if workspace_only {
-        let Some(_) = workspace_packages.get(package_name) else {
+        let Some(workspace_package) = workspace_packages.get(package_name) else {
             return Err(AddError::WorkspacePackageNotFound { package: package_name.to_string() });
         };
-        let workspace_spec = match requested_spec {
-            Some(spec) if spec.starts_with('~') => "workspace:~".to_string(),
-            Some(spec) if spec.starts_with('^') => "workspace:^".to_string(),
-            Some(spec) if spec.parse::<PackageTag>().is_ok() => "workspace:^".to_string(),
-            _ => "workspace:*".to_string(),
-        };
+        let workspace_spec = render_added_workspace_spec(
+            config.save_workspace_protocol,
+            workspace_package.version.as_str(),
+            requested_spec,
+        );
         return Ok((package_name.to_string(), workspace_spec));
+    }
+
+    if requested_spec.is_none()
+        && let Some(workspace_package) = workspace_packages.get(package_name)
+    {
+        match config.save_workspace_protocol {
+            SaveWorkspaceProtocol::Rolling | SaveWorkspaceProtocol::True => {
+                let workspace_spec = render_added_workspace_spec(
+                    config.save_workspace_protocol,
+                    workspace_package.version.as_str(),
+                    requested_spec,
+                );
+                return Ok((package_name.to_string(), workspace_spec));
+            }
+            SaveWorkspaceProtocol::False
+                if config.link_workspace_packages != LinkWorkspacePackages::False =>
+            {
+                let version_spec = if save_exact {
+                    workspace_package.version.clone()
+                } else {
+                    format!("^{}", workspace_package.version)
+                };
+                return Ok((package_name.to_string(), version_spec));
+            }
+            SaveWorkspaceProtocol::False => {}
+        }
     }
 
     let registry = config.registry_for_package_name(package_name);
@@ -328,6 +359,43 @@ async fn resolve_package_spec(
     };
 
     Ok((package_name.to_string(), version_range))
+}
+
+fn render_added_workspace_spec(
+    save_workspace_protocol: SaveWorkspaceProtocol,
+    workspace_version: &str,
+    requested_spec: Option<&str>,
+) -> String {
+    match save_workspace_protocol {
+        SaveWorkspaceProtocol::Rolling => match requested_spec {
+            Some(spec) if spec.starts_with('~') => "workspace:~".to_string(),
+            Some(spec) if spec.starts_with('^') => "workspace:^".to_string(),
+            Some(spec) if spec.starts_with("workspace:") => spec.to_string(),
+            Some(spec) if spec.parse::<PackageTag>().is_ok() => "workspace:^".to_string(),
+            Some(_) => "workspace:^".to_string(),
+            None => "workspace:^".to_string(),
+        },
+        SaveWorkspaceProtocol::True | SaveWorkspaceProtocol::False => {
+            workspace_spec_with_prefix(workspace_version, requested_spec.unwrap_or("^"))
+        }
+    }
+}
+
+fn workspace_spec_with_prefix(workspace_version: &str, spec: &str) -> String {
+    let normalized = spec.strip_prefix("workspace:").unwrap_or(spec);
+    if normalized.starts_with('~') {
+        return format!("workspace:~{workspace_version}");
+    }
+    if normalized.starts_with('^') {
+        return format!("workspace:^{workspace_version}");
+    }
+    if normalized == "*" || normalized.parse::<PackageTag>().is_ok() {
+        return format!("workspace:^{workspace_version}");
+    }
+    if normalized.is_empty() {
+        return format!("workspace:^{workspace_version}");
+    }
+    format!("workspace:{workspace_version}")
 }
 
 fn find_existing_workspace_direct_dependency_spec(

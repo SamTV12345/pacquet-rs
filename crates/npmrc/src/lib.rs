@@ -20,10 +20,11 @@ use crate::custom_deserializer::{
     bool_true, default_cache_dir, default_dlx_cache_max_age, default_fetch_timeout,
     default_hoist_pattern, default_modules_cache_max_age, default_modules_dir,
     default_network_concurrency, default_peers_suffix_max_length, default_public_hoist_pattern,
-    default_registry, default_store_dir, default_virtual_store_dir, deserialize_bool,
-    deserialize_link_workspace_packages, deserialize_optional_bool, deserialize_optional_pathbuf,
-    deserialize_pathbuf, deserialize_registry, deserialize_store_dir, deserialize_string_vec,
-    deserialize_u16, deserialize_u64,
+    default_registry, default_save_workspace_protocol, default_store_dir,
+    default_virtual_store_dir, deserialize_bool, deserialize_link_workspace_packages,
+    deserialize_optional_bool, deserialize_optional_pathbuf, deserialize_pathbuf,
+    deserialize_registry, deserialize_save_workspace_protocol, deserialize_store_dir,
+    deserialize_string_vec, deserialize_u16, deserialize_u64,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -66,6 +67,14 @@ impl LinkWorkspacePackages {
             Self::Deep => true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SaveWorkspaceProtocol {
+    False,
+    True,
+    #[default]
+    Rolling,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -269,6 +278,14 @@ pub struct Npmrc {
         deserialize_with = "deserialize_link_workspace_packages"
     )]
     pub link_workspace_packages: LinkWorkspacePackages,
+
+    /// Controls how workspace dependencies are written back to package.json.
+    #[serde(
+        default = "default_save_workspace_protocol",
+        alias = "save_workspace_protocol",
+        deserialize_with = "deserialize_save_workspace_protocol"
+    )]
+    pub save_workspace_protocol: SaveWorkspaceProtocol,
 
     /// When enabled, injected workspace dependencies may be deduplicated back to links when the
     /// target workspace project already provides a compatible dependency set.
@@ -932,6 +949,16 @@ mod tests {
     }
 
     #[test]
+    pub fn parse_save_workspace_protocol() {
+        let rolling: Npmrc = serde_ini::from_str("save-workspace-protocol=rolling").unwrap();
+        let enabled: Npmrc = serde_ini::from_str("save-workspace-protocol=true").unwrap();
+        let disabled: Npmrc = serde_ini::from_str("save-workspace-protocol=false").unwrap();
+        assert_eq!(rolling.save_workspace_protocol, SaveWorkspaceProtocol::Rolling);
+        assert_eq!(enabled.save_workspace_protocol, SaveWorkspaceProtocol::True);
+        assert_eq!(disabled.save_workspace_protocol, SaveWorkspaceProtocol::False);
+    }
+
+    #[test]
     pub fn parse_script_runner_settings() {
         let value: Npmrc = serde_ini::from_str(
             "enable-pre-post-scripts=true\nscript-shell=/bin/bash\nshell-emulator=true",
@@ -1042,13 +1069,14 @@ mod tests {
     #[test]
     pub fn parse_local_dependency_and_lockfile_bool_settings_from_underscore_keys() {
         let value: Npmrc = serde_ini::from_str(
-            "lockfile_include_tarball_url=true\nexclude_links_from_lockfile=true\ninject_workspace_packages=true\nlink_workspace_packages=deep\ndedupe_injected_deps=false\ndisable_relink_local_dir_deps=true\npeers_suffix_max_length=77",
+            "lockfile_include_tarball_url=true\nexclude_links_from_lockfile=true\ninject_workspace_packages=true\nlink_workspace_packages=deep\nsave_workspace_protocol=rolling\ndedupe_injected_deps=false\ndisable_relink_local_dir_deps=true\npeers_suffix_max_length=77",
         )
         .unwrap();
         assert!(value.lockfile_include_tarball_url);
         assert!(value.exclude_links_from_lockfile);
         assert!(value.inject_workspace_packages);
         assert_eq!(value.link_workspace_packages, LinkWorkspacePackages::Deep);
+        assert_eq!(value.save_workspace_protocol, SaveWorkspaceProtocol::Rolling);
         assert!(!value.dedupe_injected_deps);
         assert!(value.disable_relink_local_dir_deps);
         assert_eq!(value.peers_suffix_max_length, 77);

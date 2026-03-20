@@ -21,6 +21,7 @@ For more information, read [pnpm docs about .npmrc](https://pnpm.io/npmrc)
 | ✅    | virtual_store_dir     |                                     |
 | ✅    | package_import_method | `auto`, `copy`, `hardlink`, `clone`, and `clone-or-copy` wired for store imports plus local directory materialization/relink; local source `node_modules` is ignored during import (`clone` depends on reflink support) |
 | ✅    | link_workspace_packages | defaults to pnpm-style `false`; non-`workspace:` ranges resolve from the registry unless this is `true` (direct deps) or `deep` (transitive too), while explicit `workspace:` specs still resolve locally |
+| ✅    | save_workspace_protocol | defaults to pnpm-style `rolling`; `add` saves local workspace packages as `workspace:^/*/~` depending on input, explicit `workspace:` specs are preserved under `rolling`, and `update` rolls existing workspace ranges to pnpm-style `workspace:^/~/*` forms |
 | ✅    | disable_relink_local_dir_deps | skips refreshing/relinking already-installed local directory dependencies on reinstall, including injected workspace deps, hardlinked local dirs, and frozen installs |
 | ✅    | modules_cache_max_age | stale orphan virtual-store entries are pruned using pnpm-like `node_modules/.modules.yaml` `prunedAt` age gating |
 

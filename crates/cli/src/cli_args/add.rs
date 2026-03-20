@@ -3,7 +3,7 @@ use crate::cli_args::install::parse_install_reporter;
 use clap::Args;
 use miette::Context;
 use pacquet_lockfile::Lockfile;
-use pacquet_npmrc::Npmrc;
+use pacquet_npmrc::{LinkWorkspacePackages, Npmrc, SaveWorkspaceProtocol};
 use pacquet_package_manager::{
     Add, current_lockfile_for_installers_preserving_unselected_importers,
 };
@@ -141,6 +141,18 @@ impl AddArgs {
             workspace_packages,
             resolved_packages,
         } = &mut state;
+
+        if workspace && workspace_packages.is_empty() {
+            miette::bail!("--workspace can only be used inside a workspace");
+        }
+        if workspace
+            && config.link_workspace_packages == LinkWorkspacePackages::False
+            && config.save_workspace_protocol == SaveWorkspaceProtocol::False
+        {
+            miette::bail!(
+                "This workspace has link-workspace-packages turned off, so dependencies are linked from the workspace only when the workspace protocol is used. Either set link-workspace-packages to true or don't use the --no-save-workspace-protocol option when running add with the --workspace option"
+            );
+        }
 
         if !filter.is_empty() || recursive {
             let mut targets = BTreeMap::<String, PathBuf>::new();

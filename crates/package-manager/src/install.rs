@@ -10,7 +10,7 @@ use crate::{
 };
 use pacquet_lockfile::{
     DependencyPath, Lockfile, PackageSnapshot, PackageSnapshotDependency, PkgName, PkgNameVerPeer,
-    ResolvedDependencyVersion, RootProjectSnapshot,
+    ProjectSnapshot, ResolvedDependencyVersion, RootProjectSnapshot,
 };
 use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
@@ -340,6 +340,13 @@ where
                             lockfile.lockfile_version.major >= 9,
                         )
                         .is_ok()
+                        && direct_workspace_links_match_current_config(
+                            config,
+                            manifest,
+                            project_snapshot,
+                            workspace_packages,
+                            &dependency_groups,
+                        )
                         && satisfies_root_lockfile_config(lockfile, manifest, lockfile_dir).is_ok()
                 });
 
@@ -673,44 +680,73 @@ pub fn current_lockfile_for_installers(
     dependency_groups: &[DependencyGroup],
     skipped: &std::collections::HashSet<String>,
 ) -> Lockfile {
-    let project_snapshot = match &lockfile.project_snapshot {
-        RootProjectSnapshot::Single(snapshot) => RootProjectSnapshot::Single(snapshot.clone()),
-        RootProjectSnapshot::Multi(snapshot) => {
-            RootProjectSnapshot::Multi(pacquet_lockfile::MultiProjectSnapshot {
-                importers: snapshot
-                    .importers
-                    .iter()
-                    .filter(|(importer_id, _)| importer_ids.contains(*importer_id))
-                    .map(|(importer_id, snapshot)| (importer_id.clone(), snapshot.clone()))
-                    .collect(),
-            })
-        }
-    };
-
     let Some(packages) = lockfile.packages.as_ref() else {
+        let project_snapshot = filter_current_lockfile_project_snapshot(
+            &lockfile.project_snapshot,
+            importer_ids,
+            dependency_groups,
+            None,
+        );
         return Lockfile { project_snapshot, packages: None, ..lockfile.clone() };
     };
 
-    let mut queue = direct_dependency_paths(&project_snapshot, packages, dependency_groups);
+    let mut selected_importer_ids = importer_ids.clone();
+    let mut importer_queue = importer_ids.iter().cloned().collect::<Vec<_>>();
+    let mut queue = Vec::<(DependencyPath, bool)>::new();
     let mut seen = std::collections::HashSet::<DependencyPath>::new();
     let mut filtered_packages = HashMap::<DependencyPath, PackageSnapshot>::new();
-    while let Some(candidate_path) = queue.pop() {
+    while !importer_queue.is_empty() || !queue.is_empty() {
+        while let Some(importer_id) = importer_queue.pop() {
+            let Some(project_snapshot) =
+                project_snapshot_by_id(&lockfile.project_snapshot, &importer_id)
+            else {
+                continue;
+            };
+            enqueue_project_snapshot_dependencies(
+                project_snapshot,
+                packages,
+                &lockfile.project_snapshot,
+                &mut selected_importer_ids,
+                &mut importer_queue,
+                &mut queue,
+                dependency_groups,
+            );
+        }
+
+        let Some((candidate_path, parent_installable)) = queue.pop() else {
+            continue;
+        };
         let Some((resolved_path, package_snapshot)) =
-            resolve_package_snapshot(packages, &candidate_path)
+            resolve_package_snapshot_deduped(packages, &candidate_path)
         else {
             continue;
         };
-        if skipped.contains(&resolved_path.to_string()) || !seen.insert(resolved_path.clone()) {
+        if !seen.insert(resolved_path.clone()) {
             continue;
         }
+        let installable = parent_installable && !skipped.contains(&resolved_path.to_string());
         filtered_packages.insert(resolved_path.clone(), package_snapshot.clone());
         for (alias, dependency_spec) in crate::package_dependency_map(package_snapshot) {
+            if let Some(linked_importer_id) =
+                importer_id_from_snapshot_dependency(&dependency_spec, &lockfile.project_snapshot)
+            {
+                if selected_importer_ids.insert(linked_importer_id.clone()) {
+                    importer_queue.push(linked_importer_id);
+                }
+                continue;
+            }
             if let Some(path) = dependency_path_from_snapshot_dependency(&alias, &dependency_spec) {
-                queue.push(path);
+                queue.push((path, installable));
             }
         }
     }
 
+    let project_snapshot = filter_current_lockfile_project_snapshot(
+        &lockfile.project_snapshot,
+        &selected_importer_ids,
+        dependency_groups,
+        Some(&filtered_packages),
+    );
     Lockfile { project_snapshot, packages: Some(filtered_packages), ..lockfile.clone() }
 }
 
@@ -771,23 +807,214 @@ pub fn current_lockfile_for_installers_preserving_unselected_importers(
     filtered
 }
 
-fn direct_dependency_paths(
-    project_snapshot: &RootProjectSnapshot,
-    packages: &HashMap<DependencyPath, PackageSnapshot>,
-    dependency_groups: &[DependencyGroup],
-) -> Vec<DependencyPath> {
+fn project_snapshot_by_id<'a>(
+    project_snapshot: &'a RootProjectSnapshot,
+    importer_id: &str,
+) -> Option<&'a ProjectSnapshot> {
     match project_snapshot {
-        RootProjectSnapshot::Single(snapshot) => snapshot
-            .dependencies_by_groups(dependency_groups.iter().copied())
-            .filter_map(|(alias, spec)| direct_dependency_path(alias, &spec.version, packages))
-            .collect(),
-        RootProjectSnapshot::Multi(snapshot) => snapshot
-            .importers
-            .values()
-            .flat_map(|project| project.dependencies_by_groups(dependency_groups.iter().copied()))
-            .filter_map(|(alias, spec)| direct_dependency_path(alias, &spec.version, packages))
-            .collect(),
+        RootProjectSnapshot::Single(snapshot) => (importer_id == ".").then_some(snapshot),
+        RootProjectSnapshot::Multi(snapshot) => snapshot.importers.get(importer_id),
     }
+}
+
+fn enqueue_project_snapshot_dependencies(
+    project_snapshot: &ProjectSnapshot,
+    packages: &HashMap<DependencyPath, PackageSnapshot>,
+    root_project_snapshot: &RootProjectSnapshot,
+    selected_importer_ids: &mut std::collections::HashSet<String>,
+    importer_queue: &mut Vec<String>,
+    queue: &mut Vec<(DependencyPath, bool)>,
+    dependency_groups: &[DependencyGroup],
+) {
+    for (alias, spec) in project_snapshot.dependencies_by_groups(dependency_groups.iter().copied())
+    {
+        if let Some(linked_importer_id) =
+            importer_id_from_resolved_dependency_version(&spec.version, root_project_snapshot)
+        {
+            if selected_importer_ids.insert(linked_importer_id.clone()) {
+                importer_queue.push(linked_importer_id);
+            }
+            continue;
+        }
+        if let Some(path) =
+            direct_dependency_path_for_current_lockfile(alias, &spec.version, packages)
+        {
+            queue.push((path, true));
+        }
+    }
+}
+
+fn importer_id_from_resolved_dependency_version(
+    resolved_version: &ResolvedDependencyVersion,
+    project_snapshot: &RootProjectSnapshot,
+) -> Option<String> {
+    let ResolvedDependencyVersion::Link(link) = resolved_version else {
+        return None;
+    };
+    importer_id_from_link(link, project_snapshot)
+}
+
+fn importer_id_from_snapshot_dependency(
+    dependency_spec: &PackageSnapshotDependency,
+    project_snapshot: &RootProjectSnapshot,
+) -> Option<String> {
+    let PackageSnapshotDependency::Link(link) = dependency_spec else {
+        return None;
+    };
+    importer_id_from_link(link, project_snapshot)
+}
+
+fn importer_id_from_link(link: &str, project_snapshot: &RootProjectSnapshot) -> Option<String> {
+    let importer_id = link.strip_prefix("link:")?;
+    match project_snapshot {
+        RootProjectSnapshot::Single(_) => (importer_id == ".").then(|| importer_id.to_string()),
+        RootProjectSnapshot::Multi(snapshot) => {
+            snapshot.importers.contains_key(importer_id).then(|| importer_id.to_string())
+        }
+    }
+}
+
+fn direct_dependency_path_for_current_lockfile(
+    alias: &PkgName,
+    resolved_version: &ResolvedDependencyVersion,
+    packages: &HashMap<DependencyPath, PackageSnapshot>,
+) -> Option<DependencyPath> {
+    let dependency_path = match resolved_version {
+        ResolvedDependencyVersion::PkgVerPeer(ver_peer) => {
+            DependencyPath::registry(None, PkgNameVerPeer::new(alias.clone(), ver_peer.clone()))
+        }
+        ResolvedDependencyVersion::PkgNameVerPeer(specifier) => {
+            DependencyPath::registry(None, specifier.clone())
+        }
+        ResolvedDependencyVersion::Link(link) => {
+            if !link.starts_with("file:") {
+                return None;
+            }
+            DependencyPath::local_file(alias.clone(), link.clone())
+        }
+    };
+    resolve_package_snapshot_deduped(packages, &dependency_path)
+        .map(|(resolved_path, _)| resolved_path)
+}
+
+fn filter_current_lockfile_project_snapshot(
+    root_project_snapshot: &RootProjectSnapshot,
+    importer_ids: &std::collections::HashSet<String>,
+    dependency_groups: &[DependencyGroup],
+    packages: Option<&HashMap<DependencyPath, PackageSnapshot>>,
+) -> RootProjectSnapshot {
+    match root_project_snapshot {
+        RootProjectSnapshot::Single(snapshot) => {
+            RootProjectSnapshot::Single(filter_project_snapshot(
+                snapshot,
+                root_project_snapshot,
+                importer_ids,
+                dependency_groups,
+                packages,
+            ))
+        }
+        RootProjectSnapshot::Multi(snapshot) => {
+            RootProjectSnapshot::Multi(pacquet_lockfile::MultiProjectSnapshot {
+                importers: snapshot
+                    .importers
+                    .iter()
+                    .filter(|(importer_id, _)| importer_ids.contains(*importer_id))
+                    .map(|(importer_id, snapshot)| {
+                        (
+                            importer_id.clone(),
+                            filter_project_snapshot(
+                                snapshot,
+                                root_project_snapshot,
+                                importer_ids,
+                                dependency_groups,
+                                packages,
+                            ),
+                        )
+                    })
+                    .collect(),
+            })
+        }
+    }
+}
+
+fn filter_project_snapshot(
+    project_snapshot: &ProjectSnapshot,
+    root_project_snapshot: &RootProjectSnapshot,
+    importer_ids: &std::collections::HashSet<String>,
+    dependency_groups: &[DependencyGroup],
+    packages: Option<&HashMap<DependencyPath, PackageSnapshot>>,
+) -> ProjectSnapshot {
+    let mut filtered = project_snapshot.clone();
+    filter_resolved_dependency_map(
+        filtered.dependencies.as_mut(),
+        root_project_snapshot,
+        importer_ids,
+        packages,
+        dependency_groups.contains(&DependencyGroup::Prod),
+    );
+    filter_resolved_dependency_map(
+        filtered.optional_dependencies.as_mut(),
+        root_project_snapshot,
+        importer_ids,
+        packages,
+        dependency_groups.contains(&DependencyGroup::Optional),
+    );
+    filter_resolved_dependency_map(
+        filtered.dev_dependencies.as_mut(),
+        root_project_snapshot,
+        importer_ids,
+        packages,
+        dependency_groups.contains(&DependencyGroup::Dev),
+    );
+
+    let kept_specifiers = filtered
+        .dependencies
+        .iter()
+        .flatten()
+        .chain(filtered.optional_dependencies.iter().flatten())
+        .chain(filtered.dev_dependencies.iter().flatten())
+        .map(|(alias, _)| alias.to_string())
+        .collect::<std::collections::HashSet<_>>();
+    filtered.specifiers = project_snapshot.specifiers.as_ref().and_then(|specifiers| {
+        let filtered_specifiers = specifiers
+            .iter()
+            .filter(|(alias, _)| kept_specifiers.contains(alias.as_str()))
+            .map(|(alias, specifier)| (alias.clone(), specifier.clone()))
+            .collect::<HashMap<_, _>>();
+        (!filtered_specifiers.is_empty()).then_some(filtered_specifiers)
+    });
+    filtered
+}
+
+fn filter_resolved_dependency_map(
+    map: Option<&mut HashMap<PkgName, pacquet_lockfile::ResolvedDependencySpec>>,
+    root_project_snapshot: &RootProjectSnapshot,
+    importer_ids: &std::collections::HashSet<String>,
+    packages: Option<&HashMap<DependencyPath, PackageSnapshot>>,
+    include: bool,
+) {
+    let Some(map) = map else {
+        return;
+    };
+    if !include {
+        map.clear();
+        return;
+    }
+    map.retain(|alias, spec| {
+        if matches!(&spec.version, ResolvedDependencyVersion::Link(link) if link.starts_with("link:")) {
+            return true;
+        }
+        if let Some(importer_id) =
+            importer_id_from_resolved_dependency_version(&spec.version, root_project_snapshot)
+        {
+            return importer_ids.contains(&importer_id);
+        }
+        let Some(packages) = packages else {
+            return true;
+        };
+        direct_dependency_path(alias, &spec.version, packages)
+            .is_some_and(|dependency_path| packages.contains_key(&dependency_path))
+    });
 }
 
 fn direct_dependency_path(
@@ -848,6 +1075,86 @@ fn resolve_package_snapshot<'a>(
             dependency_path.package_specifier == candidate_path.package_specifier
         })
         .map(|(dependency_path, snapshot)| (dependency_path.clone(), snapshot))
+}
+
+fn resolve_package_snapshot_deduped<'a>(
+    packages: &'a HashMap<DependencyPath, PackageSnapshot>,
+    candidate_path: &DependencyPath,
+) -> Option<(DependencyPath, &'a PackageSnapshot)> {
+    let (resolved_path, resolved_snapshot) = resolve_package_snapshot(packages, candidate_path)?;
+    let mut best_path = resolved_path.clone();
+    let mut best_snapshot = resolved_snapshot;
+
+    for (other_path, other_snapshot) in packages {
+        if *other_path == resolved_path {
+            continue;
+        }
+        if !same_base_package(&resolved_path, other_path) {
+            continue;
+        }
+        if !is_compatible_and_has_more_deps(other_snapshot, best_snapshot) {
+            continue;
+        }
+        let better = dependency_score(other_snapshot) > dependency_score(best_snapshot)
+            || (dependency_score(other_snapshot) == dependency_score(best_snapshot)
+                && other_path.to_string() < best_path.to_string());
+        if better {
+            best_path = other_path.clone();
+            best_snapshot = other_snapshot;
+        }
+    }
+
+    Some((best_path, best_snapshot))
+}
+
+fn same_base_package(left: &DependencyPath, right: &DependencyPath) -> bool {
+    match (
+        left.package_specifier.registry_specifier(),
+        right.package_specifier.registry_specifier(),
+    ) {
+        (Some(left_specifier), Some(right_specifier)) => {
+            left.custom_registry == right.custom_registry
+                && left_specifier.name == right_specifier.name
+                && left_specifier.suffix.version() == right_specifier.suffix.version()
+        }
+        _ => left == right,
+    }
+}
+
+fn dependency_score(snapshot: &PackageSnapshot) -> usize {
+    let dependency_count = snapshot.dependencies.as_ref().map_or(0, HashMap::len);
+    let transitive_peer_count = snapshot.transitive_peer_dependencies.as_ref().map_or(0, Vec::len);
+    dependency_count + transitive_peer_count
+}
+
+fn is_compatible_and_has_more_deps(candidate: &PackageSnapshot, current: &PackageSnapshot) -> bool {
+    if dependency_score(candidate) < dependency_score(current) {
+        return false;
+    }
+
+    let candidate_deps = candidate.dependencies.as_ref();
+    let current_deps = current.dependencies.as_ref();
+    if let Some(current_deps) = current_deps {
+        let Some(candidate_deps) = candidate_deps else {
+            return false;
+        };
+        if !current_deps.iter().all(|(alias, dep)| {
+            candidate_deps.get(alias).is_some_and(|candidate_dep| candidate_dep == dep)
+        }) {
+            return false;
+        }
+    }
+
+    let candidate_peers = candidate
+        .transitive_peer_dependencies
+        .as_ref()
+        .map_or_else(HashSet::new, |peers| peers.iter().cloned().collect::<HashSet<_>>());
+    let current_peers = current
+        .transitive_peer_dependencies
+        .as_ref()
+        .map_or_else(HashSet::new, |peers| peers.iter().cloned().collect::<HashSet<_>>());
+
+    current_peers.is_subset(&candidate_peers)
 }
 
 fn print_pnpm_style_summary(
@@ -1166,6 +1473,108 @@ fn should_prefer_frozen_lockfile_path(
     has_local_directory_dependency_specs: bool,
 ) -> bool {
     lockfile_is_reusable && prefer_frozen_lockfile && !has_local_directory_dependency_specs
+}
+
+fn direct_workspace_links_match_current_config(
+    config: &Npmrc,
+    manifest: &PackageManifest,
+    project_snapshot: &pacquet_lockfile::ProjectSnapshot,
+    workspace_packages: &WorkspacePackages,
+    dependency_groups: &[DependencyGroup],
+) -> bool {
+    let project_dir = manifest.path().parent().unwrap_or_else(|| Path::new("."));
+    manifest.dependencies(dependency_groups.iter().copied()).all(|(name, specifier)| {
+        let Some(workspace_package) = expected_workspace_dependency_for_install(
+            config,
+            workspace_packages,
+            name,
+            specifier,
+            0,
+        ) else {
+            return true;
+        };
+
+        let Some((_, resolved)) = project_snapshot
+            .dependencies_by_groups(dependency_groups.iter().copied())
+            .find(|(pkg_name, _)| pkg_name.to_string() == name)
+        else {
+            return false;
+        };
+
+        let expected_link =
+            expected_workspace_link_reference(project_dir, &workspace_package.root_dir);
+        matches!(
+            &resolved.version,
+            ResolvedDependencyVersion::Link(link) if link == &expected_link
+        )
+    })
+}
+
+pub fn expected_workspace_dependency_for_install<'a>(
+    config: &Npmrc,
+    workspace_packages: &'a WorkspacePackages,
+    dependency_name: &str,
+    specifier: &str,
+    depth: usize,
+) -> Option<&'a crate::WorkspacePackageInfo> {
+    if specifier.starts_with("workspace:") {
+        return crate::workspace_packages::require_workspace_dependency(
+            workspace_packages,
+            dependency_name,
+            specifier,
+        )
+        .ok();
+    }
+
+    if !config.link_workspace_packages.links_at_depth(depth) {
+        return None;
+    }
+
+    let (target_name, target_specifier) =
+        parse_npm_alias_workspace_target(specifier).unwrap_or((dependency_name, specifier));
+    crate::workspace_packages::resolve_workspace_dependency_by_plain_spec(
+        workspace_packages,
+        target_name,
+        target_specifier,
+    )
+}
+
+fn parse_npm_alias_workspace_target(version_range: &str) -> Option<(&str, &str)> {
+    let alias = version_range.strip_prefix("npm:")?;
+    let separator = alias.rfind('@');
+    match separator {
+        Some(index) if index > 0 => Some((&alias[..index], &alias[index + 1..])),
+        _ => Some((alias, "latest")),
+    }
+}
+
+fn expected_workspace_link_reference(project_dir: &Path, workspace_root_dir: &Path) -> String {
+    format!("link:{}", to_relative_path(project_dir, workspace_root_dir).replace('\\', "/"))
+}
+
+fn to_relative_path(from: &Path, to: &Path) -> String {
+    let from_components = from.components().collect::<Vec<_>>();
+    let to_components = to.components().collect::<Vec<_>>();
+
+    let common_len = from_components
+        .iter()
+        .zip(to_components.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+
+    if common_len == 0 {
+        return to.to_string_lossy().into_owned();
+    }
+
+    let mut relative_parts = Vec::<String>::new();
+    for _ in common_len..from_components.len() {
+        relative_parts.push("..".to_string());
+    }
+    for component in to_components.iter().skip(common_len) {
+        relative_parts.push(component.as_os_str().to_string_lossy().into_owned());
+    }
+
+    if relative_parts.is_empty() { ".".to_string() } else { relative_parts.join("/") }
 }
 
 fn persisted_install_state_is_reusable(
@@ -1899,7 +2308,9 @@ mod tests {
         let content = fs::read_to_string(&manifest_path).expect("read modules manifest");
         fs::write(
             &manifest_path,
-            content.replace("virtualStoreDirMaxLength: 120", "virtualStoreDirMaxLength: 64"),
+            content
+                .replace("\"virtualStoreDirMaxLength\": 60", "\"virtualStoreDirMaxLength\": 64")
+                .replace("\"virtualStoreDirMaxLength\": 120", "\"virtualStoreDirMaxLength\": 64"),
         )
         .expect("rewrite modules manifest");
 
@@ -2065,6 +2476,107 @@ mod tests {
         assert!(skipped.is_empty());
         let filtered_packages = filtered_packages.expect("filtered packages");
         assert_eq!(filtered_packages.len(), 2);
+    }
+
+    #[test]
+    fn direct_workspace_links_match_current_config_requires_relink_for_registry_and_alias_specs() {
+        use pacquet_lockfile::{ResolvedDependencyMap, ResolvedDependencySpec};
+
+        let dir = tempdir().expect("tempdir");
+        let workspace_root = dir.path().join("workspace");
+        let project_manifest_path = workspace_root.join("project/package.json");
+        fs::create_dir_all(project_manifest_path.parent().expect("project parent"))
+            .expect("create project parent");
+
+        let mut manifest =
+            PackageManifest::create_if_needed(project_manifest_path).expect("create manifest");
+        manifest
+            .add_dependency("is-positive", "2.0.0", DependencyGroup::Prod)
+            .expect("add positive dependency");
+        manifest
+            .add_dependency("negative", "npm:is-negative@1.0.0", DependencyGroup::Prod)
+            .expect("add negative alias dependency");
+        manifest.save().expect("save manifest");
+
+        let workspace_packages = HashMap::from([
+            (
+                "is-positive".to_string(),
+                crate::WorkspacePackageInfo {
+                    root_dir: workspace_root.join("is-positive"),
+                    version: "2.0.0".to_string(),
+                },
+            ),
+            (
+                "is-negative".to_string(),
+                crate::WorkspacePackageInfo {
+                    root_dir: workspace_root.join("is-negative"),
+                    version: "1.0.0".to_string(),
+                },
+            ),
+        ]);
+
+        let mut config = Npmrc::new();
+        config.link_workspace_packages = pacquet_npmrc::LinkWorkspacePackages::Direct;
+
+        let registry_snapshot = pacquet_lockfile::ProjectSnapshot {
+            dependencies: Some(ResolvedDependencyMap::from([
+                (
+                    "is-positive".parse().expect("positive alias"),
+                    ResolvedDependencySpec {
+                        specifier: "2.0.0".to_string(),
+                        version: ResolvedDependencyVersion::PkgVerPeer(
+                            "2.0.0".parse().expect("positive version"),
+                        ),
+                    },
+                ),
+                (
+                    "negative".parse().expect("negative alias"),
+                    ResolvedDependencySpec {
+                        specifier: "npm:is-negative@1.0.0".to_string(),
+                        version: ResolvedDependencyVersion::PkgNameVerPeer(
+                            "is-negative@1.0.0".parse().expect("negative version"),
+                        ),
+                    },
+                ),
+            ])),
+            ..Default::default()
+        };
+
+        assert!(!direct_workspace_links_match_current_config(
+            &config,
+            &manifest,
+            &registry_snapshot,
+            &workspace_packages,
+            &[DependencyGroup::Prod],
+        ));
+
+        let linked_snapshot = pacquet_lockfile::ProjectSnapshot {
+            dependencies: Some(ResolvedDependencyMap::from([
+                (
+                    "is-positive".parse().expect("positive alias"),
+                    ResolvedDependencySpec {
+                        specifier: "2.0.0".to_string(),
+                        version: ResolvedDependencyVersion::Link("link:../is-positive".to_string()),
+                    },
+                ),
+                (
+                    "negative".parse().expect("negative alias"),
+                    ResolvedDependencySpec {
+                        specifier: "npm:is-negative@1.0.0".to_string(),
+                        version: ResolvedDependencyVersion::Link("link:../is-negative".to_string()),
+                    },
+                ),
+            ])),
+            ..Default::default()
+        };
+
+        assert!(direct_workspace_links_match_current_config(
+            &config,
+            &manifest,
+            &linked_snapshot,
+            &workspace_packages,
+            &[DependencyGroup::Prod],
+        ));
     }
 
     #[test]
@@ -2494,6 +3006,68 @@ mod tests {
         assert_eq!(filtered_packages.len(), 1);
         assert!(filtered_packages.contains_key(&dep_b_path));
         assert!(!filtered_packages.contains_key(&dep_a_path));
+    }
+
+    #[test]
+    fn current_lockfile_for_installers_preserves_relative_workspace_link_importers() {
+        let lockfile = Lockfile {
+            lockfile_version: "9.0".parse().expect("lockfile version"),
+            settings: None,
+            project_snapshot: RootProjectSnapshot::Multi(pacquet_lockfile::MultiProjectSnapshot {
+                importers: HashMap::from([
+                    (
+                        "bin".to_string(),
+                        pacquet_lockfile::ProjectSnapshot {
+                            dependencies: Some(HashMap::from([(
+                                "ep_etherpad-lite".parse().expect("alias"),
+                                pacquet_lockfile::ResolvedDependencySpec {
+                                    specifier: "workspace:../src".to_string(),
+                                    version: ResolvedDependencyVersion::Link(
+                                        "link:../src".to_string(),
+                                    ),
+                                },
+                            )])),
+                            specifiers: Some(HashMap::from([(
+                                "ep_etherpad-lite".parse().expect("specifier alias"),
+                                "workspace:../src".to_string(),
+                            )])),
+                            ..ProjectSnapshot::default()
+                        },
+                    ),
+                    ("src".to_string(), ProjectSnapshot::default()),
+                ]),
+            }),
+            packages: Some(HashMap::new()),
+            never_built_dependencies: None,
+            overrides: None,
+            package_extensions_checksum: None,
+            patched_dependencies: None,
+            pnpmfile_checksum: None,
+            catalogs: None,
+            time: None,
+            ignored_optional_dependencies: None,
+            extra_fields: Default::default(),
+        };
+
+        let filtered = current_lockfile_for_installers(
+            &lockfile,
+            &HashSet::from(["bin".to_string(), "src".to_string()]),
+            &[DependencyGroup::Prod],
+            &HashSet::new(),
+        );
+
+        let RootProjectSnapshot::Multi(filtered_snapshot) = filtered.project_snapshot else {
+            panic!("expected multi-importer current lockfile");
+        };
+        let bin = filtered_snapshot.importers.get("bin").expect("bin importer");
+        let alias: PkgName = "ep_etherpad-lite".parse().expect("pkg name");
+        let dep = bin
+            .dependencies
+            .as_ref()
+            .and_then(|deps| deps.get(&alias))
+            .expect("workspace link dependency");
+        assert_eq!(dep.specifier, "workspace:../src");
+        assert_eq!(dep.version, ResolvedDependencyVersion::Link("link:../src".to_string()));
     }
 
     #[test]

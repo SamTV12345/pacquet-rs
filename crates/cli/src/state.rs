@@ -111,6 +111,12 @@ struct WorkspaceManifest {
     packages: Option<Vec<String>>,
 }
 
+pub(crate) struct WorkspaceStateProject {
+    pub root_dir: PathBuf,
+    pub name: Option<String>,
+    pub version: Option<String>,
+}
+
 fn collect_workspace_packages(workspace_root: &Path) -> WorkspacePackages {
     let patterns = read_workspace_package_patterns(workspace_root);
     let package_json_paths = collect_package_json_paths(workspace_root);
@@ -138,7 +144,41 @@ fn collect_workspace_packages(workspace_root: &Path) -> WorkspacePackages {
         .collect()
 }
 
-fn read_workspace_package_patterns(workspace_root: &Path) -> Option<Vec<String>> {
+pub(crate) fn collect_workspace_state_projects(
+    workspace_root: &Path,
+) -> Vec<WorkspaceStateProject> {
+    let patterns = read_workspace_package_patterns(workspace_root);
+    let package_json_paths = collect_package_json_paths(workspace_root);
+
+    package_json_paths
+        .into_iter()
+        .filter_map(|manifest_path| {
+            let root_dir = manifest_path.parent()?.to_path_buf();
+            if root_dir != workspace_root
+                && !workspace_path_matches_patterns(workspace_root, &root_dir, patterns.as_deref())
+            {
+                return None;
+            }
+
+            let manifest = PackageManifest::from_path(manifest_path).ok()?;
+            Some(WorkspaceStateProject {
+                root_dir,
+                name: manifest
+                    .value()
+                    .get("name")
+                    .and_then(|name| name.as_str())
+                    .map(ToString::to_string),
+                version: manifest
+                    .value()
+                    .get("version")
+                    .and_then(|version| version.as_str())
+                    .map(ToString::to_string),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn read_workspace_package_patterns(workspace_root: &Path) -> Option<Vec<String>> {
     let manifest_path = workspace_root.join("pnpm-workspace.yaml");
     let manifest_text = fs::read_to_string(manifest_path).ok()?;
     let manifest = serde_yaml::from_str::<WorkspaceManifest>(&manifest_text).ok()?;

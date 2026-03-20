@@ -58,6 +58,7 @@ Implemented in pacquet:
 - `store`
 - `test`
 - `unlink`
+- `update`
 - `why`
 
 Present but only partial pnpm parity:
@@ -91,7 +92,6 @@ Missing compared to local pnpm:
 - `self-update`
 - `server`
 - `setup`
-- `update`
 
 Internal pnpm command wiring not counted as user-facing parity:
 - `completion-server`

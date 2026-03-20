@@ -72,8 +72,10 @@ fn write_modules_manifest(path: &Path, manifest: ModulesManifestLite) -> miette:
             .into_diagnostic()
             .wrap_err_with(|| format!("create {}", parent.display()))?;
     }
-    let rendered =
-        serde_yaml::to_string(&manifest).into_diagnostic().wrap_err("serialize .modules.yaml")?;
+    let rendered = serde_json::to_string_pretty(&manifest)
+        .into_diagnostic()
+        .wrap_err("serialize .modules.yaml")?
+        + "\n";
     fs::write(path, rendered)
         .into_diagnostic()
         .wrap_err_with(|| format!("write {}", path.display()))

@@ -1,19 +1,28 @@
-use crate::State;
+use crate::{
+    State,
+    state::{collect_workspace_state_projects, read_workspace_package_patterns},
+};
 use clap::Args;
 use miette::{Context, IntoDiagnostic};
 use pacquet_executor::{ExecuteLifecycleScript, execute_lifecycle_script};
 use pacquet_lockfile::Lockfile;
-use pacquet_npmrc::{NodeLinker, Npmrc};
+use pacquet_npmrc::{LinkWorkspacePackages, NodeLinker, Npmrc};
 use pacquet_package_manager::{
     Install, InstallFrozenWorkspace, InstallReporter, PreferredVersions,
     WorkspaceFrozenInstallTarget, WorkspacePackages,
     current_lockfile_for_installers_preserving_unselected_importers, finish_progress_reporter,
     link_bins_for_manifest, start_progress_reporter, warn_progress_reporter,
+    write_modules_manifest,
 };
 use pacquet_package_manifest::{DependencyGroup, PackageManifest};
 use pacquet_store_dir::StoreDir;
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Debug, Default, Args)]
 pub struct InstallDependencyOptions {
@@ -389,6 +398,7 @@ impl InstallArgs {
             && !lockfile_only
             && let Some(lockfile) = current_lockfile.as_ref()
         {
+            let skipped_dep_paths_vec = skipped_dep_paths.iter().cloned().collect::<Vec<_>>();
             let current_lockfile = current_lockfile_for_installers_preserving_unselected_importers(
                 lockfile,
                 config,
@@ -399,6 +409,15 @@ impl InstallArgs {
             current_lockfile
                 .save_to_path(&current_lockfile_virtual_store_dir.join("lock.yaml"))
                 .wrap_err("write node_modules/.pnpm/lock.yaml")?;
+            rewrite_root_modules_manifest_from_current_lockfile(
+                config,
+                lockfile_dir,
+                shamefully_hoist,
+                prefer_frozen_lockfile_override,
+                &dependency_groups,
+                &skipped_dep_paths_vec,
+                &current_lockfile,
+            )?;
         }
 
         if !ignore_scripts && !lockfile_only && multiple_targets {
@@ -409,6 +428,25 @@ impl InstallArgs {
                 shamefully_hoist,
                 prefer_frozen_lockfile_override,
                 &dependency_groups,
+            )?;
+        }
+
+        if !lockfile_only && lockfile_dir.join("pnpm-workspace.yaml").is_file() {
+            let workspace_state_config = config_for_project(
+                config,
+                lockfile_dir,
+                lockfile_dir,
+                shamefully_hoist,
+                prefer_frozen_lockfile_override,
+            );
+            write_workspace_state(
+                lockfile_dir,
+                &workspace_state_config,
+                current_lockfile.as_ref(),
+                &dependency_groups,
+                !filter.is_empty(),
+                ignore_pnpmfile,
+                pnpmfile.as_deref(),
             )?;
         }
 
@@ -543,6 +581,46 @@ fn effective_virtual_store_dir(config: &Npmrc, lockfile_dir: &Path, project_dir:
     }
 }
 
+fn rewrite_root_modules_manifest_from_current_lockfile(
+    config: &Npmrc,
+    lockfile_dir: &Path,
+    shamefully_hoist: bool,
+    prefer_frozen_lockfile_override: Option<bool>,
+    dependency_groups: &[DependencyGroup],
+    skipped_dep_paths: &[String],
+    current_lockfile: &Lockfile,
+) -> miette::Result<()> {
+    let root_manifest_path = lockfile_dir.join("package.json");
+    if !root_manifest_path.is_file() {
+        return Ok(());
+    }
+    let root_manifest = PackageManifest::from_path(root_manifest_path.clone())
+        .wrap_err_with(|| format!("reload root manifest: {}", root_manifest_path.display()))?;
+    let root_config: &'static Npmrc = config_for_project(
+        config,
+        lockfile_dir,
+        lockfile_dir,
+        shamefully_hoist,
+        prefer_frozen_lockfile_override,
+    )
+    .leak();
+    let direct_dependency_names = root_manifest
+        .dependencies(dependency_groups.iter().copied())
+        .map(|(name, _)| name.to_string())
+        .collect::<Vec<_>>();
+    write_modules_manifest(
+        &root_config.modules_dir,
+        root_config,
+        dependency_groups,
+        skipped_dep_paths,
+        current_lockfile.packages.as_ref(),
+        Some(&direct_dependency_names),
+    )
+    .into_diagnostic()
+    .wrap_err("rewrite root node_modules/.modules.yaml from current lockfile")?;
+    Ok(())
+}
+
 fn config_for_project(
     config: &Npmrc,
     lockfile_dir: &Path,
@@ -570,6 +648,103 @@ fn config_for_project(
     next
 }
 
+fn write_workspace_state(
+    workspace_dir: &Path,
+    config: &Npmrc,
+    current_lockfile: Option<&Lockfile>,
+    dependency_groups: &[DependencyGroup],
+    filtered_install: bool,
+    ignore_pnpmfile: bool,
+    pnpmfile: Option<&Path>,
+) -> miette::Result<()> {
+    let projects = collect_workspace_state_projects(workspace_dir);
+    let workspace_package_patterns =
+        read_workspace_package_patterns(workspace_dir).unwrap_or_default();
+    let mut projects_json = Map::new();
+    for project in projects {
+        let mut project_entry = Map::new();
+        if let Some(name) = project.name {
+            project_entry.insert("name".to_string(), Value::String(name));
+        }
+        if let Some(version) = project.version {
+            project_entry.insert("version".to_string(), Value::String(version));
+        }
+        projects_json.insert(project.root_dir.display().to_string(), Value::Object(project_entry));
+    }
+
+    let catalogs = current_lockfile
+        .and_then(|lockfile| lockfile.catalogs.clone())
+        .map(|catalogs| serde_json::to_value(catalogs).into_diagnostic())
+        .transpose()?
+        .unwrap_or_else(|| json!({}));
+
+    let pnpmfiles = if ignore_pnpmfile {
+        Vec::new()
+    } else if let Some(pnpmfile) = pnpmfile {
+        vec![pnpmfile.display().to_string()]
+    } else {
+        let default_pnpmfile = workspace_dir.join(".pnpmfile.cjs");
+        if default_pnpmfile.is_file() {
+            vec![default_pnpmfile.display().to_string()]
+        } else {
+            Vec::new()
+        }
+    };
+
+    let state = json!({
+        "lastValidatedTimestamp": SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_millis() as u64,
+        "projects": Value::Object(projects_json),
+        "pnpmfiles": pnpmfiles,
+        "settings": {
+            "autoInstallPeers": config.auto_install_peers,
+            "catalogs": catalogs,
+            "dedupeDirectDeps": false,
+            "dedupeInjectedDeps": config.dedupe_injected_deps,
+            "dedupePeerDependents": config.dedupe_peer_dependents,
+            "dev": dependency_groups.contains(&DependencyGroup::Dev),
+            "excludeLinksFromLockfile": config.exclude_links_from_lockfile,
+            "hoistPattern": config.hoist_pattern,
+            "hoistWorkspacePackages": true,
+            "injectWorkspacePackages": config.inject_workspace_packages,
+            "linkWorkspacePackages": match config.link_workspace_packages {
+                LinkWorkspacePackages::False => Value::Bool(false),
+                LinkWorkspacePackages::Direct => Value::Bool(true),
+                LinkWorkspacePackages::Deep => Value::String("deep".to_string()),
+            },
+            "nodeLinker": match config.node_linker {
+                NodeLinker::Isolated => "isolated",
+                NodeLinker::Hoisted => "hoisted",
+                NodeLinker::Pnp => "pnp",
+            },
+            "optional": dependency_groups.contains(&DependencyGroup::Optional),
+            "peersSuffixMaxLength": config.peers_suffix_max_length,
+            "preferWorkspacePackages": false,
+            "production": dependency_groups.contains(&DependencyGroup::Prod),
+            "publicHoistPattern": config.public_hoist_pattern,
+            "workspacePackagePatterns": workspace_package_patterns,
+        },
+        "filteredInstall": filtered_install,
+    });
+
+    let workspace_state_path = workspace_dir.join("node_modules/.pnpm-workspace-state-v1.json");
+    let workspace_state_parent =
+        workspace_state_path.parent().expect("workspace state path should have parent");
+    fs::create_dir_all(workspace_state_parent)
+        .into_diagnostic()
+        .wrap_err("create node_modules for workspace state")?;
+    let content = serde_json::to_string_pretty(&state)
+        .into_diagnostic()
+        .wrap_err("serialize workspace state")?
+        + "\n";
+    fs::write(&workspace_state_path, content)
+        .into_diagnostic()
+        .wrap_err("write node_modules/.pnpm-workspace-state-v1.json")?;
+    Ok(())
+}
+
 fn run_install_lifecycle_scripts_for_targets(
     install_target_entries: &[(String, PathBuf)],
     config: &Npmrc,
@@ -579,8 +754,11 @@ fn run_install_lifecycle_scripts_for_targets(
     prefer_frozen_lockfile_override: Option<bool>,
     dependency_groups: &[DependencyGroup],
 ) -> miette::Result<()> {
-    let ordered_manifests =
-        order_install_targets_for_lifecycle_scripts(install_target_entries, workspace_packages)?;
+    let ordered_manifests = order_install_targets_for_lifecycle_scripts(
+        install_target_entries,
+        config,
+        workspace_packages,
+    )?;
     for manifest_path in ordered_manifests {
         let project_dir = manifest_path
             .parent()
@@ -612,6 +790,7 @@ fn run_install_lifecycle_scripts_for_targets(
 
 fn order_install_targets_for_lifecycle_scripts(
     install_target_entries: &[(String, PathBuf)],
+    config: &Npmrc,
     workspace_packages: &WorkspacePackages,
 ) -> miette::Result<Vec<PathBuf>> {
     struct LifecycleTarget {
@@ -642,9 +821,13 @@ fn order_install_targets_for_lifecycle_scripts(
                 dependencies.push(normalize_existing_dir(project_dir.join(relative)));
                 continue;
             }
-            if specifier.starts_with("workspace:")
-                && let Some(info) = workspace_packages.get(name)
-            {
+            if let Some(info) = pacquet_package_manager::expected_workspace_dependency_for_install(
+                config,
+                workspace_packages,
+                name,
+                specifier,
+                0,
+            ) {
                 dependencies.push(normalize_existing_dir(info.root_dir.clone()));
             }
         }

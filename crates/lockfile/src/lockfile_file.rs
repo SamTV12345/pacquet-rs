@@ -501,7 +501,7 @@ fn convert_lockfile_to_v9(lockfile: &Lockfile) -> LockfileV9File {
 
     for (dep_path, package_snapshot) in lockfile.packages.as_ref().into_iter().flatten() {
         let (package_info, snapshot_part) = split_package_snapshot(package_snapshot);
-        let package_id = v9_key_from_dependency_path(dep_path);
+        let package_id = v9_package_id_from_dependency_path(dep_path);
         package_infos.entry(package_id).or_insert(package_info);
         package_snapshots.insert(v9_key_from_dependency_path(dep_path), snapshot_part);
     }
@@ -595,6 +595,28 @@ fn v9_key_from_dependency_path(dep_path: &DependencyPath) -> String {
         Some(custom_registry) => format!("{custom_registry}/{package_specifier}"),
         None => package_specifier,
     }
+}
+
+fn v9_package_id_from_dependency_path(dep_path: &DependencyPath) -> String {
+    let Some(registry_specifier) = dep_path.package_specifier.registry_specifier() else {
+        return v9_key_from_dependency_path(dep_path);
+    };
+    if registry_specifier.suffix.peer().is_empty() {
+        return v9_key_from_dependency_path(dep_path);
+    }
+    let no_peer_dependency_path = DependencyPath::registry(
+        dep_path.custom_registry.clone(),
+        PkgNameVerPeer::new(
+            registry_specifier.name.clone(),
+            registry_specifier
+                .suffix
+                .version()
+                .to_string()
+                .parse()
+                .expect("valid semver without peer suffix"),
+        ),
+    );
+    v9_key_from_dependency_path(&no_peer_dependency_path)
 }
 
 fn dependency_path_from_v9_key(value: &str) -> Result<DependencyPath, LockfileFileError> {
@@ -797,5 +819,64 @@ mod tests {
         assert!(packages.keys().any(|key| {
             key.to_string() == "/@radix-ui/react-context@1.1.2(@types/react@19.2.14)(react@19.2.4)"
         }));
+    }
+
+    #[test]
+    fn render_v9_uses_base_package_id_for_peer_suffixed_snapshot() {
+        let dep_path: DependencyPath =
+            "/@radix-ui/react-context@1.1.2(@types/react@19.2.14)(react@19.2.4)"
+                .parse()
+                .expect("dep path");
+        let lockfile = Lockfile {
+            lockfile_version: ComVer::new(9, 0),
+            settings: None,
+            never_built_dependencies: None,
+            ignored_optional_dependencies: None,
+            overrides: None,
+            package_extensions_checksum: None,
+            patched_dependencies: None,
+            pnpmfile_checksum: None,
+            catalogs: None,
+            time: None,
+            extra_fields: HashMap::new(),
+            project_snapshot: RootProjectSnapshot::Single(ProjectSnapshot::default()),
+            packages: Some(HashMap::from([(
+                dep_path,
+                PackageSnapshot {
+                    resolution: LockfileResolution::Registry(crate::RegistryResolution {
+                        integrity: "sha512-gf6ZldcfCDyNXPRiW3lQjEP1Z9rrUM/4Cn7BZbv3SdTA82zxWRP8OmLwvGR974uuENhGCFgFdN11z3n1Ofpprg=="
+                            .parse()
+                            .expect("integrity"),
+                    }),
+                    id: None,
+                    name: None,
+                    version: None,
+                    engines: None,
+                    cpu: None,
+                    os: None,
+                    libc: None,
+                    deprecated: None,
+                    has_bin: None,
+                    prepare: None,
+                    requires_build: None,
+                    bundled_dependencies: None,
+                    peer_dependencies: None,
+                    peer_dependencies_meta: None,
+                    dependencies: None,
+                    optional_dependencies: None,
+                    transitive_peer_dependencies: None,
+                    dev: None,
+                    optional: None,
+                },
+            )])),
+        };
+
+        let rendered = render_lockfile_content(&lockfile).expect("render lockfile");
+        assert!(rendered.contains("'@radix-ui/react-context@1.1.2':"));
+        assert!(
+            rendered.contains(
+                "'@radix-ui/react-context@1.1.2(@types/react@19.2.14)(react@19.2.4)': {}"
+            )
+        );
     }
 }
