@@ -106,14 +106,19 @@ fn find_virtual_store_file(
     file_name: &str,
 ) -> std::path::PathBuf {
     let suffix = format!("node_modules/{package_name}/{file_name}",).replace('\\', "/");
-    walkdir::WalkDir::new(project_dir.join("node_modules/.pnpm"))
-        .into_iter()
-        .filter_map(Result::ok)
-        .find_map(|entry| {
-            let entry_path = entry.path();
-            let normalized = entry_path.to_string_lossy().replace('\\', "/");
-            (entry.file_type().is_file() && normalized.ends_with(&suffix))
-                .then(|| entry_path.to_path_buf())
+    project_dir
+        .ancestors()
+        .map(|dir| dir.join("node_modules/.pnpm"))
+        .filter(|virtual_store_dir| virtual_store_dir.is_dir())
+        .find_map(|virtual_store_dir| {
+            walkdir::WalkDir::new(virtual_store_dir).into_iter().filter_map(Result::ok).find_map(
+                |entry| {
+                    let entry_path = entry.path();
+                    let normalized = entry_path.to_string_lossy().replace('\\', "/");
+                    (entry.file_type().is_file() && normalized.ends_with(&suffix))
+                        .then(|| entry_path.to_path_buf())
+                },
+            )
         })
         .unwrap_or_else(|| panic!("find virtual store file for {package_name}/{file_name}"))
 }
