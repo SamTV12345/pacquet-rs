@@ -167,26 +167,32 @@ pub fn symlink_package(
     let symlink_target = symlink_path.parent().map_or_else(
         || symlink_target.to_path_buf(),
         |parent| {
+            // Both base and target must use the same path representation.
+            // Use canonicalize for both so that symlink-based /tmp paths
+            // (e.g. /tmp -> /private/tmp) resolve consistently.
             let relative_base = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
             let absolute_target = if symlink_target.is_absolute() {
                 symlink_target.to_path_buf()
             } else {
                 parent.join(symlink_target)
             };
-            // Normalize `..` components logically without following symlinks,
-            // so the relative path computation is correct.
-            let mut normalized = PathBuf::new();
-            for component in absolute_target.components() {
-                match component {
-                    std::path::Component::CurDir => {}
-                    std::path::Component::ParentDir => {
-                        normalized.pop();
-                    }
-                    _ => {
-                        normalized.push(component.as_os_str());
+            // Canonicalize the target too so both sides use the same real paths.
+            // Fall back to logical normalization if the target doesn't exist yet.
+            let normalized = fs::canonicalize(&absolute_target).unwrap_or_else(|_| {
+                let mut n = PathBuf::new();
+                for component in absolute_target.components() {
+                    match component {
+                        std::path::Component::CurDir => {}
+                        std::path::Component::ParentDir => {
+                            n.pop();
+                        }
+                        _ => {
+                            n.push(component.as_os_str());
+                        }
                     }
                 }
-            }
+                n
+            });
             relative_path(&normalized, &relative_base)
         },
     );
