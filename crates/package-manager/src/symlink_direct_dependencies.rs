@@ -359,13 +359,8 @@ fn should_materialize_workspace_dependency(
     if !specifier.starts_with("workspace:") {
         return false;
     }
-    // Injected workspace deps are stored as `file:` references in the lockfile,
-    // but may also appear as `link:` when resolved via InstallWithLockfile.
-    if !matches!(
-        resolved_version,
-        ResolvedDependencyVersion::Link(link)
-            if link.starts_with("file:") || link.starts_with("link:")
-    ) {
+    if !matches!(resolved_version, ResolvedDependencyVersion::Link(link) if link.starts_with("file:"))
+    {
         return false;
     }
     config.inject_workspace_packages

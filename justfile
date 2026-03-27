@@ -50,7 +50,7 @@ check:
 
 # Run all the tests
 test:
-  cargo nextest run
+  cargo nextest run --no-fail-fast
 
 # Lint the whole project
 lint:
