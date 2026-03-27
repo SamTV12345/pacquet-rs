@@ -255,7 +255,9 @@ fn collect_hoisted_dependencies_from_fs(
     let dependency_paths_by_virtual_store_name = packages
         .keys()
         .map(|dependency_path| {
-            (dependency_path.to_virtual_store_name(), dependency_path.to_string())
+            let key = dependency_path.to_string();
+            let key = key.strip_prefix('/').unwrap_or(&key).to_string();
+            (dependency_path.to_virtual_store_name(), key)
         })
         .collect::<HashMap<_, _>>();
     let mut added_any = false;
