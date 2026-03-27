@@ -58,7 +58,7 @@ impl<'a> CreateVirtualStore<'a> {
                         return;
                     }
                 }
-                let imported = InstallPackageBySnapshot {
+                match InstallPackageBySnapshot {
                     http_client,
                     config,
                     dependency_path,
@@ -69,9 +69,26 @@ impl<'a> CreateVirtualStore<'a> {
                 }
                 .run()
                 .await
-                .unwrap(); // TODO: properly propagate this error
-                if imported {
-                    should_link_layout.store(true, Ordering::Relaxed);
+                {
+                    Ok(imported) => {
+                        if imported {
+                            should_link_layout.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    Err(error) => {
+                        let is_optional = package_snapshot.optional.unwrap_or(false);
+                        if is_optional {
+                            tracing::debug!(
+                                ?dependency_path,
+                                "Skipping optional package that failed to install: {error}"
+                            );
+                        } else {
+                            tracing::error!(
+                                ?dependency_path,
+                                "Failed to install package: {error}"
+                            );
+                        }
+                    }
                 }
             })
             .await;

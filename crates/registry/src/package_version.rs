@@ -7,6 +7,13 @@ use serde_json::Value;
 
 use crate::{NetworkError, PackageTag, RegistryError, package_distribution::PackageDistribution};
 
+/// Metadata about a single peer dependency (e.g. whether it is optional).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PeerDependencyMeta {
+    #[serde(default)]
+    pub optional: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageVersion {
@@ -17,6 +24,8 @@ pub struct PackageVersion {
     pub optional_dependencies: Option<HashMap<String, String>>,
     pub dev_dependencies: Option<HashMap<String, String>>,
     pub peer_dependencies: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub peer_dependencies_meta: Option<HashMap<String, PeerDependencyMeta>>,
     #[serde(default)]
     pub engines: Option<HashMap<String, String>>,
     #[serde(default)]
@@ -116,6 +125,14 @@ impl PackageVersion {
             .iter()
             .flatten()
             .map(|(name, version)| (name.as_str(), version.as_str()))
+    }
+
+    /// Returns true if the given peer dependency is marked as optional in `peerDependenciesMeta`.
+    pub fn is_peer_optional(&self, name: &str) -> bool {
+        self.peer_dependencies_meta
+            .as_ref()
+            .and_then(|meta| meta.get(name))
+            .is_some_and(|meta| meta.optional)
     }
 
     pub fn serialize(&self, save_exact: bool) -> String {

@@ -38,10 +38,11 @@ const CREATE_PREFIX: &str = "create-";
 fn convert_to_create_name(package_name: &str) -> String {
     if let Some(stripped) = package_name.strip_prefix('@') {
         let preferred_version_position = stripped.find('@').map(|index| index + 1);
-        let (scoped_name, preferred_version) = if let Some(position) = preferred_version_position {
-            (&package_name[..position], &package_name[position..])
-        } else {
-            (package_name, "")
+        let (scoped_name, preferred_version) = match preferred_version_position {
+            Some(position) if position < package_name.len() => {
+                (&package_name[..position], &package_name[position..])
+            }
+            _ => (package_name, ""),
         };
         let mut parts = scoped_name.splitn(2, '/');
         let scope = parts.next().expect("scoped package should contain scope");

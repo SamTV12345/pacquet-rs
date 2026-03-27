@@ -35,6 +35,14 @@ pub enum InstallPackageBySnapshotError {
     ApplyPatch(#[error(not(source))] String),
     #[display("{_0}")]
     CopyLocalDir(#[error(not(source))] String),
+    #[display("Registry/tarball snapshot requires a registry package specifier, but dependency path does not contain one")]
+    MissingRegistrySpecifier,
+    #[display("Package integrity is required but missing for `{dependency_path}`")]
+    MissingIntegrity { dependency_path: String },
+    #[display("Git resolution is not yet supported for `{dependency_path}`")]
+    UnsupportedGitResolution { dependency_path: String },
+    #[display("Failed to remove existing virtual store directory: {_0}")]
+    RemoveExistingDir(#[error(not(source))] String),
 }
 
 impl<'a> InstallPackageBySnapshot<'a> {
@@ -90,22 +98,20 @@ impl<'a> InstallPackageBySnapshot<'a> {
 
         let (tarball_url, integrity) = match resolution {
             LockfileResolution::Tarball(tarball_resolution) => {
-                let registry_specifier =
-                    package_specifier.registry_specifier().unwrap_or_else(|| {
-                        panic!("registry/tarball snapshot requires registry package specifier")
-                    });
-                let integrity = tarball_resolution.integrity.as_ref().unwrap_or_else(|| {
-                    // TODO: how to handle the absent of integrity field?
-                    panic!("Current implementation requires integrity, but {dependency_path} doesn't have it");
-                });
-                let _ = registry_specifier;
+                let _registry_specifier = package_specifier
+                    .registry_specifier()
+                    .ok_or(InstallPackageBySnapshotError::MissingRegistrySpecifier)?;
+                let integrity = tarball_resolution.integrity.as_ref().ok_or_else(|| {
+                    InstallPackageBySnapshotError::MissingIntegrity {
+                        dependency_path: dependency_path.to_string(),
+                    }
+                })?;
                 (tarball_resolution.tarball.as_str().pipe(Cow::Borrowed), integrity)
             }
             LockfileResolution::Registry(registry_resolution) => {
-                let registry_specifier =
-                    package_specifier.registry_specifier().unwrap_or_else(|| {
-                        panic!("registry/tarball snapshot requires registry package specifier")
-                    });
+                let registry_specifier = package_specifier
+                    .registry_specifier()
+                    .ok_or(InstallPackageBySnapshotError::MissingRegistrySpecifier)?;
                 let registry = registry_for_dependency_path(
                     config,
                     custom_registry.as_deref(),
@@ -122,11 +128,9 @@ impl<'a> InstallPackageBySnapshot<'a> {
             LockfileResolution::Directory(_) => {
                 let source = directory_source.as_ref().expect("directory source");
                 if save_path.exists() {
-                    std::fs::remove_dir_all(&save_path).unwrap_or_else(|error| {
-                        panic!(
-                            "remove existing local virtual store package should succeed: {error}"
-                        )
-                    });
+                    std::fs::remove_dir_all(&save_path).map_err(|error| {
+                        InstallPackageBySnapshotError::RemoveExistingDir(error.to_string())
+                    })?;
                 }
                 import_local_package_dir(config.package_import_method, source, &save_path)
                     .map_err(|error| {
@@ -136,25 +140,22 @@ impl<'a> InstallPackageBySnapshot<'a> {
                 return Ok(true);
             }
             LockfileResolution::Git(_) => {
-                panic!(
-                    "Only TarballResolution and RegistryResolution is supported at the moment, but {dependency_path} requires {resolution:?}"
-                );
+                return Err(InstallPackageBySnapshotError::UnsupportedGitResolution {
+                    dependency_path: dependency_path.to_string(),
+                });
             }
         };
 
-        // TODO: skip when already exists in store?
-        let registry_specifier = package_specifier.registry_specifier().unwrap_or_else(|| {
-            panic!("registry/tarball snapshot requires registry package specifier")
-        });
+        let registry_specifier = package_specifier
+            .registry_specifier()
+            .ok_or(InstallPackageBySnapshotError::MissingRegistrySpecifier)?;
         let package_id =
             format!("{}@{}", registry_specifier.name, registry_specifier.suffix.version());
 
         if (force || has_patch) && save_path.exists() {
-            std::fs::remove_dir_all(&save_path).unwrap_or_else(|error| {
-                panic!(
-                    "remove existing virtual store package during --force should succeed: {error}"
-                )
-            });
+            std::fs::remove_dir_all(&save_path).map_err(|error| {
+                InstallPackageBySnapshotError::RemoveExistingDir(error.to_string())
+            })?;
         }
 
         // Fast warm-install check: if package.json already exists in the virtual store package

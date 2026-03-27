@@ -342,8 +342,7 @@ impl<'a> DownloadTarballToStore<'a> {
             let entries = archive
                 .entries()
                 .map_err(TarballError::ReadTarballEntries)
-                .map_err(TaskError::Other)?
-                .filter(|entry| !entry.as_ref().unwrap().header().entry_type().is_dir());
+                .map_err(TaskError::Other)?;
 
             let ((_, Some(capacity)) | (capacity, None)) = entries.size_hint();
             let mut cas_paths = HashMap::<String, PathBuf>::with_capacity(capacity);
@@ -357,23 +356,69 @@ impl<'a> DownloadTarballToStore<'a> {
             let mut package_manifest: Option<serde_json::Value> = None;
 
             for entry in entries {
-                let mut entry = entry.unwrap();
+                let mut entry = match entry {
+                    Ok(e) => e,
+                    Err(error) => {
+                        tracing::warn!("Skipping unreadable tarball entry: {error}");
+                        continue;
+                    }
+                };
 
-                let file_mode = entry.header().mode().expect("get mode"); // TODO: properly propagate this error
+                // Skip directories, symlinks, hardlinks, and other non-regular-file entries.
+                let entry_type = entry.header().entry_type();
+                if !entry_type.is_file() {
+                    if entry_type.is_symlink() || entry_type.is_hard_link() {
+                        tracing::warn!(
+                            "Skipping symlink/hardlink entry in tarball (potential security risk)"
+                        );
+                    }
+                    continue;
+                }
+
+                let file_mode = entry.header().mode().unwrap_or(0o644);
                 let file_is_executable = file_mode::is_all_exec(file_mode);
 
                 // Read the contents of the entry
                 let mut buffer = Vec::with_capacity(entry.size() as usize);
-                entry.read_to_end(&mut buffer).unwrap();
+                if let Err(error) = entry.read_to_end(&mut buffer) {
+                    tracing::warn!("Skipping tarball entry with read error: {error}");
+                    continue;
+                }
 
-                let entry_path = entry.path().unwrap();
+                let entry_path = match entry.path() {
+                    Ok(p) => p,
+                    Err(error) => {
+                        tracing::warn!("Skipping tarball entry with invalid path: {error}");
+                        continue;
+                    }
+                };
                 let cleaned_entry_path = entry_path
                     .components()
                     .skip(1)
-                    .collect::<PathBuf>()
-                    .into_os_string()
-                    .into_string()
-                    .expect("entry path must be valid UTF-8");
+                    .collect::<PathBuf>();
+
+                // Path traversal protection: reject entries that escape the package root.
+                for component in cleaned_entry_path.components() {
+                    if matches!(component, std::path::Component::ParentDir) {
+                        tracing::warn!(
+                            ?entry_path,
+                            "Skipping tarball entry with path traversal (../)"
+                        );
+                        continue;
+                    }
+                }
+
+                let cleaned_entry_path = match cleaned_entry_path.into_os_string().into_string() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        tracing::warn!(?entry_path, "Skipping tarball entry with non-UTF-8 path");
+                        continue;
+                    }
+                };
+
+                if cleaned_entry_path.is_empty() {
+                    continue;
+                }
                 if cleaned_entry_path == "package.json" {
                     package_manifest = serde_json::from_slice(&buffer).ok();
                 }
@@ -420,7 +465,7 @@ impl<'a> DownloadTarballToStore<'a> {
             Ok(cas_paths)
         })
         .await
-        .expect("no join error")
+        .map_err(TarballError::TaskJoin)?
         .map_err(|error| match error {
             TaskError::Checksum(error) => {
                 TarballError::Checksum(VerifyChecksumError { url: package_url.to_string(), error })

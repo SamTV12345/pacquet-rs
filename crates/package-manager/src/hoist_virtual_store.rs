@@ -184,7 +184,18 @@ fn link_bins_for_hoisted_packages(
         let package_manifest = PackageManifest::from_path(package_manifest_path.clone())
             .wrap_err_with(|| format!("load {}", package_manifest_path.display()))?;
         for (bin_name, relative_target) in collect_bin_entries(&package_manifest) {
-            let target = package_dir.join(relative_target);
+            let target = package_dir.join(&relative_target);
+            // Some packages generate their commands with lifecycle hooks (preinstall, etc.).
+            // At this stage, such commands may not exist yet. Tolerate missing targets
+            // gracefully (cf. pnpm/pnpm#2071).
+            if !target.exists() {
+                tracing::debug!(
+                    bin_name,
+                    ?target,
+                    "Skipping bin link for target that does not exist yet (may be lifecycle-generated)"
+                );
+                continue;
+            }
             write_bin_wrapper(config, &bin_dir, &bin_name, &target).wrap_err_with(|| {
                 format!("link hoisted bin `{bin_name}` from {}", target.display())
             })?;
@@ -222,7 +233,13 @@ pub(crate) fn hoist_virtual_store_packages(config: &Npmrc) -> miette::Result<()>
     match config.node_linker {
         NodeLinker::Hoisted => {
             let selected = select_packages_by_patterns(&hoistable_packages, &[], true);
-            hoist_selected_packages(config, &shared_modules_dir, selected)?;
+            hoist_selected_packages(config, &shared_modules_dir, selected.clone())?;
+            // Link bins for hoisted packages (pnpm does this in hoist/src/index.ts).
+            // Errors are tolerated because some packages generate bins via lifecycle hooks
+            // that haven't executed yet at this stage.
+            if let Err(error) = link_bins_for_hoisted_packages(config, &shared_modules_dir, &selected) {
+                tracing::debug!("Some hoisted bin links could not be created (lifecycle-generated bins may not exist yet): {error}");
+            }
         }
         NodeLinker::Pnp => {}
         _ if config.hoist || config.shamefully_hoist => {

@@ -123,7 +123,8 @@ impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
                             &version_range,
                         );
 
-                        let dependency = InstallPackageFromRegistry {
+                        let is_optional = matches!(group, DependencyGroup::Optional);
+                        let dependency = match InstallPackageFromRegistry {
                             tarball_mem_cache,
                             http_client,
                             config,
@@ -133,14 +134,27 @@ impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
                             node_modules_dir: &config.modules_dir,
                             name: &name,
                             version_range: resolved_range.as_str(),
-                            optional: matches!(group, DependencyGroup::Optional),
+                            optional: is_optional,
                             prefer_offline,
                             offline,
                             force,
                         }
                         .run()
                         .await
-                        .unwrap();
+                        {
+                            Ok(dep) => dep,
+                            Err(error) => {
+                                if is_optional {
+                                    tracing::debug!(
+                                        %name,
+                                        "Skipping optional dependency that failed to resolve: {error}"
+                                    );
+                                    return;
+                                }
+                                tracing::error!(%name, "Failed to install dependency: {error}");
+                                return;
+                            }
+                        };
 
                         if matches!(
                             crate::installability::check_package_version_installability(
@@ -234,7 +248,8 @@ impl<'a> InstallWithoutLockfile<'a, ()> {
         if self.config.auto_install_peers {
             dependencies.extend(
                 package.peer_dependencies_iter().map(|(name, version_range)| {
-                    (false, name.to_string(), version_range.to_string())
+                    let is_optional = package.is_peer_optional(name);
+                    (is_optional, name.to_string(), version_range.to_string())
                 }),
             );
         }
@@ -253,7 +268,7 @@ impl<'a> InstallWithoutLockfile<'a, ()> {
                         &name,
                         &version_range,
                     );
-                    let dependency = InstallPackageFromRegistry {
+                    let dependency = match InstallPackageFromRegistry {
                         tarball_mem_cache,
                         http_client,
                         config,
@@ -270,7 +285,20 @@ impl<'a> InstallWithoutLockfile<'a, ()> {
                     }
                     .run()
                     .await
-                    .unwrap(); // TODO: proper error propagation
+                    {
+                        Ok(dep) => dep,
+                        Err(error) => {
+                            if optional {
+                                tracing::debug!(
+                                    %name,
+                                    "Skipping optional sub-dependency that failed to resolve: {error}"
+                                );
+                            } else {
+                                tracing::error!(%name, "Failed to install sub-dependency: {error}");
+                            }
+                            return;
+                        }
+                    };
                     if matches!(
                         crate::installability::check_package_version_installability(
                             &dependency,

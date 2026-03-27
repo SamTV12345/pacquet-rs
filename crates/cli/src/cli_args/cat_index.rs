@@ -54,8 +54,8 @@ fn parse_package_selector(selector: &str) -> Option<(&str, &str)> {
     } else {
         selector.rfind('@')
     }?;
-    let (name, version) = selector.split_at(separator);
-    let version = &version[1..];
+    let (name, rest) = selector.split_at(separator);
+    let version = rest.get(1..)?;
     (!name.is_empty() && !version.is_empty()).then_some((name, version))
 }
 

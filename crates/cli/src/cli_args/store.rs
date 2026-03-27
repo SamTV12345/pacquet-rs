@@ -169,8 +169,8 @@ fn parse_store_add_package_spec(package: &str) -> (&str, &str) {
     };
     match separator {
         Some(index) => {
-            let (name, spec) = package.split_at(index);
-            let spec = &spec[1..];
+            let (name, rest) = package.split_at(index);
+            let spec = rest.get(1..).unwrap_or("");
             if spec.is_empty() { (package, "latest") } else { (name, spec) }
         }
         None => (package, "latest"),

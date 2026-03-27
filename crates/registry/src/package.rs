@@ -57,26 +57,57 @@ impl Package {
     }
 
     pub fn pinned_version(&self, version_range: &str) -> Option<&PackageVersion> {
+        // pnpm behaviour: when the range is `*`, prefer the `latest` dist-tag.
+        // If no `latest` tag exists, fall back to the lowest satisfying version.
+        if version_range == "*" {
+            if let Some(latest) = self.latest_if_available() {
+                return Some(latest);
+            }
+            let mut satisfied_versions = self
+                .versions
+                .values()
+                .collect::<Vec<&PackageVersion>>();
+            satisfied_versions.sort_by(|a, b| a.version.cmp(&b.version));
+            return satisfied_versions.first().copied();
+        }
+
         let Ok(range) = version_range.parse::<node_semver::Range>() else {
             return None;
         };
+
+        // Prefer the `latest` dist-tag when it satisfies the requested range.
+        if let Some(latest) = self.latest_if_available() {
+            if latest.version.satisfies(&range) {
+                return Some(latest);
+            }
+        }
+
         let mut satisfied_versions = self
             .versions
             .values()
             .filter(|v| v.version.satisfies(&range))
             .collect::<Vec<&PackageVersion>>();
 
-        satisfied_versions.sort_by(|a, b| a.version.partial_cmp(&b.version).unwrap());
+        satisfied_versions.sort_by(|a, b| a.version.cmp(&b.version));
 
-        // Optimization opportunity:
-        // We can store this in a cache to remove filter operation and make this a O(1) operation.
-        satisfied_versions.last().copied()
+        // Pick the highest satisfying non-deprecated version when possible.
+        let non_deprecated = satisfied_versions
+            .iter()
+            .rev()
+            .find(|v| v.deprecated.is_none())
+            .copied();
+        non_deprecated.or_else(|| satisfied_versions.last().copied())
+    }
+
+    /// Return the version tagged `latest`, if the tag exists.
+    pub fn latest_if_available(&self) -> Option<&PackageVersion> {
+        let version = self.dist_tags.get("latest")?;
+        self.versions.get(version)
     }
 
     pub fn latest(&self) -> &PackageVersion {
-        let version =
-            self.dist_tags.get("latest").expect("latest tag is expected but not found for package");
-        self.versions.get(version).unwrap()
+        self.latest_if_available()
+            .expect("latest tag is expected but not found for package")
     }
 }
 
@@ -106,6 +137,7 @@ mod tests {
             optional_dependencies: None,
             dev_dependencies: None,
             peer_dependencies: Some(peer_dependencies),
+            peer_dependencies_meta: None,
             engines: None,
             cpu: None,
             os: None,
@@ -134,6 +166,7 @@ mod tests {
             optional_dependencies: None,
             dev_dependencies: None,
             peer_dependencies: None,
+            peer_dependencies_meta: None,
             engines: None,
             cpu: None,
             os: None,
@@ -163,6 +196,7 @@ mod tests {
                     optional_dependencies: None,
                     dev_dependencies: None,
                     peer_dependencies: None,
+                    peer_dependencies_meta: None,
                     engines: None,
                     cpu: None,
                     os: None,

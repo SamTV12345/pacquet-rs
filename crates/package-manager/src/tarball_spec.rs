@@ -104,6 +104,7 @@ pub(crate) async fn resolve_package_version_from_tarball_spec(
         optional_dependencies: value_to_map(manifest.get("optionalDependencies")),
         dev_dependencies: value_to_map(manifest.get("devDependencies")),
         peer_dependencies: value_to_map(manifest.get("peerDependencies")),
+        peer_dependencies_meta: None,
         engines: value_to_map(manifest.get("engines")),
         cpu: value_to_string_vec(manifest.get("cpu")),
         os: value_to_string_vec(manifest.get("os")),

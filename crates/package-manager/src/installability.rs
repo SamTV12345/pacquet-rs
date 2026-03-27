@@ -241,6 +241,7 @@ mod tests {
             optional_dependencies: None,
             dev_dependencies: None,
             peer_dependencies: None,
+            peer_dependencies_meta: None,
             engines: None,
             cpu: None,
             os: Some(vec!["definitely-not-this-os".to_string()]),
