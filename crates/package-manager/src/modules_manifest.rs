@@ -252,12 +252,16 @@ fn collect_hoisted_dependencies_from_fs(
     if entries.is_empty() {
         return false;
     }
-    let dependency_paths_by_virtual_store_name = packages
+    // Build a map from package name to its depPath (without leading `/`).
+    // pnpm uses the actual package's depPath as the hoistedDependencies key,
+    // NOT the parent package that hosts it in its node_modules.
+    let dep_path_by_name = packages
         .keys()
         .map(|dependency_path| {
+            let name = dependency_path.package_specifier.name().to_string();
             let key = dependency_path.to_string();
             let key = key.strip_prefix('/').unwrap_or(&key).to_string();
-            (dependency_path.to_virtual_store_name(), key)
+            (name, key)
         })
         .collect::<HashMap<_, _>>();
     let mut added_any = false;
@@ -265,17 +269,16 @@ fn collect_hoisted_dependencies_from_fs(
         if direct_dependency_names.contains(&alias) {
             continue;
         }
-        let Ok(target) = resolve_hoisted_entry_target(&entry_path) else {
+        // Verify the hoisted entry actually resolves to a valid target.
+        if resolve_hoisted_entry_target(&entry_path).is_err() {
+            continue;
+        }
+        // Use the alias (package name) to find the actual package's depPath,
+        // matching pnpm's behavior of using `graph[nodeId].depPath`.
+        let Some(dep_path_key) = dep_path_by_name.get(&alias) else {
             continue;
         };
-        let Some(virtual_store_name) = hoisted_virtual_store_name(&target) else {
-            continue;
-        };
-        let Some(dependency_path) = dependency_paths_by_virtual_store_name.get(&virtual_store_name)
-        else {
-            continue;
-        };
-        hoisted.entry(dependency_path.clone()).or_default().insert(alias, visibility.to_string());
+        hoisted.entry(dep_path_key.clone()).or_default().insert(alias, visibility.to_string());
         added_any = true;
     }
     added_any

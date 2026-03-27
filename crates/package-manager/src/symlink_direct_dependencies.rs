@@ -83,18 +83,12 @@ where
                     }
                 };
                 let dependency_path = config.modules_dir.join(&name_str);
-                let should_refresh_existing = matches!(
-                    &spec.version,
-                    ResolvedDependencyVersion::Link(link)
-                        if link.starts_with("file:")
-                            || should_materialize_workspace_dependency(
-                                project_snapshot,
-                                &name_str,
-                                &spec.specifier,
-                                &spec.version,
-                                config,
-                            )
-                ) && !config.disable_relink_local_dir_deps;
+                // pnpm always re-links local dependencies (resolvedFrom !== 'store')
+                // unless disable_relink_local_dir_deps is set AND the dir is non-empty.
+                // This ensures injected workspace deps are refreshed when source files change.
+                let should_refresh_existing =
+                    matches!(&spec.version, ResolvedDependencyVersion::Link(_))
+                        && !config.disable_relink_local_dir_deps;
                 if dependency_path.exists() && !should_refresh_existing {
                     return;
                 }
