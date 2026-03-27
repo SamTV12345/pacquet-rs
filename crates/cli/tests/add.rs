@@ -766,10 +766,28 @@ fn add_should_link_workspace_packages_across_dependency_groups_when_link_workspa
         .expect("write workspace package manifest");
     }
 
-    pacquet_command()
+    let output = pacquet_command()
         .with_args(["-C", project_1_dir.to_str().unwrap(), "add", "project-2"])
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .clone();
+    eprintln!("=== add project-2 stdout: {}", String::from_utf8_lossy(&output.stdout));
+    eprintln!("=== add project-2 stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Check node_modules right after first add
+    let nm = project_1_dir.join("node_modules");
+    eprintln!("=== node_modules exists after add project-2: {}", nm.exists());
+    if nm.exists() {
+        for entry in std::fs::read_dir(&nm).unwrap().filter_map(|e| e.ok()) {
+            let name = entry.file_name();
+            let meta = std::fs::symlink_metadata(entry.path()).ok();
+            let is_sym = meta.as_ref().map(|m| m.file_type().is_symlink()).unwrap_or(false);
+            let target = if is_sym { std::fs::read_link(entry.path()).ok() } else { None };
+            eprintln!("  {:?}: symlink={} target={:?}", name, is_sym, target);
+        }
+    }
+
     pacquet_command()
         .with_args(["-C", project_1_dir.to_str().unwrap(), "add", "project-3", "--save-dev"])
         .assert()
