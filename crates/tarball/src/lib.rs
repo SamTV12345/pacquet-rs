@@ -392,10 +392,7 @@ impl<'a> DownloadTarballToStore<'a> {
                         continue;
                     }
                 };
-                let cleaned_entry_path = entry_path
-                    .components()
-                    .skip(1)
-                    .collect::<PathBuf>();
+                let cleaned_entry_path = entry_path.components().skip(1).collect::<PathBuf>();
 
                 // Path traversal protection: reject entries that escape the package root.
                 for component in cleaned_entry_path.components() {

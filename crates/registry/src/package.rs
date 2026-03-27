@@ -63,10 +63,7 @@ impl Package {
             if let Some(latest) = self.latest_if_available() {
                 return Some(latest);
             }
-            let mut satisfied_versions = self
-                .versions
-                .values()
-                .collect::<Vec<&PackageVersion>>();
+            let mut satisfied_versions = self.versions.values().collect::<Vec<&PackageVersion>>();
             satisfied_versions.sort_by(|a, b| a.version.cmp(&b.version));
             return satisfied_versions.first().copied();
         }
@@ -76,10 +73,10 @@ impl Package {
         };
 
         // Prefer the `latest` dist-tag when it satisfies the requested range.
-        if let Some(latest) = self.latest_if_available() {
-            if latest.version.satisfies(&range) {
-                return Some(latest);
-            }
+        if let Some(latest) = self.latest_if_available()
+            && latest.version.satisfies(&range)
+        {
+            return Some(latest);
         }
 
         let mut satisfied_versions = self
@@ -91,11 +88,8 @@ impl Package {
         satisfied_versions.sort_by(|a, b| a.version.cmp(&b.version));
 
         // Pick the highest satisfying non-deprecated version when possible.
-        let non_deprecated = satisfied_versions
-            .iter()
-            .rev()
-            .find(|v| v.deprecated.is_none())
-            .copied();
+        let non_deprecated =
+            satisfied_versions.iter().rev().find(|v| v.deprecated.is_none()).copied();
         non_deprecated.or_else(|| satisfied_versions.last().copied())
     }
 
@@ -106,8 +100,7 @@ impl Package {
     }
 
     pub fn latest(&self) -> &PackageVersion {
-        self.latest_if_available()
-            .expect("latest tag is expected but not found for package")
+        self.latest_if_available().expect("latest tag is expected but not found for package")
     }
 }
 

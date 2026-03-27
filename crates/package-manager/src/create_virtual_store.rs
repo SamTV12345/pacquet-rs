@@ -58,7 +58,7 @@ impl<'a> CreateVirtualStore<'a> {
                         return;
                     }
                 }
-                match InstallPackageBySnapshot {
+                match (InstallPackageBySnapshot {
                     http_client,
                     config,
                     dependency_path,
@@ -66,7 +66,7 @@ impl<'a> CreateVirtualStore<'a> {
                     lockfile_dir,
                     offline,
                     force,
-                }
+                })
                 .run()
                 .await
                 {
@@ -77,14 +77,15 @@ impl<'a> CreateVirtualStore<'a> {
                     }
                     Err(error) => {
                         let is_optional = package_snapshot.optional.unwrap_or(false);
+                        let dep_path_str = dependency_path.to_string();
                         if is_optional {
                             tracing::debug!(
-                                ?dependency_path,
+                                dep_path = %dep_path_str,
                                 "Skipping optional package that failed to install: {error}"
                             );
                         } else {
                             tracing::error!(
-                                ?dependency_path,
+                                dep_path = %dep_path_str,
                                 "Failed to install package: {error}"
                             );
                         }
