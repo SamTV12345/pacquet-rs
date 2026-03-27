@@ -777,7 +777,18 @@ fn add_should_link_workspace_packages_across_dependency_groups_when_link_workspa
 
     // Check node_modules right after first add
     let nm = project_1_dir.join("node_modules");
+    eprintln!("=== project_1_dir: {:?}", project_1_dir);
+    eprintln!("=== project_2_dir exists: {}", project_2_dir.exists());
+    eprintln!("=== project_2_dir canonical: {:?}", std::fs::canonicalize(&project_2_dir));
     eprintln!("=== node_modules exists after add project-2: {}", nm.exists());
+    let p2_link = nm.join("project-2");
+    eprintln!(
+        "=== node_modules/project-2 is_symlink: {}",
+        p2_link.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false)
+    );
+    eprintln!("=== node_modules/project-2 read_link: {:?}", std::fs::read_link(&p2_link));
+    eprintln!("=== node_modules/project-2 exists (follows symlink): {}", p2_link.exists());
+    eprintln!("=== node_modules/project-2 canonicalize: {:?}", std::fs::canonicalize(&p2_link));
     if nm.exists() {
         for entry in std::fs::read_dir(&nm).unwrap().filter_map(|e| e.ok()) {
             let name = entry.file_name();
