@@ -35,12 +35,18 @@ pub enum InstallPackageBySnapshotError {
     ApplyPatch(#[error(not(source))] String),
     #[display("{_0}")]
     CopyLocalDir(#[error(not(source))] String),
-    #[display("Registry/tarball snapshot requires a registry package specifier, but dependency path does not contain one")]
+    #[display(
+        "Registry/tarball snapshot requires a registry package specifier, but dependency path does not contain one"
+    )]
     MissingRegistrySpecifier,
     #[display("Package integrity is required but missing for `{dependency_path}`")]
-    MissingIntegrity { dependency_path: String },
+    MissingIntegrity {
+        dependency_path: String,
+    },
     #[display("Git resolution is not yet supported for `{dependency_path}`")]
-    UnsupportedGitResolution { dependency_path: String },
+    UnsupportedGitResolution {
+        dependency_path: String,
+    },
     #[display("Failed to remove existing virtual store directory: {_0}")]
     RemoveExistingDir(#[error(not(source))] String),
 }

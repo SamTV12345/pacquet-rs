@@ -75,120 +75,117 @@ impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
         )
         .expect("apply .pnpmfile.cjs readPackage hook to project manifest");
 
-        let _: Vec<()> =
-            crate::dependencies_from_manifest_value_grouped(&hooked_manifest, dependency_groups)
-                .into_iter()
-                .map(|(group, name, version_range)| {
-                    let workspace_root_peer_overrides = workspace_root_peer_overrides.clone();
-                    async move {
-                        if let Some(link_target) = version_range.strip_prefix("link:") {
-                            let project_dir =
-                                manifest.path().parent().unwrap_or_else(|| Path::new("."));
-                            let link_target = if Path::new(link_target).is_absolute() {
-                                Path::new(link_target).to_path_buf()
-                            } else {
-                                project_dir.join(link_target)
-                            };
-                            if config.symlink {
-                                crate::link_package(
-                                    config.symlink,
-                                    &link_target,
-                                    &config.modules_dir.join(&name),
-                                )
-                                .expect("symlink local link dependency");
-                            }
-                            return;
-                        }
-                        if let Some(file_target) = version_range.strip_prefix("file:") {
-                            let project_dir =
-                                manifest.path().parent().unwrap_or_else(|| Path::new("."));
-                            let file_target = if Path::new(file_target).is_absolute() {
-                                Path::new(file_target).to_path_buf()
-                            } else {
-                                project_dir.join(file_target)
-                            };
-                            crate::import_local_package_dir(
-                                config.package_import_method,
-                                &file_target,
-                                &config.modules_dir.join(&name),
-                            )
-                            .expect("materialize local file dependency");
-                            return;
-                        }
-                        let resolved_range = apply_workspace_root_peer_override(
-                            config,
-                            &workspace_root_peer_overrides,
-                            None,
-                            &name,
-                            &version_range,
-                        );
-
-                        let is_optional = matches!(group, DependencyGroup::Optional);
-                        let dependency = match InstallPackageFromRegistry {
-                            tarball_mem_cache,
-                            http_client,
-                            config,
-                            lockfile_dir,
-                            pnpmfile,
-                            ignore_pnpmfile,
-                            node_modules_dir: &config.modules_dir,
-                            name: &name,
-                            version_range: resolved_range.as_str(),
-                            optional: is_optional,
-                            prefer_offline,
-                            offline,
-                            force,
-                        }
-                        .run()
-                        .await
-                        {
-                            Ok(dep) => dep,
-                            Err(error) => {
-                                if is_optional {
-                                    tracing::debug!(
-                                        %name,
-                                        "Skipping optional dependency that failed to resolve: {error}"
-                                    );
-                                    return;
-                                }
-                                tracing::error!(%name, "Failed to install dependency: {error}");
-                                return;
-                            }
-                        };
-
-                        if matches!(
-                            crate::installability::check_package_version_installability(
-                                &dependency,
-                                matches!(group, DependencyGroup::Optional)
-                            ),
-                            crate::installability::Installability::SkipOptional
-                        ) {
-                            return;
-                        }
-
-                        InstallWithoutLockfile {
-                            tarball_mem_cache,
-                            http_client,
-                            config,
-                            manifest,
-                            lockfile_dir,
-                            dependency_groups: (),
-                            resolved_packages,
-                            force,
-                            prefer_offline,
-                            offline,
-                            pnpmfile,
-                            ignore_pnpmfile,
-                        }
-                        .install_dependencies_from_registry(
-                            &dependency,
-                            &workspace_root_peer_overrides,
+        let _: Vec<()> = crate::dependencies_from_manifest_value_grouped(
+            &hooked_manifest,
+            dependency_groups,
+        )
+        .into_iter()
+        .map(|(group, name, version_range)| {
+            let workspace_root_peer_overrides = workspace_root_peer_overrides.clone();
+            async move {
+                if let Some(link_target) = version_range.strip_prefix("link:") {
+                    let project_dir = manifest.path().parent().unwrap_or_else(|| Path::new("."));
+                    let link_target = if Path::new(link_target).is_absolute() {
+                        Path::new(link_target).to_path_buf()
+                    } else {
+                        project_dir.join(link_target)
+                    };
+                    if config.symlink {
+                        crate::link_package(
+                            config.symlink,
+                            &link_target,
+                            &config.modules_dir.join(&name),
                         )
-                        .await;
+                        .expect("symlink local link dependency");
                     }
+                    return;
+                }
+                if let Some(file_target) = version_range.strip_prefix("file:") {
+                    let project_dir = manifest.path().parent().unwrap_or_else(|| Path::new("."));
+                    let file_target = if Path::new(file_target).is_absolute() {
+                        Path::new(file_target).to_path_buf()
+                    } else {
+                        project_dir.join(file_target)
+                    };
+                    crate::import_local_package_dir(
+                        config.package_import_method,
+                        &file_target,
+                        &config.modules_dir.join(&name),
+                    )
+                    .expect("materialize local file dependency");
+                    return;
+                }
+                let resolved_range = apply_workspace_root_peer_override(
+                    config,
+                    &workspace_root_peer_overrides,
+                    None,
+                    &name,
+                    &version_range,
+                );
+
+                let is_optional = matches!(group, DependencyGroup::Optional);
+                let dependency = match (InstallPackageFromRegistry {
+                    tarball_mem_cache,
+                    http_client,
+                    config,
+                    lockfile_dir,
+                    pnpmfile,
+                    ignore_pnpmfile,
+                    node_modules_dir: &config.modules_dir,
+                    name: &name,
+                    version_range: resolved_range.as_str(),
+                    optional: is_optional,
+                    prefer_offline,
+                    offline,
+                    force,
                 })
-                .pipe(future::join_all)
+                .run()
+                .await
+                {
+                    Ok(dep) => dep,
+                    Err(error) => {
+                        if is_optional {
+                            tracing::debug!(
+                                %name,
+                                "Skipping optional dependency that failed to resolve: {error}"
+                            );
+                            return;
+                        }
+                        tracing::error!(%name, "Failed to install dependency: {error}");
+                        return;
+                    }
+                };
+
+                if matches!(
+                    crate::installability::check_package_version_installability(
+                        &dependency,
+                        matches!(group, DependencyGroup::Optional)
+                    ),
+                    crate::installability::Installability::SkipOptional
+                ) {
+                    return;
+                }
+
+                InstallWithoutLockfile {
+                    tarball_mem_cache,
+                    http_client,
+                    config,
+                    manifest,
+                    lockfile_dir,
+                    dependency_groups: (),
+                    resolved_packages,
+                    force,
+                    prefer_offline,
+                    offline,
+                    pnpmfile,
+                    ignore_pnpmfile,
+                }
+                .install_dependencies_from_registry(&dependency, &workspace_root_peer_overrides)
                 .await;
+            }
+        })
+        .pipe(future::join_all)
+        .await;
     }
 }
 
@@ -246,12 +243,10 @@ impl<'a> InstallWithoutLockfile<'a, ()> {
                 .map(|(name, version_range)| (true, name.to_string(), version_range.to_string())),
         );
         if self.config.auto_install_peers {
-            dependencies.extend(
-                package.peer_dependencies_iter().map(|(name, version_range)| {
-                    let is_optional = package.is_peer_optional(name);
-                    (is_optional, name.to_string(), version_range.to_string())
-                }),
-            );
+            dependencies.extend(package.peer_dependencies_iter().map(|(name, version_range)| {
+                let is_optional = package.is_peer_optional(name);
+                (is_optional, name.to_string(), version_range.to_string())
+            }));
         }
         let peer_dependencies = package.peer_dependencies.clone();
 
@@ -268,7 +263,7 @@ impl<'a> InstallWithoutLockfile<'a, ()> {
                         &name,
                         &version_range,
                     );
-                    let dependency = match InstallPackageFromRegistry {
+                    let dependency = match (InstallPackageFromRegistry {
                         tarball_mem_cache,
                         http_client,
                         config,
@@ -282,7 +277,7 @@ impl<'a> InstallWithoutLockfile<'a, ()> {
                         prefer_offline: *prefer_offline,
                         offline: *offline,
                         force: *force,
-                    }
+                    })
                     .run()
                     .await
                     {

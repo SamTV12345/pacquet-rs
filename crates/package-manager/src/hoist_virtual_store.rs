@@ -237,8 +237,12 @@ pub(crate) fn hoist_virtual_store_packages(config: &Npmrc) -> miette::Result<()>
             // Link bins for hoisted packages (pnpm does this in hoist/src/index.ts).
             // Errors are tolerated because some packages generate bins via lifecycle hooks
             // that haven't executed yet at this stage.
-            if let Err(error) = link_bins_for_hoisted_packages(config, &shared_modules_dir, &selected) {
-                tracing::debug!("Some hoisted bin links could not be created (lifecycle-generated bins may not exist yet): {error}");
+            if let Err(error) =
+                link_bins_for_hoisted_packages(config, &shared_modules_dir, &selected)
+            {
+                tracing::debug!(
+                    "Some hoisted bin links could not be created (lifecycle-generated bins may not exist yet): {error}"
+                );
             }
         }
         NodeLinker::Pnp => {}
