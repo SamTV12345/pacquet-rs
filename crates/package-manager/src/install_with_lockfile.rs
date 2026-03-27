@@ -126,21 +126,36 @@ where
                         &version_range,
                     );
 
-                    let resolved_package =
-                        if let Some((resolved_package, local_dep_path, should_symlink)) =
-                            resolve_local_dependency(manifest.path(), &version_range)
-                        {
-                            if should_symlink {
-                                if !lockfile_only {
-                                    let dependency_path = config.modules_dir.join(&name);
-                                    link_package(true, &local_dep_path, &dependency_path)
-                                        .expect("install local dependency");
-                                }
-                                resolved_package
+                    let resolved_package = if let Some((
+                        resolved_package,
+                        local_dep_path,
+                        should_symlink,
+                    )) =
+                        resolve_local_dependency(manifest.path(), &version_range)
+                    {
+                        if should_symlink {
+                            if !lockfile_only {
+                                let dependency_path = config.modules_dir.join(&name);
+                                link_package(true, &local_dep_path, &dependency_path)
+                                    .expect("install local dependency");
+                            }
+                            resolved_package
+                        } else {
+                            let normalized_ref =
+                                normalized_local_file_reference(lockfile_dir, &local_dep_path)
+                                    .replace('\\', "/");
+                            // pnpm's shouldRelinkPkg: when disable_relink_local_dir_deps
+                            // is true, skip re-importing if target already has content.
+                            if config.disable_relink_local_dir_deps
+                                && !lockfile_only
+                                && !crate::symlink_direct_dependencies::dir_is_effectively_empty(
+                                    &config.modules_dir.join(&name),
+                                )
+                            {
+                                ResolvedPackage::new(ResolvedDependencyVersion::Link(
+                                    normalized_ref,
+                                ))
                             } else {
-                                let normalized_ref =
-                                    normalized_local_file_reference(lockfile_dir, &local_dep_path)
-                                        .replace('\\', "/");
                                 Self::snapshot_local_directory_package(
                                     resolved_packages,
                                     http_client,
@@ -163,26 +178,40 @@ where
                                 .await
                                 .wrap_err_with(|| format!("snapshot local dependency `{name}`"))?
                             }
-                        } else if let Some(workspace_package) =
-                            resolve_workspace_dependency_for_install(
-                                config,
-                                workspace_packages,
-                                &name,
-                                &version_range,
-                                0,
-                            )?
-                        {
-                            if should_inject_workspace_dependency(
-                                manifest,
-                                &name,
-                                &version_range,
-                                config,
-                            ) {
-                                let normalized_ref = normalized_local_file_reference(
-                                    lockfile_dir,
-                                    &workspace_package.root_dir,
+                        }
+                    } else if let Some(workspace_package) =
+                        resolve_workspace_dependency_for_install(
+                            config,
+                            workspace_packages,
+                            &name,
+                            &version_range,
+                            0,
+                        )?
+                    {
+                        if should_inject_workspace_dependency(
+                            manifest,
+                            &name,
+                            &version_range,
+                            config,
+                        ) {
+                            let normalized_ref = normalized_local_file_reference(
+                                lockfile_dir,
+                                &workspace_package.root_dir,
+                            )
+                            .replace('\\', "/");
+                            // pnpm's shouldRelinkPkg: skip re-importing when
+                            // disable_relink_local_dir_deps is true and target has content.
+                            if config.disable_relink_local_dir_deps
+                                && !lockfile_only
+                                && !crate::symlink_direct_dependencies::dir_is_effectively_empty(
+                                    &config.modules_dir.join(&name),
                                 )
-                                .replace('\\', "/");
+                            {
+                                ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
+                                    "file:{}",
+                                    normalized_ref.strip_prefix("file:").unwrap_or(&normalized_ref)
+                                )))
+                            } else {
                                 Self::snapshot_local_directory_package(
                                     resolved_packages,
                                     http_client,
@@ -206,78 +235,79 @@ where
                                 .wrap_err_with(|| {
                                     format!("snapshot injected workspace dependency `{name}`")
                                 })?
-                            } else {
-                                if !lockfile_only {
-                                    let symlink_path = config.modules_dir.join(&name);
-                                    let symlink_target = link_target_with_publish_config_directory(
-                                        &workspace_package.root_dir,
-                                    );
-                                    link_package(config.symlink, &symlink_target, &symlink_path)
-                                        .map_err(|error| {
-                                            miette::miette!(
-                                                "symlink workspace package `{name}`: {error}"
-                                            )
-                                        })?;
-                                }
-
-                                let project_dir =
-                                    manifest.path().parent().unwrap_or_else(|| Path::new("."));
-                                let relative =
-                                    to_relative_path(project_dir, &workspace_package.root_dir);
-                                ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
-                                    "link:{}",
-                                    relative.replace('\\', "/")
-                                )))
                             }
-                        } else if lockfile_only {
-                            Self::resolve_and_snapshot_package(
-                                resolved_packages,
-                                http_client,
-                                config,
-                                lockfile_dir,
-                                pnpmfile,
-                                ignore_pnpmfile,
-                                package_snapshots,
-                                workspace_packages,
-                                workspace_root_overrides,
-                                workspace_root_peer_overrides,
-                                preferred_versions,
-                                &name,
-                                &version_range,
-                                matches!(group, DependencyGroup::Optional),
-                                prefer_offline,
-                                offline,
-                            )
-                            .await
-                            .wrap_err_with(|| {
-                                format!("resolve dependency `{name}` for lockfile snapshot")
-                            })?
                         } else {
-                            Self::install_and_snapshot_package(
-                                tarball_mem_cache,
-                                resolved_packages,
-                                http_client,
-                                config,
-                                lockfile_dir,
-                                pnpmfile,
-                                ignore_pnpmfile,
-                                package_snapshots,
-                                workspace_packages,
-                                workspace_root_overrides,
-                                workspace_root_peer_overrides,
-                                &config.modules_dir,
-                                &name,
-                                &version_range,
-                                matches!(group, DependencyGroup::Optional),
-                                offline,
-                                prefer_offline,
-                                force,
-                            )
-                            .await
-                            .wrap_err_with(|| {
-                                format!("install dependency `{name}` and update lockfile")
-                            })?
-                        };
+                            if !lockfile_only {
+                                let symlink_path = config.modules_dir.join(&name);
+                                let symlink_target = link_target_with_publish_config_directory(
+                                    &workspace_package.root_dir,
+                                );
+                                link_package(config.symlink, &symlink_target, &symlink_path)
+                                    .map_err(|error| {
+                                        miette::miette!(
+                                            "symlink workspace package `{name}`: {error}"
+                                        )
+                                    })?;
+                            }
+
+                            let project_dir =
+                                manifest.path().parent().unwrap_or_else(|| Path::new("."));
+                            let relative =
+                                to_relative_path(project_dir, &workspace_package.root_dir);
+                            ResolvedPackage::new(ResolvedDependencyVersion::Link(format!(
+                                "link:{}",
+                                relative.replace('\\', "/")
+                            )))
+                        }
+                    } else if lockfile_only {
+                        Self::resolve_and_snapshot_package(
+                            resolved_packages,
+                            http_client,
+                            config,
+                            lockfile_dir,
+                            pnpmfile,
+                            ignore_pnpmfile,
+                            package_snapshots,
+                            workspace_packages,
+                            workspace_root_overrides,
+                            workspace_root_peer_overrides,
+                            preferred_versions,
+                            &name,
+                            &version_range,
+                            matches!(group, DependencyGroup::Optional),
+                            prefer_offline,
+                            offline,
+                        )
+                        .await
+                        .wrap_err_with(|| {
+                            format!("resolve dependency `{name}` for lockfile snapshot")
+                        })?
+                    } else {
+                        Self::install_and_snapshot_package(
+                            tarball_mem_cache,
+                            resolved_packages,
+                            http_client,
+                            config,
+                            lockfile_dir,
+                            pnpmfile,
+                            ignore_pnpmfile,
+                            package_snapshots,
+                            workspace_packages,
+                            workspace_root_overrides,
+                            workspace_root_peer_overrides,
+                            &config.modules_dir,
+                            &name,
+                            &version_range,
+                            matches!(group, DependencyGroup::Optional),
+                            offline,
+                            prefer_offline,
+                            force,
+                        )
+                        .await
+                        .wrap_err_with(|| {
+                            format!("install dependency `{name}` and update lockfile")
+                        })?
+                    };
 
                     Ok::<_, miette::Report>((key, resolved_package))
                 }

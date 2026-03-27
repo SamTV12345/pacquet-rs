@@ -180,7 +180,7 @@ fn local_link_target(
 /// without touching the filesystem (preserves symlinks).
 /// pnpm's shouldRelinkPkg considers a directory "empty" if it has no entries or
 /// only a `node_modules` subdirectory.
-fn dir_is_effectively_empty(path: &Path) -> bool {
+pub(crate) fn dir_is_effectively_empty(path: &Path) -> bool {
     let Ok(mut entries) = fs::read_dir(path) else {
         return true;
     };
