@@ -324,18 +324,6 @@ fn resolve_hoisted_entry_target(entry_path: &Path) -> io::Result<PathBuf> {
     }
 }
 
-fn hoisted_virtual_store_name(target: &Path) -> Option<String> {
-    let mut current = target;
-    loop {
-        if current.file_name().is_some_and(|name| name == "node_modules") {
-            return current.parent().and_then(|parent| {
-                parent.file_name().map(|name| name.to_string_lossy().into_owned())
-            });
-        }
-        current = current.parent()?;
-    }
-}
-
 fn modules_manifest_package_id(dependency_path: &DependencyPath) -> String {
     match dependency_path.custom_registry.as_deref() {
         Some(custom_registry) => {
