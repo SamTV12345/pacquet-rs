@@ -182,17 +182,18 @@ pub fn symlink_package(
                 }
                 n
             };
-            // Normalize both sides logically (without following symlinks)
-            // so that relative path computation is correct and symlink
-            // targets like `link:../symlink` are preserved as-is.
-            let relative_base = normalize(parent);
-            let absolute_target = if symlink_target.is_absolute() {
-                symlink_target.to_path_buf()
+            // Canonicalize the base to handle cases where node_modules is
+            // itself a symlink (e.g. to a shared directory).  For the target,
+            // rebuild the absolute path through the *real* base so both sides
+            // share the same prefix, but apply only logical normalization so
+            // that symlink targets (link:../symlink) are preserved.
+            let real_base = fs::canonicalize(parent).unwrap_or_else(|_| normalize(parent));
+            let real_absolute_target = if symlink_target.is_absolute() {
+                normalize(symlink_target)
             } else {
-                parent.join(symlink_target)
+                normalize(&real_base.join(symlink_target))
             };
-            let normalized_target = normalize(&absolute_target);
-            relative_path(&normalized_target, &relative_base)
+            relative_path(&real_absolute_target, &real_base)
         },
     );
     #[cfg(windows)]
