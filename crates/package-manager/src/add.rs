@@ -135,7 +135,15 @@ where
             lockfile_importer_id,
             workspace_packages,
             preferred_versions: None,
-            dependency_groups: list_dependency_groups(),
+            // Always pass all dependency groups so that Install preserves
+            // existing symlinks from previous add operations (pnpm passes
+            // include={dependencies,devDependencies,optionalDependencies}
+            // during add, not just the group being added).
+            dependency_groups: [
+                DependencyGroup::Prod,
+                DependencyGroup::Dev,
+                DependencyGroup::Optional,
+            ],
             frozen_lockfile: false,
             lockfile_only: false,
             force: false,

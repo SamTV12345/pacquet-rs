@@ -780,24 +780,6 @@ fn add_should_link_workspace_packages_across_dependency_groups_when_link_workspa
         .success();
 
     // Debug: check node_modules after ALL three adds
-    let nm = project_1_dir.join("node_modules");
-    if nm.exists() {
-        for entry in std::fs::read_dir(&nm).unwrap().filter_map(|e| e.ok()) {
-            let p = entry.path();
-            let meta = std::fs::symlink_metadata(&p).ok();
-            let is_sym = meta.as_ref().map(|m| m.file_type().is_symlink()).unwrap_or(false);
-            let target = if is_sym { std::fs::read_link(&p).ok() } else { None };
-            let exists = p.exists();
-            eprintln!(
-                "  {:?}: symlink={} exists={} target={:?}",
-                entry.file_name(),
-                is_sym,
-                exists,
-                target
-            );
-        }
-    }
-
     let manifest = PackageManifest::from_path(project_1_dir.join("package.json")).unwrap();
     assert!(
         manifest
