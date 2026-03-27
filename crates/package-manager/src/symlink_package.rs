@@ -167,20 +167,9 @@ pub fn symlink_package(
     let symlink_target = symlink_path.parent().map_or_else(
         || symlink_target.to_path_buf(),
         |parent| {
-            // Both base and target must use the same path representation.
-            // Use canonicalize for both so that symlink-based /tmp paths
-            // (e.g. /tmp -> /private/tmp) resolve consistently.
-            let relative_base = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-            let absolute_target = if symlink_target.is_absolute() {
-                symlink_target.to_path_buf()
-            } else {
-                parent.join(symlink_target)
-            };
-            // Canonicalize the target too so both sides use the same real paths.
-            // Fall back to logical normalization if the target doesn't exist yet.
-            let normalized = fs::canonicalize(&absolute_target).unwrap_or_else(|_| {
+            let normalize = |path: &Path| -> PathBuf {
                 let mut n = PathBuf::new();
-                for component in absolute_target.components() {
+                for component in path.components() {
                     match component {
                         std::path::Component::CurDir => {}
                         std::path::Component::ParentDir => {
@@ -192,8 +181,18 @@ pub fn symlink_package(
                     }
                 }
                 n
-            });
-            relative_path(&normalized, &relative_base)
+            };
+            // Normalize both sides logically (without following symlinks)
+            // so that relative path computation is correct and symlink
+            // targets like `link:../symlink` are preserved as-is.
+            let relative_base = normalize(parent);
+            let absolute_target = if symlink_target.is_absolute() {
+                symlink_target.to_path_buf()
+            } else {
+                parent.join(symlink_target)
+            };
+            let normalized_target = normalize(&absolute_target);
+            relative_path(&normalized_target, &relative_base)
         },
     );
     #[cfg(windows)]
