@@ -145,9 +145,14 @@ impl AddArgs {
         if workspace && workspace_packages.is_empty() {
             miette::bail!("--workspace can only be used inside a workspace");
         }
+        // pnpm rejects --workspace only when BOTH link-workspace-packages AND
+        // save-workspace-protocol are explicitly disabled in the local config.
+        // When only save-workspace-protocol=false is set (link-workspace-packages
+        // not explicitly set), pnpm auto-enables workspace protocol instead.
         if workspace
             && config.link_workspace_packages == LinkWorkspacePackages::False
             && config.save_workspace_protocol == SaveWorkspaceProtocol::False
+            && config.raw_settings().get("link-workspace-packages").is_some_and(|v| v == "false")
         {
             miette::bail!(
                 "This workspace has link-workspace-packages turned off, so dependencies are linked from the workspace only when the workspace protocol is used. Either set link-workspace-packages to true or don't use the --no-save-workspace-protocol option when running add with the --workspace option"

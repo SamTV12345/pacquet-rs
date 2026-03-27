@@ -9,7 +9,12 @@ use std::{fs, path::Path, process::Command};
 
 fn pacquet_command(workspace: &Path) -> Command {
     #[allow(deprecated)]
-    Command::cargo_bin("pacquet").expect("find pacquet binary").with_current_dir(workspace)
+    let mut cmd =
+        Command::cargo_bin("pacquet").expect("find pacquet binary").with_current_dir(workspace);
+    // Isolate from the user's real ~/.npmrc by pointing HOME to the workspace.
+    cmd.env("HOME", workspace);
+    cmd.env("USERPROFILE", workspace);
+    cmd
 }
 
 #[test]
