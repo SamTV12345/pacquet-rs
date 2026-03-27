@@ -168,12 +168,26 @@ pub fn symlink_package(
         || symlink_target.to_path_buf(),
         |parent| {
             let relative_base = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-            let relative_target = if symlink_target.is_absolute() {
+            let absolute_target = if symlink_target.is_absolute() {
                 symlink_target.to_path_buf()
             } else {
                 parent.join(symlink_target)
             };
-            relative_path(&relative_target, &relative_base)
+            // Normalize `..` components logically without following symlinks,
+            // so the relative path computation is correct.
+            let mut normalized = PathBuf::new();
+            for component in absolute_target.components() {
+                match component {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        normalized.pop();
+                    }
+                    _ => {
+                        normalized.push(component.as_os_str());
+                    }
+                }
+            }
+            relative_path(&normalized, &relative_base)
         },
     );
     #[cfg(windows)]
