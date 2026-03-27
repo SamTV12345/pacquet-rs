@@ -201,7 +201,7 @@ mod tests {
         .expect("write modules manifest");
 
         let written = fs::read_to_string(&manifest_path).expect("read modules manifest");
-        assert!(written.contains("pendingBuilds: []"));
-        assert!(written.contains("ignoredBuilds: []"));
+        assert!(written.contains("\"pendingBuilds\": []"));
+        assert!(written.contains("\"ignoredBuilds\": []"));
     }
 }
