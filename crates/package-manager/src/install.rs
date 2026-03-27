@@ -725,6 +725,9 @@ pub fn current_lockfile_for_installers(
             continue;
         }
         let installable = parent_installable && !skipped.contains(&resolved_path.to_string());
+        if !installable {
+            continue;
+        }
         filtered_packages.insert(resolved_path.clone(), package_snapshot.clone());
         for (alias, dependency_spec) in crate::package_dependency_map(package_snapshot) {
             if let Some(linked_importer_id) =

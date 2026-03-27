@@ -206,10 +206,10 @@ fn hoisted_dependencies(
             if direct_dependency_names.contains(&name) {
                 continue;
             }
-            hoisted
-                .entry(package_specifier.to_string())
-                .or_default()
-                .insert(name, "private".to_string());
+            // pnpm writes hoistedDependencies keys without leading `/`
+            let key = package_specifier.to_string();
+            let key = key.strip_prefix('/').unwrap_or(&key).to_string();
+            hoisted.entry(key).or_default().insert(name, "private".to_string());
         }
     }
 
@@ -230,10 +230,9 @@ fn hoisted_dependencies(
             if direct_dependency_names.contains(&name) {
                 continue;
             }
-            hoisted
-                .entry(package_specifier.to_string())
-                .or_default()
-                .insert(name, "public".to_string());
+            let key = package_specifier.to_string();
+            let key = key.strip_prefix('/').unwrap_or(&key).to_string();
+            hoisted.entry(key).or_default().insert(name, "public".to_string());
         }
     }
 
@@ -530,7 +529,7 @@ mod tests {
         .expect("write modules manifest");
         let content =
             fs::read_to_string(dir.path().join(MODULES_MANIFEST_FILE_NAME)).expect("read manifest");
-        assert!(content.contains("skipped: []"));
+        assert!(content.contains("\"skipped\": []"));
 
         assert!(!should_prune_orphaned_virtual_store_entries(dir.path(), 10));
     }
