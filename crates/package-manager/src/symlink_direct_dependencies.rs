@@ -83,12 +83,21 @@ where
                     }
                 };
                 let dependency_path = config.modules_dir.join(&name_str);
-                // pnpm always re-links local dependencies (resolvedFrom !== 'store')
-                // unless disable_relink_local_dir_deps is set AND the dir is non-empty.
-                // This ensures injected workspace deps are refreshed when source files change.
+                // pnpm re-links local dependencies (resolvedFrom !== 'store') on every
+                // install.  When disable_relink_local_dir_deps is true, it only re-links
+                // if the target directory is empty or contains only node_modules
+                // (pnpm/fs/indexed-pkg-importer/src/index.ts shouldRelinkPkg).
                 let should_refresh_existing =
-                    matches!(&spec.version, ResolvedDependencyVersion::Link(_))
-                        && !config.disable_relink_local_dir_deps;
+                    if matches!(&spec.version, ResolvedDependencyVersion::Link(_)) {
+                        if config.disable_relink_local_dir_deps {
+                            // Only refresh when the target dir is effectively empty
+                            dir_is_effectively_empty(&dependency_path)
+                        } else {
+                            true
+                        }
+                    } else {
+                        false
+                    };
                 if dependency_path.exists() && !should_refresh_existing {
                     return;
                 }
@@ -169,6 +178,21 @@ fn local_link_target(
 
 /// Normalize a path by resolving `.` and `..` components logically,
 /// without touching the filesystem (preserves symlinks).
+/// pnpm's shouldRelinkPkg considers a directory "empty" if it has no entries or
+/// only a `node_modules` subdirectory.
+fn dir_is_effectively_empty(path: &Path) -> bool {
+    let Ok(mut entries) = fs::read_dir(path) else {
+        return true;
+    };
+    let first = entries.next();
+    let second = entries.next();
+    match (first, second) {
+        (None, _) => true,
+        (Some(Ok(entry)), None) => entry.file_name() == "node_modules",
+        _ => false,
+    }
+}
+
 fn normalize_link_target(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut normalized = PathBuf::new();
