@@ -277,6 +277,15 @@ where
         // install state on disk already matches, skip ALL work (resolution,
         // linking, hoisting, bin-linking, manifest writing).  This is what
         // gives pnpm a 1-2s warm install.
+        tracing::debug!(
+            target: "pacquet::install",
+            force,
+            lockfile_only,
+            lockfile_enabled = config.lockfile,
+            frozen_lockfile,
+            has_lockfile = lockfile.is_some(),
+            "fast-path preconditions"
+        );
         if !force
             && !lockfile_only
             && config.lockfile
@@ -1653,9 +1662,13 @@ fn persisted_install_state_is_reusable(
         Lockfile::load_from_path(&config.virtual_store_dir.join("lock.yaml")).ok().flatten();
 
     match (modules_manifest, current_lockfile) {
-        (None, None) => false,
+        (None, None) => {
+            tracing::debug!(target: "pacquet::install", "persisted state not reusable: no modules manifest and no current lockfile");
+            false
+        }
         (Some(modules_manifest), Some(current_lockfile)) => {
             if !modules_manifest_is_compatible(&modules_manifest, config, dependency_groups) {
+                tracing::debug!(target: "pacquet::install", "persisted state not reusable: modules manifest incompatible");
                 return false;
             }
 
@@ -1676,28 +1689,47 @@ fn persisted_install_state_is_reusable(
                 importer_id,
             );
             if !matches_current_lockfile {
+                tracing::debug!(target: "pacquet::install", "persisted state not reusable: current lockfile does not match expected");
                 return false;
             }
 
             let Some(project_snapshot) =
                 snapshot_for_importer(&expected_current_lockfile.project_snapshot, importer_id)
             else {
+                tracing::debug!(target: "pacquet::install", "persisted state not reusable: no project snapshot for importer {importer_id}");
                 return false;
             };
 
-            importer_dependencies_ready(
+            let deps_ready = importer_dependencies_ready(
                 config,
                 project_snapshot,
                 expected_current_lockfile.packages.as_ref(),
                 dependency_groups.iter().copied(),
-            ) && direct_root_dependencies_ready(
+            );
+            if !deps_ready {
+                tracing::debug!(target: "pacquet::install", "persisted state not reusable: importer dependencies not ready");
+                return false;
+            }
+            let root_ready = direct_root_dependencies_ready(
                 config,
                 project_snapshot,
                 expected_current_lockfile.packages.as_ref(),
                 dependency_groups,
-            )
+            );
+            if !root_ready {
+                tracing::debug!(target: "pacquet::install", "persisted state not reusable: direct root dependencies not ready");
+                return false;
+            }
+            true
         }
-        _ => false,
+        (None, Some(_)) => {
+            tracing::debug!(target: "pacquet::install", "persisted state not reusable: no modules manifest");
+            false
+        }
+        (Some(_), None) => {
+            tracing::debug!(target: "pacquet::install", "persisted state not reusable: no current lockfile at lock.yaml");
+            false
+        }
     }
 }
 
@@ -1764,30 +1796,48 @@ fn modules_manifest_is_compatible(
     dependency_groups: &[DependencyGroup],
 ) -> bool {
     if modules_manifest.node_linker() != Some(node_linker_name(config)) {
+        tracing::debug!(target: "pacquet::install", manifest_linker = ?modules_manifest.node_linker(), expected = node_linker_name(config), "incompatible: node_linker mismatch");
         return false;
     }
-    let expected_store_dir =
-        fs::canonicalize(PathBuf::from(config.store_dir.display().to_string()).join("v10"))
-            .unwrap_or_else(|_| PathBuf::from(config.store_dir.display().to_string()).join("v10"))
-            .display()
-            .to_string();
-    if modules_manifest.store_dir() != Some(expected_store_dir.as_str()) {
+    let store_dir_path = PathBuf::from(config.store_dir.display().to_string()).join("v10");
+    // Avoid fs::canonicalize which adds \\?\ prefix on Windows,
+    // causing mismatch with the non-prefixed path stored in .modules.yaml.
+    let expected_store_dir = store_dir_path.display().to_string();
+    let manifest_store_dir = modules_manifest.store_dir().unwrap_or("");
+    // Compare with both canonicalized and non-canonicalized forms
+    // to handle both pnpm-written and pacquet-written manifests.
+    let store_dir_matches = manifest_store_dir == expected_store_dir
+        || fs::canonicalize(&store_dir_path)
+            .map(|p| p.display().to_string())
+            .is_ok_and(|canonical| manifest_store_dir == canonical);
+    if !store_dir_matches {
+        tracing::debug!(target: "pacquet::install", manifest_store = %manifest_store_dir, expected = %expected_store_dir, "incompatible: store_dir mismatch");
         return false;
     }
     if modules_manifest.resolved_virtual_store_dir(&config.modules_dir) != config.virtual_store_dir
     {
+        tracing::debug!(target: "pacquet::install", manifest_vsd = ?modules_manifest.resolved_virtual_store_dir(&config.modules_dir), expected = ?config.virtual_store_dir, "incompatible: virtual_store_dir mismatch");
         return false;
     }
     if modules_manifest.included() != Some(&included_dependencies(dependency_groups)) {
+        tracing::debug!(target: "pacquet::install", manifest_included = ?modules_manifest.included(), expected = ?included_dependencies(dependency_groups), "incompatible: included mismatch");
         return false;
     }
     if modules_manifest.hoist_pattern().unwrap_or(&[]) != config.hoist_pattern {
+        tracing::debug!(target: "pacquet::install", manifest_hoist = ?modules_manifest.hoist_pattern(), expected = ?config.hoist_pattern, "incompatible: hoist_pattern mismatch");
         return false;
     }
     if modules_manifest.public_hoist_pattern().unwrap_or(&[]) != config.public_hoist_pattern {
+        tracing::debug!(target: "pacquet::install", manifest_public_hoist = ?modules_manifest.public_hoist_pattern(), expected = ?config.public_hoist_pattern, "incompatible: public_hoist_pattern mismatch");
         return false;
     }
-    modules_manifest.virtual_store_dir_max_length() == crate::DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH
+    if modules_manifest.virtual_store_dir_max_length()
+        != crate::DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH
+    {
+        tracing::debug!(target: "pacquet::install", manifest_max_len = ?modules_manifest.virtual_store_dir_max_length(), expected = crate::DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH, "incompatible: virtual_store_dir_max_length mismatch");
+        return false;
+    }
+    true
 }
 
 fn current_lockfile_matches_expected(

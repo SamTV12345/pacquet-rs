@@ -152,7 +152,9 @@ pub(crate) fn filter_installable_optional_dependencies(
                 crate::installability::Installability::SkipOptional
             );
             if is_skipped {
-                skipped.insert(resolved_path.to_string());
+                // pnpm writes skipped entries without leading `/` prefix
+                let key = resolved_path.to_string();
+                skipped.insert(key.strip_prefix('/').unwrap_or(&key).to_string());
             }
             !is_skipped
         });
@@ -184,7 +186,8 @@ pub(crate) fn filter_installable_optional_dependencies(
                 crate::installability::Installability::SkipOptional
             )
         {
-            skipped.insert(resolved_path.to_string());
+            let key = resolved_path.to_string();
+            skipped.insert(key.strip_prefix('/').unwrap_or(&key).to_string());
             continue;
         }
         filtered_packages.insert(resolved_path.clone(), package_snapshot.clone());

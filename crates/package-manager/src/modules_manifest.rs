@@ -334,16 +334,15 @@ fn modules_manifest_package_id(dependency_path: &DependencyPath) -> String {
 }
 
 fn relative_virtual_store_dir(modules_dir: &Path, virtual_store_dir: &Path) -> String {
-    if cfg!(windows) {
-        return virtual_store_dir.display().to_string();
-    }
+    // pnpm always writes relative virtualStoreDir (e.g. ".pnpm") on all platforms.
     if let Ok(relative) = virtual_store_dir.strip_prefix(modules_dir) {
         let relative = if relative.as_os_str().is_empty() {
             PathBuf::from(".")
         } else {
             PathBuf::from(relative)
         };
-        return relative.display().to_string();
+        // Use forward slashes on all platforms (matching pnpm behavior)
+        return relative.display().to_string().replace('\\', "/");
     }
     virtual_store_dir.display().to_string()
 }
