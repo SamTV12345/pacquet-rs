@@ -197,30 +197,7 @@ pub fn symlink_package(
         },
     );
     #[cfg(windows)]
-    let symlink_target = {
-        // Windows junctions require absolute, normalized target paths.
-        // Resolve relative targets against the symlink's parent directory
-        // and normalize `..` components without following symlinks.
-        use std::path::Component;
-        let absolute = if symlink_target.is_absolute() {
-            symlink_target.to_path_buf()
-        } else {
-            symlink_path.parent().unwrap_or_else(|| Path::new(".")).join(symlink_target)
-        };
-        let mut normalized = PathBuf::new();
-        for component in absolute.components() {
-            match component {
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    normalized.pop();
-                }
-                _ => {
-                    normalized.push(component.as_os_str());
-                }
-            }
-        }
-        normalized
-    };
+    let symlink_target = symlink_target.to_path_buf();
 
     force_symlink(&symlink_target, symlink_path)
 }
