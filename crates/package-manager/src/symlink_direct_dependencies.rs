@@ -167,10 +167,29 @@ fn local_link_target(
         link.strip_prefix("link:").or_else(|| link.strip_prefix("file:")).unwrap_or(link);
     let base_target =
         config.modules_dir.parent().unwrap_or(config.modules_dir.as_path()).join(relative);
-    // Canonicalize to resolve `..` components so that relative symlink
-    // computation in symlink_package produces correct paths.
-    let base_target = std::fs::canonicalize(&base_target).unwrap_or(base_target);
+    // Normalize to resolve `..` components logically (without following symlinks)
+    // so that relative symlink computation in symlink_package produces correct paths.
+    let base_target = normalize_link_target(&base_target);
     (link_target_with_publish_config_directory(&base_target), false)
+}
+
+/// Normalize a path by resolving `.` and `..` components logically,
+/// without touching the filesystem (preserves symlinks).
+fn normalize_link_target(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
 }
 
 pub(crate) fn link_target_with_publish_config_directory(target: &Path) -> PathBuf {
