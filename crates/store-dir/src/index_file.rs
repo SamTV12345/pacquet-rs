@@ -11,9 +11,8 @@ impl StoreDir {
     pub fn index_file_path(&self, tarball_integrity: &Integrity, package_id: &str) -> PathBuf {
         let (algorithm, hex) = tarball_integrity.to_hex();
         if !matches!(algorithm, Algorithm::Sha512 | Algorithm::Sha1) {
-            tracing::warn!(
-                %algorithm,
-                "Unsupported integrity algorithm, falling back to full hex. Only Sha1 and Sha512 are officially supported."
+            eprintln!(
+                "Warning: unsupported integrity algorithm {algorithm}, falling back to full hex. Only Sha1 and Sha512 are officially supported."
             );
         }
         let hex = &hex[..hex.len().min(64)];
