@@ -730,7 +730,6 @@ fn add_should_save_plain_range_for_local_workspace_package_when_link_workspace_p
 }
 
 #[test]
-#[ignore = "Known issue: workspace package symlinks not materialized with link-workspace-packages=true and save-workspace-protocol=false"]
 fn add_should_link_workspace_packages_across_dependency_groups_when_link_workspace_packages_is_true()
  {
     let CommandTempCwd { pacquet: _, root, workspace, .. } = CommandTempCwd::init();

@@ -167,6 +167,9 @@ fn local_link_target(
         link.strip_prefix("link:").or_else(|| link.strip_prefix("file:")).unwrap_or(link);
     let base_target =
         config.modules_dir.parent().unwrap_or(config.modules_dir.as_path()).join(relative);
+    // Canonicalize to resolve `..` components so that relative symlink
+    // computation in symlink_package produces correct paths.
+    let base_target = std::fs::canonicalize(&base_target).unwrap_or(base_target);
     (link_target_with_publish_config_directory(&base_target), false)
 }
 
