@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
-    sync::atomic::{AtomicBool, Ordering},
+    path::Path,
 };
 
 /// This subroutine generates filesystem layout for the virtual store at `node_modules/.pacquet`.
@@ -27,6 +27,13 @@ pub struct CreateVirtualStore<'a> {
 
 impl<'a> CreateVirtualStore<'a> {
     /// Execute the subroutine.
+    ///
+    /// Follows pnpm's headless install pipelining model:
+    /// - Phase 0: Pre-create all virtual store directories
+    /// - Phase 1: `tokio::join!` of two concurrent tasks:
+    ///   - Task A (`link_all_symlink_layouts`): Create symlink layouts using lockfile data only
+    ///   - Task B (`download_and_import_all_packages`): Download, extract, and import packages
+    /// - Phase 2: Hoist dependencies and prune orphans
     pub async fn run(self) {
         let CreateVirtualStore {
             http_client,
@@ -44,91 +51,176 @@ impl<'a> CreateVirtualStore<'a> {
             return;
         };
 
-        let should_link_layout = AtomicBool::new(false);
-        let install_concurrency = std::thread::available_parallelism()
-            .map(|parallelism| parallelism.get().clamp(4, 32))
-            .unwrap_or(16);
+        // Phase 0: Pre-create all virtual store node_modules directories.
+        // This is needed so that symlinks created in Task A have valid target
+        // directories (required for Windows junctions, harmless on Unix).
+        pre_create_virtual_store_dirs(config, packages);
 
-        stream::iter(packages.iter())
-            .for_each_concurrent(install_concurrency, |(dependency_path, package_snapshot)| async {
-                if let Some(seen) = resolved_packages {
-                    let virtual_store_name =
-                        dependency_path.package_specifier.to_virtual_store_name();
-                    if !seen.insert(virtual_store_name) {
-                        return;
-                    }
-                }
-                match (InstallPackageBySnapshot {
-                    http_client,
-                    config,
-                    dependency_path,
-                    package_snapshot,
-                    lockfile_dir,
-                    offline,
-                    force,
-                })
-                .run()
-                .await
-                {
-                    Ok(imported) => {
-                        if imported {
-                            should_link_layout.store(true, Ordering::Relaxed);
-                        }
-                    }
-                    Err(error) => {
-                        let is_optional = package_snapshot.optional.unwrap_or(false);
-                        let dep_path_str = dependency_path.to_string();
-                        if is_optional {
-                            tracing::debug!(
-                                dep_path = %dep_path_str,
-                                "Skipping optional package that failed to install: {error}"
-                            );
-                        } else {
-                            tracing::error!(
-                                dep_path = %dep_path_str,
-                                "Failed to install package: {error}"
-                            );
-                        }
-                    }
-                }
-            })
-            .await;
-
-        let needs_layout_pass = should_link_layout.load(Ordering::Relaxed)
+        // Phase 1: Run symlink layouts and package downloads IN PARALLEL,
+        // matching pnpm's Promise.all([linkAllModules(), linkAllPkgs()]) pattern.
+        //
+        // Task A (symlink layouts) is pure synchronous filesystem work and runs
+        // on a dedicated OS thread so it doesn't block tokio workers.
+        // Task B (downloads) runs on the tokio async runtime concurrently.
+        let needs_layout = force
             || virtual_dependency_layout_missing(config, packages)
             || hoisted_links_missing(config, packages);
-        if !needs_layout_pass {
-            return;
+
+        let layout_handle = if needs_layout {
+            Some(std::thread::spawn({
+                let packages = packages.clone();
+                let lockfile_dir = lockfile_dir.to_path_buf();
+                move || {
+                    link_all_symlink_layouts_sync(config, &packages, &lockfile_dir);
+                }
+            }))
+        } else {
+            None
+        };
+
+        download_and_import_all_packages(
+            http_client,
+            config,
+            packages,
+            lockfile_dir,
+            resolved_packages,
+            offline,
+            force,
+        )
+        .await;
+
+        // Wait for the layout thread to finish (it usually finishes before downloads).
+        if let Some(handle) = layout_handle {
+            handle.join().expect("symlink layout thread should not panic");
         }
 
-        // Second pass: after all virtual package directories exist, wire dependency links.
-        packages.par_iter().for_each(|(dependency_path, package_snapshot)| {
+        // Phase 2: Hoist dependencies and prune orphaned entries.
+        hoist_virtual_store_dependencies(config, packages);
+        prune_orphaned_virtual_store_entries(config, packages);
+    }
+}
+
+/// Phase 0: Pre-create all `node_modules/.pnpm/<pkg@ver>/node_modules/` directories.
+/// On Windows, junctions require the target directory to exist. On Unix, dangling
+/// symlinks are valid but pre-creating directories avoids race conditions.
+fn pre_create_virtual_store_dirs(
+    config: &Npmrc,
+    packages: &HashMap<DependencyPath, PackageSnapshot>,
+) {
+    packages.par_iter().for_each(|(dependency_path, _)| {
+        let virtual_node_modules_dir = config
+            .virtual_store_dir
+            .join(dependency_path.package_specifier.to_virtual_store_name())
+            .join("node_modules");
+        let _ = fs::create_dir_all(&virtual_node_modules_dir);
+        // Also create the leaf package directory (needed for Windows junctions)
+        let package_name = dependency_path.package_specifier.name().to_string();
+        let _ = fs::create_dir_all(virtual_node_modules_dir.join(package_name));
+    });
+}
+
+/// Task A (pnpm: linkAllModules): Create symlink layouts for all packages.
+/// This only uses lockfile data to compute paths - no downloaded files needed.
+/// Purely synchronous - runs on a dedicated OS thread alongside tokio downloads.
+fn link_all_symlink_layouts_sync(
+    config: &'static Npmrc,
+    packages: &HashMap<DependencyPath, PackageSnapshot>,
+    lockfile_dir: &Path,
+) {
+    let work: Vec<_> = packages
+        .iter()
+        .filter_map(|(dependency_path, package_snapshot)| {
             let dependencies = package_dependency_map(package_snapshot);
             if dependencies.is_empty() {
-                return;
+                return None;
             }
             if !config.symlink && !matches!(config.node_linker, NodeLinker::Hoisted) {
-                return;
+                return None;
             }
             let virtual_node_modules_dir = config
                 .virtual_store_dir
                 .join(dependency_path.package_specifier.to_virtual_store_name())
                 .join("node_modules");
-            if dependency_layout_is_present(&dependencies, &virtual_node_modules_dir) {
-                return;
-            }
-            create_symlink_layout(
-                &dependencies,
-                &config.virtual_store_dir,
-                lockfile_dir,
-                &virtual_node_modules_dir,
-                config.symlink,
-            );
-        });
+            Some((dependencies, virtual_node_modules_dir))
+        })
+        .collect();
 
-        hoist_virtual_store_dependencies(config, packages);
-        prune_orphaned_virtual_store_entries(config, packages);
+    if work.is_empty() {
+        return;
     }
+
+    let virtual_store_dir = &config.virtual_store_dir;
+    let symlink = config.symlink;
+
+    work.par_iter().for_each(|(dependencies, virtual_node_modules_dir)| {
+        if dependency_layout_is_present(dependencies, virtual_node_modules_dir) {
+            return;
+        }
+        create_symlink_layout(
+            dependencies,
+            virtual_store_dir,
+            lockfile_dir,
+            virtual_node_modules_dir,
+            symlink,
+        );
+    });
+}
+
+/// Task B (pnpm: linkAllPkgs): Download, extract, and import all packages concurrently.
+/// Each package independently awaits its own download, matching pnpm's per-node
+/// `await depNode.fetching()` pattern.
+async fn download_and_import_all_packages<'a>(
+    http_client: &'a ThrottledClient,
+    config: &'static Npmrc,
+    packages: &'a HashMap<DependencyPath, PackageSnapshot>,
+    lockfile_dir: &'a Path,
+    resolved_packages: Option<&'a ResolvedPackages>,
+    offline: bool,
+    force: bool,
+) {
+    let install_concurrency = std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get().clamp(4, 32))
+        .unwrap_or(16);
+
+    stream::iter(packages.iter())
+        .for_each_concurrent(install_concurrency, |(dependency_path, package_snapshot)| async {
+            if let Some(seen) = resolved_packages {
+                let virtual_store_name = dependency_path.package_specifier.to_virtual_store_name();
+                if !seen.insert(virtual_store_name) {
+                    return;
+                }
+            }
+            match (InstallPackageBySnapshot {
+                http_client,
+                config,
+                dependency_path,
+                package_snapshot,
+                lockfile_dir,
+                offline,
+                force,
+            })
+            .run()
+            .await
+            {
+                Ok(_imported) => {}
+                Err(error) => {
+                    let is_optional = package_snapshot.optional.unwrap_or(false);
+                    let dep_path_str = dependency_path.to_string();
+                    if is_optional {
+                        tracing::debug!(
+                            dep_path = %dep_path_str,
+                            "Skipping optional package that failed to install: {error}"
+                        );
+                    } else {
+                        tracing::error!(
+                            dep_path = %dep_path_str,
+                            "Failed to install package: {error}"
+                        );
+                    }
+                }
+            }
+        })
+        .await;
 }
 
 fn virtual_dependency_layout_missing(

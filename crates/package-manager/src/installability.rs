@@ -95,11 +95,13 @@ fn installability_for_values(
 
 fn emit_result(package_id: &str, optional: bool, message: &str, emit: bool) -> Installability {
     if emit {
-        crate::progress_reporter::warn(message);
         if optional {
-            crate::progress_reporter::info(&format!(
+            // pnpm logs these at debug level (only shown with --loglevel=debug).
+            tracing::debug!(
                 "{package_id} is an optional dependency and failed compatibility check. Excluding it from installation."
-            ));
+            );
+        } else {
+            crate::progress_reporter::warn(message);
         }
     }
     if optional { Installability::SkipOptional } else { Installability::Install }

@@ -272,6 +272,60 @@ where
         }
 
         let dependency_groups = dependency_groups.into_iter().collect::<Vec<_>>();
+
+        // pnpm fast path: if lockfile exists, is reusable, and the persisted
+        // install state on disk already matches, skip ALL work (resolution,
+        // linking, hoisting, bin-linking, manifest writing).  This is what
+        // gives pnpm a 1-2s warm install.
+        if !force
+            && !lockfile_only
+            && config.lockfile
+            && !frozen_lockfile
+            && lockfile.is_some_and(|lockfile| {
+                let maybe_project_snapshot = match &lockfile.project_snapshot {
+                    RootProjectSnapshot::Single(snapshot) => Some(snapshot),
+                    RootProjectSnapshot::Multi(snapshot) => {
+                        snapshot.importers.get(lockfile_importer_id)
+                    }
+                };
+                let runtime_lockfile_config = collect_runtime_lockfile_config(
+                    config,
+                    manifest,
+                    lockfile_dir,
+                    pnpmfile,
+                    ignore_pnpmfile,
+                );
+                let lockfile_is_reusable = maybe_project_snapshot.is_some_and(|project_snapshot| {
+                    get_outdated_lockfile_setting(lockfile, &runtime_lockfile_config).is_none()
+                        && satisfies_package_manifest(
+                            project_snapshot,
+                            manifest,
+                            config.auto_install_peers,
+                            config.exclude_links_from_lockfile,
+                            lockfile.lockfile_version.major >= 9,
+                        )
+                        .is_ok()
+                        && satisfies_root_lockfile_config(lockfile, manifest, lockfile_dir).is_ok()
+                });
+                let has_local_dir_deps = manifest_has_local_directory_dependency(
+                    manifest,
+                    dependency_groups.iter().copied(),
+                );
+                lockfile_is_reusable
+                    && config.prefer_frozen_lockfile
+                    && !has_local_dir_deps
+                    && persisted_install_state_is_reusable(
+                        lockfile,
+                        config,
+                        lockfile_importer_id,
+                        &dependency_groups,
+                    )
+            })
+        {
+            tracing::info!(target: "pacquet::install", "Lockfile is up to date, resolution step is skipped");
+            return Ok(Vec::new());
+        }
+
         let direct_dependencies = manifest.dependencies(dependency_groups.iter().copied()).count();
         if manage_progress_reporter {
             progress_reporter::start(
@@ -294,6 +348,7 @@ where
 
         let result = async {
         tracing::info!(target: "pacquet::install", "Start all");
+
         let skipped = match (config.lockfile, frozen_lockfile, lockfile) {
 
             (false, _, _) => {
@@ -1221,7 +1276,14 @@ fn print_pnpm_style_summary(
         }
     }
 
-    let _ = writeln!(out, "Done in {elapsed_ms}ms using pacquet v{}", env!("CARGO_PKG_VERSION"));
+    let duration_display = if elapsed_ms < 1000 {
+        format!("{elapsed_ms}ms")
+    } else {
+        let seconds = elapsed_ms as f64 / 1000.0;
+        format!("{seconds:.1}s")
+    };
+    let _ =
+        writeln!(out, "Done in {duration_display} using pacquet v{}", env!("CARGO_PKG_VERSION"));
 }
 
 pub fn format_prefixed_summary_stats(prefix: &str, added: usize, removed: usize) -> String {
