@@ -2133,19 +2133,27 @@ fn force_should_reinstall_and_repair_corrupted_virtual_store_package() {
     fs::write(&package_file, "{\"name\":\"corrupted\"}")
         .expect("corrupt package.json in virtual store");
 
-    // Debug: print .modules.yaml and lock.yaml to understand why noop fast-path may fail
+    // Debug: check why noop fast-path might fail
     let modules_yaml_path = workspace.join("node_modules/.modules.yaml");
     let lock_yaml_path = workspace.join("node_modules/.pnpm/lock.yaml");
+    eprintln!("[DEBUG] .modules.yaml exists: {}", modules_yaml_path.exists());
+    eprintln!("[DEBUG] lock.yaml exists: {}", lock_yaml_path.exists());
     if modules_yaml_path.exists() {
         let content = fs::read_to_string(&modules_yaml_path).unwrap_or_default();
-        eprintln!(
-            "[DEBUG] .modules.yaml (first 500 chars): {}",
-            &content[..content.len().min(500)]
-        );
-    } else {
-        eprintln!("[DEBUG] .modules.yaml does not exist");
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+            eprintln!("[DEBUG] manifest storeDir: {:?}", json.get("storeDir"));
+            eprintln!("[DEBUG] manifest virtualStoreDir: {:?}", json.get("virtualStoreDir"));
+            eprintln!(
+                "[DEBUG] manifest virtualStoreDirMaxLength: {:?}",
+                json.get("virtualStoreDirMaxLength")
+            );
+            eprintln!("[DEBUG] manifest nodeLinker: {:?}", json.get("nodeLinker"));
+        }
     }
-    eprintln!("[DEBUG] lock.yaml exists: {}", lock_yaml_path.exists());
+
+    // Also debug .npmrc store-dir resolution
+    let npmrc_content = fs::read_to_string(workspace.join(".npmrc")).unwrap_or_default();
+    eprintln!("[DEBUG] .npmrc: {}", npmrc_content.trim());
 
     std::process::Command::new(&pacquet_bin)
         .with_current_dir(&workspace)
