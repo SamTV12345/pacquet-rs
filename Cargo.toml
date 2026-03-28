@@ -43,7 +43,7 @@ derive_more        = { version = "2.1.1", features = ["full"] }
 dunce              = { version = "1.0.5" }
 home               = { version = "0.5.12" }
 httpdate           = { version = "1.0.3" }
-insta              = { version = "1.46.3", features = ["yaml", "glob", "walkdir"] }
+insta              = { version = "1.47.0", features = ["yaml", "glob", "walkdir"] }
 itertools          = { version = "0.14.0" }
 futures-util       = { version = "0.3.32" }
 miette             = { version = "7.6.0", features = ["fancy"] }
