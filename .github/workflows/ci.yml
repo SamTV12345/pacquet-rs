@@ -114,6 +114,8 @@ jobs:
 
       - name: Test
         shell: bash
+        env:
+          TRACE: "pacquet::install=debug"
         run: |
           just registry-mock launch
 

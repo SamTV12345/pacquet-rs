@@ -446,6 +446,15 @@ where
                     dependency_groups.iter().copied(),
                 );
 
+                tracing::debug!(
+                    target: "pacquet::install",
+                    lockfile_is_reusable,
+                    prefer_frozen = config.prefer_frozen_lockfile,
+                    has_local_directory_dependency_specs,
+                    force,
+                    lockfile_only,
+                    "existing lockfile path decision"
+                );
                 if should_prefer_frozen_lockfile_path(
                     lockfile_is_reusable,
                     config.prefer_frozen_lockfile,
