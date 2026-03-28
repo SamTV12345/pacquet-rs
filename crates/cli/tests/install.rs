@@ -2133,15 +2133,25 @@ fn force_should_reinstall_and_repair_corrupted_virtual_store_package() {
     fs::write(&package_file, "{\"name\":\"corrupted\"}")
         .expect("corrupt package.json in virtual store");
 
-    let normal_output = std::process::Command::new(&pacquet_bin)
+    // Debug: print .modules.yaml and lock.yaml to understand why noop fast-path may fail
+    let modules_yaml_path = workspace.join("node_modules/.modules.yaml");
+    let lock_yaml_path = workspace.join("node_modules/.pnpm/lock.yaml");
+    if modules_yaml_path.exists() {
+        let content = fs::read_to_string(&modules_yaml_path).unwrap_or_default();
+        eprintln!(
+            "[DEBUG] .modules.yaml (first 500 chars): {}",
+            &content[..content.len().min(500)]
+        );
+    } else {
+        eprintln!("[DEBUG] .modules.yaml does not exist");
+    }
+    eprintln!("[DEBUG] lock.yaml exists: {}", lock_yaml_path.exists());
+
+    std::process::Command::new(&pacquet_bin)
         .with_current_dir(&workspace)
         .with_arg("install")
         .assert()
-        .success()
-        .get_output()
-        .clone();
-    eprintln!("[DEBUG] normal install stdout: {}", String::from_utf8_lossy(&normal_output.stdout));
-    eprintln!("[DEBUG] normal install stderr: {}", String::from_utf8_lossy(&normal_output.stderr));
+        .success();
     let after_normal =
         fs::read_to_string(&package_file).expect("read package file after normal install");
     eprintln!("[DEBUG] package.json after normal install: {:?}", after_normal);
@@ -4970,45 +4980,28 @@ fn disable_relink_local_dir_deps_should_keep_existing_workspace_injected_depende
     .expect("write app package manifest");
 
     pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
-    fs::write(lib_dir.join("index.js"), "module.exports = 'v2';\n").expect("update lib entrypoint");
+    // pnpm-style test: add a NEW file to source (not modify existing).
+    // With hardlinks, modifying an existing file changes both source and target
+    // (same inode), but adding a new file only affects the source directory.
+    // disable-relink should prevent the new file from appearing in the target.
+    fs::write(lib_dir.join("new.js"), "module.exports = 'new';\n").expect("add new file to lib");
 
-    let second_output = pacquet_command(&workspace)
+    pacquet_command(&workspace)
         .with_args(["-C", app_dir.to_str().unwrap(), "install"])
         .assert()
-        .success()
-        .get_output()
-        .clone();
-    eprintln!("[DEBUG] second install stdout: {}", String::from_utf8_lossy(&second_output.stdout));
-    eprintln!("[DEBUG] second install stderr: {}", String::from_utf8_lossy(&second_output.stderr));
+        .success();
 
-    let injected_content = fs::read_to_string(app_dir.join("node_modules/@repo/lib/index.js"))
-        .expect("read injected dependency file");
-    eprintln!("[DEBUG] injected content after second install: {:?}", injected_content);
-
-    // Check what's in the target dir
-    let target_dir = app_dir.join("node_modules/@repo/lib");
-    if target_dir.exists() {
-        let entries: Vec<_> = fs::read_dir(&target_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .collect();
-        eprintln!("[DEBUG] target dir contents: {:?}", entries);
-    } else {
-        eprintln!("[DEBUG] target dir does not exist");
-    }
-
-    assert_eq!(injected_content, "module.exports = 'v1';\n");
+    // The new file should NOT appear in the injected copy because relink is disabled
+    assert!(!app_dir.join("node_modules/@repo/lib/new.js").exists());
+    // The original file should still be present
+    assert!(app_dir.join("node_modules/@repo/lib/index.js").exists());
 
     pacquet_command(&workspace)
         .with_args(["-C", app_dir.to_str().unwrap(), "install", "--frozen-lockfile"])
         .assert()
         .success();
-    assert_eq!(
-        fs::read_to_string(app_dir.join("node_modules/@repo/lib/index.js"))
-            .expect("read injected dependency file"),
-        "module.exports = 'v1';\n"
-    );
+    // Still no new.js after frozen-lockfile install
+    assert!(!app_dir.join("node_modules/@repo/lib/new.js").exists());
 
     drop(root); // cleanup
 }
