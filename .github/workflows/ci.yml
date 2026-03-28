@@ -114,8 +114,6 @@ jobs:
 
       - name: Test
         shell: bash
-        env:
-          TRACE: "pacquet::install=debug"
         run: |
           just registry-mock launch
 
@@ -124,6 +122,9 @@ jobs:
           unset PNPM_HOME
           unset XDG_DATA_HOME
 
+          # Print full test output including stderr on failure for debugging.
+          # TRACE is NOT set globally because it would leak into sub-process
+          # pacquet invocations and break --reporter=silent tests.
           just test
 
           just registry-mock end

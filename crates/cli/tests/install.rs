@@ -2133,13 +2133,18 @@ fn force_should_reinstall_and_repair_corrupted_virtual_store_package() {
     fs::write(&package_file, "{\"name\":\"corrupted\"}")
         .expect("corrupt package.json in virtual store");
 
-    std::process::Command::new(&pacquet_bin)
+    let normal_output = std::process::Command::new(&pacquet_bin)
         .with_current_dir(&workspace)
         .with_arg("install")
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .clone();
+    eprintln!("[DEBUG] normal install stdout: {}", String::from_utf8_lossy(&normal_output.stdout));
+    eprintln!("[DEBUG] normal install stderr: {}", String::from_utf8_lossy(&normal_output.stderr));
     let after_normal =
         fs::read_to_string(&package_file).expect("read package file after normal install");
+    eprintln!("[DEBUG] package.json after normal install: {:?}", after_normal);
     assert!(after_normal.contains("corrupted"));
 
     std::process::Command::new(&pacquet_bin)
@@ -4967,15 +4972,33 @@ fn disable_relink_local_dir_deps_should_keep_existing_workspace_injected_depende
     pacquet.with_args(["-C", app_dir.to_str().unwrap(), "install"]).assert().success();
     fs::write(lib_dir.join("index.js"), "module.exports = 'v2';\n").expect("update lib entrypoint");
 
-    pacquet_command(&workspace)
+    let second_output = pacquet_command(&workspace)
         .with_args(["-C", app_dir.to_str().unwrap(), "install"])
         .assert()
-        .success();
-    assert_eq!(
-        fs::read_to_string(app_dir.join("node_modules/@repo/lib/index.js"))
-            .expect("read injected dependency file"),
-        "module.exports = 'v1';\n"
-    );
+        .success()
+        .get_output()
+        .clone();
+    eprintln!("[DEBUG] second install stdout: {}", String::from_utf8_lossy(&second_output.stdout));
+    eprintln!("[DEBUG] second install stderr: {}", String::from_utf8_lossy(&second_output.stderr));
+
+    let injected_content = fs::read_to_string(app_dir.join("node_modules/@repo/lib/index.js"))
+        .expect("read injected dependency file");
+    eprintln!("[DEBUG] injected content after second install: {:?}", injected_content);
+
+    // Check what's in the target dir
+    let target_dir = app_dir.join("node_modules/@repo/lib");
+    if target_dir.exists() {
+        let entries: Vec<_> = fs::read_dir(&target_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        eprintln!("[DEBUG] target dir contents: {:?}", entries);
+    } else {
+        eprintln!("[DEBUG] target dir does not exist");
+    }
+
+    assert_eq!(injected_content, "module.exports = 'v1';\n");
 
     pacquet_command(&workspace)
         .with_args(["-C", app_dir.to_str().unwrap(), "install", "--frozen-lockfile"])

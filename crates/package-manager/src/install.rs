@@ -339,7 +339,10 @@ where
             })
         {
             tracing::info!(target: "pacquet::install", "Lockfile is up to date, resolution step is skipped");
-            if reporter != progress_reporter::InstallReporter::Silent {
+            if print_summary
+                && reporter != progress_reporter::InstallReporter::Silent
+                && reporter_prefix.is_none()
+            {
                 use std::io::Write;
                 let mut out = std::io::stdout().lock();
                 let _ = writeln!(out, "Already up to date");
