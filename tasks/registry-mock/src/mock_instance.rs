@@ -94,14 +94,15 @@ impl<'a> MockInstanceOptions<'a> {
         let stdout = stdout.map_or_else(Stdio::null, |stdout| {
             File::create(stdout).expect("create file for stdout").into()
         });
-        let stderr = stderr.map_or_else(Stdio::null, |stderr| {
+        let _stderr = stderr.map_or_else(Stdio::null, |stderr| {
             File::create(stderr).expect("create file for stderr").into()
         });
+        eprintln!("info: starting registry-mock server on port {port}...");
         let process = node_registry_mock_command()
             .env("PNPM_REGISTRY_MOCK_PORT", &port)
             .stdin(Stdio::null())
             .stdout(stdout)
-            .stderr(stderr)
+            .stderr(Stdio::inherit()) // Always show server stderr for debugging startup issues
             .spawn()
             .expect("spawn mocked registry");
 
@@ -148,9 +149,9 @@ impl AutoMockInstance {
                 port: pick_unused_port().expect("pick an unused port"),
                 stdout: None,
                 stderr: None,
-                max_retries: 20,
-                retry_delay: Duration::from_millis(500),
-                request_timeout: Duration::from_secs(2),
+                max_retries: 40,
+                retry_delay: Duration::from_millis(1000),
+                request_timeout: Duration::from_secs(5),
             }
         });
 

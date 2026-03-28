@@ -35,9 +35,9 @@ async fn launch() {
         port: pick_unused_port().expect("pick an unused port"),
         stdout: Some(&stdout),
         stderr: Some(&stderr),
-        max_retries: 20,
-        retry_delay: Duration::from_millis(500),
-        request_timeout: Duration::from_secs(2),
+        max_retries: 40,
+        retry_delay: Duration::from_millis(1000),
+        request_timeout: Duration::from_secs(5),
     };
     let saved_info = PreparedRegistryInfo::launch(options).await;
     dbg!(&saved_info, &stdout, &stderr);
