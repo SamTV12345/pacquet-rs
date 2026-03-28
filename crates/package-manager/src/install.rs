@@ -1838,25 +1838,27 @@ fn modules_manifest_is_compatible(
         tracing::debug!(target: "pacquet::install", manifest_linker = ?modules_manifest.node_linker(), expected = node_linker_name(config), "incompatible: node_linker mismatch");
         return false;
     }
-    let store_dir_path = PathBuf::from(config.store_dir.display().to_string()).join("v10");
-    // Avoid fs::canonicalize which adds \\?\ prefix on Windows,
-    // causing mismatch with the non-prefixed path stored in .modules.yaml.
-    let expected_store_dir = store_dir_path.display().to_string();
+    // Use the same canonical_store_dir function used when writing .modules.yaml,
+    // which canonicalizes + strips \\?\ prefix on Windows.
+    let expected_store_dir = crate::modules_manifest::canonical_store_dir_for_config(config);
     let manifest_store_dir = modules_manifest.store_dir().unwrap_or("");
-    // Compare with both canonicalized and non-canonicalized forms
-    // to handle both pnpm-written and pacquet-written manifests.
-    let store_dir_matches = manifest_store_dir == expected_store_dir
-        || fs::canonicalize(&store_dir_path)
-            .map(|p| p.display().to_string())
-            .is_ok_and(|canonical| manifest_store_dir == canonical);
-    if !store_dir_matches {
+    if manifest_store_dir != expected_store_dir {
         tracing::debug!(target: "pacquet::install", manifest_store = %manifest_store_dir, expected = %expected_store_dir, "incompatible: store_dir mismatch");
         return false;
     }
-    if modules_manifest.resolved_virtual_store_dir(&config.modules_dir) != config.virtual_store_dir
     {
-        tracing::debug!(target: "pacquet::install", manifest_vsd = ?modules_manifest.resolved_virtual_store_dir(&config.modules_dir), expected = ?config.virtual_store_dir, "incompatible: virtual_store_dir mismatch");
-        return false;
+        let manifest_vsd = modules_manifest.resolved_virtual_store_dir(&config.modules_dir);
+        let expected_vsd = &config.virtual_store_dir;
+        // On Windows, paths may differ in separator style (/ vs \), 8.3 short
+        // names (RUNNER~1), or \\?\ prefix.  Canonicalize both before comparing.
+        let normalize_vsd = |p: &std::path::Path| -> PathBuf {
+            fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+        };
+        let vsd_matches = normalize_vsd(&manifest_vsd) == normalize_vsd(expected_vsd);
+        if !vsd_matches {
+            tracing::debug!(target: "pacquet::install", ?manifest_vsd, ?expected_vsd, "incompatible: virtual_store_dir mismatch");
+            return false;
+        }
     }
     if modules_manifest.included() != Some(&included_dependencies(dependency_groups)) {
         tracing::debug!(target: "pacquet::install", manifest_included = ?modules_manifest.included(), expected = ?included_dependencies(dependency_groups), "incompatible: included mismatch");

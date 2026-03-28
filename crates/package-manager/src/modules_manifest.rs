@@ -128,7 +128,7 @@ pub fn write_modules_manifest(
         shamefully_hoist: None,
         registries: Some(config.effective_registries()),
         pending_builds: Vec::new(),
-        store_dir: Some(canonical_store_dir(config)),
+        store_dir: Some(canonical_store_dir_for_config(config)),
         ignored_builds: Vec::new(),
         virtual_store_dir: Some(relative_virtual_store_dir(modules_dir, &config.virtual_store_dir)),
         virtual_store_dir_max_length: Some(DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH),
@@ -166,7 +166,7 @@ fn detect_pnpm_version() -> Option<String> {
     None
 }
 
-fn canonical_store_dir(config: &Npmrc) -> String {
+pub(crate) fn canonical_store_dir_for_config(config: &Npmrc) -> String {
     let path = PathBuf::from(config.store_dir.display().to_string()).join("v10");
     normalize_windows_verbatim_path(&fs::canonicalize(&path).unwrap_or(path).display().to_string())
 }
@@ -337,7 +337,12 @@ fn relative_virtual_store_dir(modules_dir: &Path, virtual_store_dir: &Path) -> S
     // pnpm writes virtualStoreDir as absolute path on Windows and relative on Unix.
     // On Windows, pnpm uses native backslashes in the absolute path.
     if cfg!(windows) {
-        return virtual_store_dir.display().to_string();
+        // Canonicalize to resolve 8.3 short names (RUNNER~1 → runneradmin) and
+        // normalize mixed forward/back slashes to native backslashes.
+        return fs::canonicalize(virtual_store_dir)
+            .unwrap_or_else(|_| virtual_store_dir.to_path_buf())
+            .display()
+            .to_string();
     }
     if let Ok(relative) = virtual_store_dir.strip_prefix(modules_dir) {
         let relative = if relative.as_os_str().is_empty() {
