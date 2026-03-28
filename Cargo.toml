@@ -83,7 +83,7 @@ assert_cmd        = { version = "2.1.2" }
 criterion         = { version = "0.8.2", features = ["async_tokio"] }
 pretty_assertions = { version = "1.4.1" }
 project-root      = { version = "0.2.2" }
-tempfile          = { version = "3.26.0" }
+tempfile          = { version = "3.27.0" }
 mockito           = { version = "1.7.2" }
 same-file         = { version = "1.0.6" }
 
