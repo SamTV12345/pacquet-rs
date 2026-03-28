@@ -15,6 +15,7 @@ name = "micro-benchmark"
 path = "src/main.rs"
 
 [dependencies]
+pacquet-lockfile  = { workspace = true }
 pacquet-registry  = { workspace = true }
 pacquet-network   = { workspace = true }
 pacquet-store-dir = { workspace = true }
@@ -23,6 +24,7 @@ pacquet-tarball   = { workspace = true }
 clap         = { workspace = true }
 criterion    = { workspace = true }
 mockito      = { workspace = true }
+serde_json   = { workspace = true }
 tokio        = { workspace = true }
 tempfile     = { workspace = true }
 pipe-trait   = { workspace = true }

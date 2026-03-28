@@ -47,6 +47,9 @@ pub enum BenchmarkScenario {
     CleanInstall,
     /// Benchmark install with a frozen lockfile and without local cache.
     FrozenLockfile,
+    /// Benchmark a warm install where everything is already up to date (noop).
+    /// This measures the fast-path detection speed.
+    WarmInstall,
 }
 
 impl BenchmarkScenario {
@@ -54,7 +57,9 @@ impl BenchmarkScenario {
     pub fn install_args(self) -> impl IntoIterator<Item = &'static str> {
         match self {
             BenchmarkScenario::CleanInstall => Vec::new(),
-            BenchmarkScenario::FrozenLockfile => vec!["--frozen-lockfile"],
+            BenchmarkScenario::FrozenLockfile | BenchmarkScenario::WarmInstall => {
+                vec!["--frozen-lockfile"]
+            }
         }
     }
 
@@ -62,7 +67,7 @@ impl BenchmarkScenario {
     pub fn npmrc_lockfile_setting(self) -> &'static str {
         match self {
             BenchmarkScenario::CleanInstall => "lockfile=false",
-            BenchmarkScenario::FrozenLockfile => "lockfile=true",
+            BenchmarkScenario::FrozenLockfile | BenchmarkScenario::WarmInstall => "lockfile=true",
         }
     }
 
@@ -74,8 +79,16 @@ impl BenchmarkScenario {
     {
         match self {
             BenchmarkScenario::CleanInstall => None,
-            BenchmarkScenario::FrozenLockfile => load_lockfile().into().pipe(Some),
+            BenchmarkScenario::FrozenLockfile | BenchmarkScenario::WarmInstall => {
+                load_lockfile().into().pipe(Some)
+            }
         }
+    }
+
+    /// Whether the benchmark should preserve node_modules between runs
+    /// (warm install scenario).
+    pub fn preserve_node_modules(self) -> bool {
+        matches!(self, BenchmarkScenario::WarmInstall)
     }
 }
 

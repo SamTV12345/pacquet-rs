@@ -172,16 +172,28 @@ impl WorkEnv {
     }
 
     fn benchmark(&self) {
-        let cleanup_targets = self
-            .revision_ids()
-            .map(|revision| self.bench_dir(revision))
-            .flat_map(|revision| [revision.join("node_modules"), revision.join("store-dir")])
-            .map(|path| path.maybe_quote().to_string())
-            .join(" ");
-        let cleanup_command = format!("rm -rf {cleanup_targets}");
-
         let mut command = Command::new("hyperfine");
-        command.current_dir(self.root()).arg("--prepare").arg(&cleanup_command);
+
+        if self.scenario.preserve_node_modules() {
+            // Warm install: run one install first to populate node_modules,
+            // then benchmark subsequent installs (noop fast-path).
+            let setup_commands = self
+                .revision_ids()
+                .chain(self.with_pnpm.then_some(WorkEnv::PNPM))
+                .map(|id| self.bash_command(id))
+                .join(" && ");
+            command.current_dir(self.root()).arg("--setup").arg(&setup_commands);
+        } else {
+            // Cold install: clean node_modules and store before each run.
+            let cleanup_targets = self
+                .revision_ids()
+                .map(|revision| self.bench_dir(revision))
+                .flat_map(|revision| [revision.join("node_modules"), revision.join("store-dir")])
+                .map(|path| path.maybe_quote().to_string())
+                .join(" ");
+            let cleanup_command = format!("rm -rf {cleanup_targets}");
+            command.current_dir(self.root()).arg("--prepare").arg(&cleanup_command);
+        }
 
         self.hyperfine_options.append_to(&mut command);
 

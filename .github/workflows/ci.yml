@@ -147,3 +147,68 @@ jobs:
           name: pacquet-${{ matrix.os }}
           path: target/release/pacquet.exe
           if-no-files-found: error
+
+  benchmark:
+    name: Benchmark (pacquet vs pnpm)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust Toolchain
+        uses: ./.github/actions/rustup
+        with:
+          save-cache: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+          run_install: false
+          standalone: true
+
+      - name: Install tools
+        uses: taiki-e/install-action@just
+
+      - name: Install dependencies
+        run: just install
+
+      - name: Install hyperfine
+        uses: ./.github/actions/binstall
+        with:
+          packages: hyperfine@1.18.0
+
+      - name: Build benchmark executor
+        run: cargo build --bin=integrated-benchmark
+
+      - name: Run micro-benchmarks
+        run: cargo run --release --bin=micro-benchmark
+
+      - name: 'Benchmark: Frozen Lockfile (pacquet vs pnpm)'
+        shell: bash
+        run: |
+          just registry-mock launch
+          just integrated-benchmark --scenario=frozen-lockfile --verdaccio --with-pnpm HEAD
+          cp bench-work-env/BENCHMARK_REPORT.md bench-work-env/FROZEN_LOCKFILE.md
+          just registry-mock end
+
+      - name: 'Benchmark: Warm Install / Noop (pacquet vs pnpm)'
+        shell: bash
+        run: |
+          just registry-mock launch
+          just integrated-benchmark --scenario=warm-install --verdaccio --with-pnpm HEAD
+          cp bench-work-env/BENCHMARK_REPORT.md bench-work-env/WARM_INSTALL.md
+          just registry-mock end
+
+      - name: Print benchmark results
+        shell: bash
+        run: |
+          echo '## Benchmark Results'
+          echo
+          echo '### Frozen Lockfile (pacquet vs pnpm)'
+          cat bench-work-env/FROZEN_LOCKFILE.md
+          echo
+          echo '### Warm Install / Noop (pacquet vs pnpm)'
+          cat bench-work-env/WARM_INSTALL.md
