@@ -14,19 +14,44 @@ pub struct PeerDependencyMeta {
     pub optional: bool,
 }
 
+/// Deserialize a field that should be a map but may be an array or other type
+/// in legacy npm packages. Returns None for non-map values.
+fn deserialize_optional_map<'de, D>(
+    deserializer: D,
+) -> Result<Option<HashMap<String, String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    match value {
+        Some(Value::Object(map)) => {
+            let result = map
+                .into_iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+                .collect();
+            Ok(Some(result))
+        }
+        _ => Ok(None),
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageVersion {
     pub name: String,
     pub version: node_semver::Version,
     pub dist: PackageDistribution,
+    #[serde(default, deserialize_with = "deserialize_optional_map")]
     pub dependencies: Option<HashMap<String, String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_map")]
     pub optional_dependencies: Option<HashMap<String, String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_map")]
     pub dev_dependencies: Option<HashMap<String, String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_map")]
     pub peer_dependencies: Option<HashMap<String, String>>,
     #[serde(default)]
     pub peer_dependencies_meta: Option<HashMap<String, PeerDependencyMeta>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_map")]
     pub engines: Option<HashMap<String, String>>,
     #[serde(default)]
     pub cpu: Option<Vec<String>>,

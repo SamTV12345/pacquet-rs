@@ -1,12 +1,12 @@
 {
   "dependencies": {
-    "@tsfun/all": "0.0.37",
-    "@types/node": "^16.18.39",
-    "cross-env": "^7.0.3",
-    "husky": "^8.0.3",
+    "@types/node": "^22.15.0",
     "is-number": "7.0.0",
-    "keyv": "4.5.3",
-    "rimraf": "^3.0.2",
-    "shx": "^0.3.4"
+    "keyv": "^5.3.3",
+    "rimraf": "^6.0.1",
+    "picocolors": "^1.1.1",
+    "tinyglobby": "^0.2.15",
+    "semver": "^7.7.1",
+    "debug": "^4.4.1"
   }
 }
