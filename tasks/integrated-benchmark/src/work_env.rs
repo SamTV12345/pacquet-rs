@@ -237,7 +237,7 @@ fn create_npmrc(dir: &Path, registry: &str, scenario: BenchmarkScenario) {
     let mut file = File::create(path).expect("create .npmrc");
     writeln!(file, "registry={registry}").unwrap();
     writeln!(file, "store-dir={store_dir}").unwrap();
-    writeln!(file, "auto-install-peers=false").unwrap();
+    writeln!(file, "auto-install-peers=true").unwrap();
     writeln!(file, "ignore-scripts=true").unwrap();
     writeln!(file, "{}", scenario.npmrc_lockfile_setting()).unwrap();
 }
