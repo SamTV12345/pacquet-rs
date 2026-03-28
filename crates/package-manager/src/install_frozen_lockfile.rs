@@ -790,7 +790,10 @@ mod tests {
             filtered_project_snapshot.optional_dependencies.as_ref().is_none_or(HashMap::is_empty)
         );
         assert!(filtered_packages.expect("filtered packages").is_empty());
-        assert_eq!(skipped, vec![dependency_path.to_string()]);
+        // pnpm writes skipped entries without leading `/` prefix
+        let expected = dependency_path.to_string();
+        let expected = expected.strip_prefix('/').unwrap_or(&expected);
+        assert_eq!(skipped, vec![expected]);
     }
 
     #[test]

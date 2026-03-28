@@ -303,6 +303,15 @@ fn run_named_script_with_output_mode(
         }
     }
 
+    // Print pnpm-style header: > name@version scriptname path\n> command
+    if matches!(output_mode, ScriptOutputMode::Inherit) {
+        let pkg_name = manifest.value().get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let pkg_version = manifest.value().get("version").and_then(|v| v.as_str()).unwrap_or("");
+        eprintln!("\n> {pkg_name}@{pkg_version} {script_name} {}", package_dir.display());
+        eprintln!("> {script}");
+        eprintln!();
+    }
+
     let output =
         execute_script_with_output_mode(ctx, script_name, &script, passed_thru_args, output_mode)?;
     captured_output = merge_output(captured_output, output);

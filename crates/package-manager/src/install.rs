@@ -314,6 +314,13 @@ where
                             lockfile.lockfile_version.major >= 9,
                         )
                         .is_ok()
+                        && direct_workspace_links_match_current_config(
+                            config,
+                            manifest,
+                            project_snapshot,
+                            workspace_packages,
+                            &dependency_groups,
+                        )
                         && satisfies_root_lockfile_config(lockfile, manifest, lockfile_dir).is_ok()
                 });
                 let has_local_dir_deps = manifest_has_local_directory_dependency(
@@ -332,6 +339,26 @@ where
             })
         {
             tracing::info!(target: "pacquet::install", "Lockfile is up to date, resolution step is skipped");
+            if reporter != progress_reporter::InstallReporter::Silent {
+                use std::io::Write;
+                let mut out = std::io::stdout().lock();
+                let _ = writeln!(out, "Already up to date");
+                let _ = writeln!(out);
+                let duration_display = {
+                    let elapsed_ms = start_time.elapsed().as_millis();
+                    if elapsed_ms < 1000 {
+                        format!("{elapsed_ms}ms")
+                    } else {
+                        let seconds = elapsed_ms as f64 / 1000.0;
+                        format!("{seconds:.1}s")
+                    }
+                };
+                let _ = writeln!(
+                    out,
+                    "Done in {duration_display} using pacquet v{}",
+                    env!("CARGO_PKG_VERSION")
+                );
+            }
             return Ok(Vec::new());
         }
 
