@@ -161,9 +161,10 @@ fn poll_for_token(done_url: &str) -> miette::Result<String> {
             200 => {
                 // Login complete — extract token
                 if let Ok(response) = serde_json::from_str::<Value>(body)
-                    && let Some(token) = response.get("token").and_then(Value::as_str) {
-                        return Ok(token.to_string());
-                    }
+                    && let Some(token) = response.get("token").and_then(Value::as_str)
+                {
+                    return Ok(token.to_string());
+                }
                 miette::bail!("Login response did not contain a token");
             }
             202 => {
@@ -174,13 +175,14 @@ fn poll_for_token(done_url: &str) -> miette::Result<String> {
             _ => {
                 // Check for error messages in body
                 if let Ok(response) = serde_json::from_str::<Value>(body)
-                    && let Some(error) = response.get("error").and_then(Value::as_str) {
-                        if error == "retry" {
-                            thread::sleep(Duration::from_secs(1));
-                            continue;
-                        }
-                        miette::bail!("Login failed: {error}");
+                    && let Some(error) = response.get("error").and_then(Value::as_str)
+                {
+                    if error == "retry" {
+                        thread::sleep(Duration::from_secs(1));
+                        continue;
                     }
+                    miette::bail!("Login failed: {error}");
+                }
                 thread::sleep(Duration::from_secs(1));
             }
         }
