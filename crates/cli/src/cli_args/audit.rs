@@ -357,20 +357,6 @@ impl AuditArgs {
 
 // ── fix helpers (shared) ──────────────────────────────────────────────
 
-/// Used by the native --fix path. Mirrors the old npm-based report shape.
-#[derive(Debug, Deserialize)]
-struct AuditReport {
-    #[serde(default)]
-    advisories: BTreeMap<String, AuditAdvisoryLegacy>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AuditAdvisoryLegacy {
-    module_name: String,
-    vulnerable_versions: String,
-    patched_versions: String,
-}
-
 fn create_overrides_from_advisories(advisories: &[Advisory]) -> BTreeMap<String, String> {
     advisories
         .iter()
@@ -381,24 +367,6 @@ fn create_overrides_from_advisories(advisories: &[Advisory]) -> BTreeMap<String,
         })
         .map(|a| {
             (format!("{}@{}", a.module_name, a.vulnerable_versions), a.patched_versions.clone())
-        })
-        .collect()
-}
-
-fn create_overrides(report: &AuditReport) -> BTreeMap<String, String> {
-    report
-        .advisories
-        .values()
-        .filter(|advisory| {
-            advisory.vulnerable_versions != ">=0.0.0"
-                && advisory.patched_versions != "<0.0.0"
-                && !advisory.patched_versions.is_empty()
-        })
-        .map(|advisory| {
-            (
-                format!("{}@{}", advisory.module_name, advisory.vulnerable_versions),
-                advisory.patched_versions.clone(),
-            )
         })
         .collect()
 }
@@ -440,6 +408,38 @@ fn write_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, Deserialize)]
+    struct AuditAdvisoryLegacy {
+        module_name: String,
+        vulnerable_versions: String,
+        patched_versions: String,
+    }
+
+    /// Used by the native --fix path. Mirrors the old npm-based report shape.
+    #[derive(Debug, Deserialize)]
+    struct AuditReport {
+        #[serde(default)]
+        advisories: BTreeMap<String, AuditAdvisoryLegacy>,
+    }
+
+    fn create_overrides(report: &AuditReport) -> BTreeMap<String, String> {
+        report
+            .advisories
+            .values()
+            .filter(|advisory| {
+                advisory.vulnerable_versions != ">=0.0.0"
+                    && advisory.patched_versions != "<0.0.0"
+                    && !advisory.patched_versions.is_empty()
+            })
+            .map(|advisory| {
+                (
+                    format!("{}@{}", advisory.module_name, advisory.vulnerable_versions),
+                    advisory.patched_versions.clone(),
+                )
+            })
+            .collect()
+    }
 
     #[test]
     fn create_overrides_filters_unfixable() {
