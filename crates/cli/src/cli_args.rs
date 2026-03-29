@@ -1,7 +1,9 @@
+pub mod access;
 pub mod add;
 pub mod approve_builds;
 pub mod audit;
 pub mod bin;
+pub mod bugs;
 pub mod cache;
 pub mod cat_file;
 pub mod cat_index;
@@ -11,8 +13,12 @@ pub mod config;
 pub mod create;
 pub mod dedupe;
 pub mod deploy;
+pub mod deprecate;
+pub mod dist_tag;
 pub mod dlx;
+pub mod docs;
 pub mod doctor;
+pub mod edit_cmd;
 pub mod env;
 pub mod exec;
 pub mod fetch;
@@ -20,39 +26,59 @@ pub mod find_hash;
 pub mod help;
 pub mod ignored_builds;
 pub mod import;
+pub mod info;
 pub mod install;
 pub mod install_test;
 pub mod licenses;
 pub mod link;
 pub mod list;
+pub mod login;
+pub mod logout;
 pub mod outdated;
+pub mod owner;
 pub mod pack;
 pub mod patch;
 pub mod patch_commit;
 pub mod patch_common;
 pub mod patch_remove;
+pub mod ping_cmd;
+pub mod pkg;
+pub mod prefix;
+pub mod profile;
 pub mod prune;
 pub mod publish;
 pub mod rebuild;
 pub mod recursive;
 pub mod remove;
+pub mod repo;
 pub mod restart;
 pub mod root;
 pub mod run;
+pub mod search;
 pub mod self_update;
 pub mod server;
+pub mod set_script;
 pub mod setup;
+pub mod star;
 pub mod store;
+pub mod team;
+pub mod token;
 pub mod unlink;
+pub mod unpublish;
 pub mod update;
+pub mod version_cmd;
+pub mod whoami;
 pub mod why;
+pub mod xmas;
 
 use crate::State;
 use crate::state::find_workspace_root;
+use access::AccessArgs;
 use add::AddArgs;
 use approve_builds::ApproveBuildsArgs;
 use audit::AuditArgs;
 use bin::BinArgs;
+use bugs::BugsArgs;
 use cache::CacheArgs;
 use cat_file::CatFileArgs;
 use cat_index::CatIndexArgs;
@@ -63,8 +89,12 @@ use config::{ConfigArgs, GetArgs, SetArgs};
 use create::CreateArgs;
 use dedupe::DedupeArgs;
 use deploy::DeployArgs;
+use deprecate::DeprecateArgs;
+use dist_tag::DistTagArgs;
 use dlx::DlxArgs;
+use docs::DocsArgs;
 use doctor::DoctorArgs;
+use edit_cmd::EditArgs;
 use env::EnvArgs;
 use exec::ExecArgs;
 use fetch::FetchArgs;
@@ -72,35 +102,53 @@ use find_hash::FindHashArgs;
 use help::HelpArgs;
 use ignored_builds::IgnoredBuildsArgs;
 use import::ImportArgs;
+use info::InfoArgs;
 use install::InstallArgs;
 use install_test::InstallTestArgs;
 use licenses::LicensesArgs;
 use link::LinkArgs;
 use list::ListArgs;
+use login::LoginArgs;
+use logout::LogoutArgs;
 use miette::{Context, IntoDiagnostic};
 use outdated::OutdatedArgs;
+use owner::OwnerArgs;
 use pack::PackArgs;
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::PackageManifest;
 use patch::PatchArgs;
 use patch_commit::PatchCommitArgs;
 use patch_remove::PatchRemoveArgs;
+use ping_cmd::PingArgs;
+use pkg::PkgArgs;
+use prefix::PrefixArgs;
+use profile::ProfileArgs;
 use prune::PruneArgs;
 use publish::PublishArgs;
 use rebuild::RebuildArgs;
 use recursive::RecursiveArgs;
 use remove::RemoveArgs;
+use repo::RepoArgs;
 use restart::RestartArgs;
 use root::RootArgs;
 use run::{RunArgs, run_start, run_test};
+use search::SearchArgs;
 use self_update::SelfUpdateArgs;
 use server::ServerArgs;
+use set_script::SetScriptArgs;
 use setup::SetupArgs;
+use star::{StarArgs, StarsArgs, UnstarArgs};
 use std::{env as std_env, ffi::OsString, path::PathBuf};
 use store::StoreCommand;
+use team::TeamArgs;
+use token::TokenArgs;
 use unlink::UnlinkArgs;
+use unpublish::UnpublishArgs;
 use update::UpdateArgs;
+use version_cmd::VersionCmdArgs;
+use whoami::WhoamiArgs;
 use why::WhyArgs;
+use xmas::XmasArgs;
 
 /// Experimental package manager for node.js written in rust.
 #[derive(Debug, Parser)]
@@ -241,6 +289,67 @@ pub enum CliCommand {
     /// Update packages to newer versions.
     #[clap(alias = "up", alias = "upgrade")]
     Update(UpdateArgs),
+    // --- Registry & package management commands ---
+    /// Manage package access levels.
+    Access(AccessArgs),
+    /// Open the bug tracker page for a package.
+    #[clap(alias = "issues")]
+    Bugs(BugsArgs),
+    /// Deprecate a version of a package.
+    Deprecate(DeprecateArgs),
+    /// Manage distribution tags.
+    DistTag(DistTagArgs),
+    /// Open the documentation page for a package.
+    #[clap(alias = "home")]
+    Docs(DocsArgs),
+    /// Open an installed package in $EDITOR.
+    #[clap(name = "edit")]
+    EditCmd(EditArgs),
+    /// Display registry information about a package.
+    #[clap(alias = "show", alias = "view")]
+    Info(InfoArgs),
+    /// Log in to a registry.
+    #[clap(alias = "adduser")]
+    Login(LoginArgs),
+    /// Log out from a registry.
+    Logout(LogoutArgs),
+    /// Manage package owners/maintainers.
+    Owner(OwnerArgs),
+    /// Ping the registry.
+    #[clap(name = "ping")]
+    Ping(PingArgs),
+    /// Read and set fields in package.json.
+    Pkg(PkgArgs),
+    /// Print the effective project root or global prefix.
+    Prefix(PrefixArgs),
+    /// View or update your npm profile.
+    Profile(ProfileArgs),
+    /// Open the repository page for a package.
+    Repo(RepoArgs),
+    /// Search the npm registry.
+    #[clap(alias = "s", alias = "se")]
+    Search(SearchArgs),
+    /// Set a task in the scripts section of package.json.
+    SetScript(SetScriptArgs),
+    /// Star a package.
+    Star(StarArgs),
+    /// List starred packages.
+    Stars(StarsArgs),
+    /// Manage organization teams.
+    Team(TeamArgs),
+    /// Manage authentication tokens.
+    Token(TokenArgs),
+    /// Remove a package from the registry.
+    Unpublish(UnpublishArgs),
+    /// Unstar a package.
+    Unstar(UnstarArgs),
+    /// Bump or display the package version.
+    #[clap(name = "version")]
+    VersionCmd(VersionCmdArgs),
+    /// Display the npm username.
+    Whoami(WhoamiArgs),
+    /// Christmas!
+    Xmas(XmasArgs),
 }
 
 #[derive(Debug, Args, Default)]
@@ -331,6 +440,33 @@ impl CliArgs {
             CliCommand::Server(args) => args.run(npmrc)?,
             CliCommand::Store(command) => command.run(|| npmrc).await?,
             CliCommand::Update(args) => args.run(state()?).await?,
+            // Registry & package management commands
+            CliCommand::Access(args) => args.run(npmrc)?,
+            CliCommand::Bugs(args) => args.run(dir)?,
+            CliCommand::Deprecate(args) => args.run(npmrc)?,
+            CliCommand::DistTag(args) => args.run(npmrc)?,
+            CliCommand::Docs(args) => args.run(dir)?,
+            CliCommand::EditCmd(args) => args.run(dir)?,
+            CliCommand::Info(args) => args.run(npmrc)?,
+            CliCommand::Login(args) => args.run(npmrc)?,
+            CliCommand::Logout(args) => args.run(npmrc)?,
+            CliCommand::Owner(args) => args.run(npmrc)?,
+            CliCommand::Ping(args) => args.run(npmrc)?,
+            CliCommand::Pkg(args) => args.run(manifest_path())?,
+            CliCommand::Prefix(args) => args.run(dir)?,
+            CliCommand::Profile(args) => args.run(npmrc)?,
+            CliCommand::Repo(args) => args.run(dir)?,
+            CliCommand::Search(args) => args.run(npmrc)?,
+            CliCommand::SetScript(args) => args.run(manifest_path())?,
+            CliCommand::Star(args) => args.run(npmrc)?,
+            CliCommand::Stars(args) => args.run(npmrc)?,
+            CliCommand::Team(args) => args.run(npmrc)?,
+            CliCommand::Token(args) => args.run(npmrc)?,
+            CliCommand::Unpublish(args) => args.run(npmrc)?,
+            CliCommand::Unstar(args) => args.run(npmrc)?,
+            CliCommand::VersionCmd(args) => args.run(manifest_path())?,
+            CliCommand::Whoami(args) => args.run(npmrc)?,
+            CliCommand::Xmas(args) => args.run()?,
         }
 
         Ok(())
