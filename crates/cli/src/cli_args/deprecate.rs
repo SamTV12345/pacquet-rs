@@ -44,16 +44,14 @@ impl DeprecateArgs {
         if let Some(versions) = doc.get_mut("versions").and_then(Value::as_object_mut) {
             for (ver, ver_data) in versions.iter_mut() {
                 if version_matches(ver, version_range)
-                    && let Some(obj) = ver_data.as_object_mut() {
-                        if self.message.is_empty() {
-                            obj.remove("deprecated");
-                        } else {
-                            obj.insert(
-                                "deprecated".to_string(),
-                                Value::String(self.message.clone()),
-                            );
-                        }
+                    && let Some(obj) = ver_data.as_object_mut()
+                {
+                    if self.message.is_empty() {
+                        obj.remove("deprecated");
+                    } else {
+                        obj.insert("deprecated".to_string(), Value::String(self.message.clone()));
                     }
+                }
             }
         }
 

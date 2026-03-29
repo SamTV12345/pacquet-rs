@@ -64,9 +64,10 @@ fn parse_name_version(spec: &str) -> (String, Option<String>) {
         return (spec.to_string(), None);
     }
     if let Some((name, ver)) = spec.rsplit_once('@')
-        && !name.is_empty() {
-            return (name.to_string(), Some(ver.to_string()));
-        }
+        && !name.is_empty()
+    {
+        return (name.to_string(), Some(ver.to_string()));
+    }
     (spec.to_string(), None)
 }
 

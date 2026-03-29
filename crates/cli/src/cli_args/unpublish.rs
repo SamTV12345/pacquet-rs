@@ -37,7 +37,10 @@ impl UnpublishArgs {
         let registry = registry.trim_end_matches('/');
         let url = match version {
             Some(v) => {
-                format!("{registry}/{name}/-/{}-{v}.tgz", name.split('/').next_back().unwrap_or(name))
+                format!(
+                    "{registry}/{name}/-/{}-{v}.tgz",
+                    name.split('/').next_back().unwrap_or(name)
+                )
             }
             None => format!("{registry}/{name}/-rev/all"),
         };
