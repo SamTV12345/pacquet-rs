@@ -1,8 +1,8 @@
 use clap::Args;
-use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
 use serde_json::Value;
-use std::process::Command;
+
+use crate::cli_args::registry_client::RegistryClient;
 
 /// Deprecate a version of a package.
 #[derive(Debug, Args)]
@@ -19,27 +19,11 @@ impl DeprecateArgs {
             .package_version
             .rsplit_once('@')
             .ok_or_else(|| miette::miette!("Expected format: package@version-range"))?;
-        let registry = npmrc.registry_for_package_name(package);
-        let registry = registry.trim_end_matches('/');
+        let client = RegistryClient::new(npmrc);
+        let registry = client.registry_url(package);
         let url = format!("{registry}/{package}");
-        let auth = npmrc
-            .auth_header_for_url(&url)
-            .ok_or_else(|| miette::miette!("Not authenticated. Run `pacquet login` first."))?;
 
-        let output = Command::new("curl")
-            .args([
-                "-s",
-                "-H",
-                &format!("Authorization: {auth}"),
-                "-H",
-                "Accept: application/json",
-                &url,
-            ])
-            .output()
-            .into_diagnostic()
-            .wrap_err("fetch package")?;
-        let body = String::from_utf8_lossy(&output.stdout);
-        let mut doc: Value = serde_json::from_str(&body).into_diagnostic().wrap_err("parse")?;
+        let mut doc = client.get_json(&url)?;
 
         if let Some(versions) = doc.get_mut("versions").and_then(Value::as_object_mut) {
             for (ver, ver_data) in versions.iter_mut() {
@@ -55,25 +39,7 @@ impl DeprecateArgs {
             }
         }
 
-        let output = Command::new("curl")
-            .args([
-                "-s",
-                "-X",
-                "PUT",
-                "-H",
-                &format!("Authorization: {auth}"),
-                "-H",
-                "Content-Type: application/json",
-                "-d",
-                &serde_json::to_string(&doc).unwrap_or_default(),
-                &url,
-            ])
-            .output()
-            .into_diagnostic()
-            .wrap_err("update package")?;
-        if !output.status.success() {
-            miette::bail!("Failed to deprecate {}", self.package_version);
-        }
+        client.put_json(&url, &doc)?;
         if self.message.is_empty() {
             println!("Undeprecated {}", self.package_version);
         } else {

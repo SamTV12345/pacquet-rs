@@ -1,3 +1,5 @@
+pub mod registry_client;
+
 pub mod access;
 pub mod add;
 pub mod approve_builds;
@@ -327,7 +329,7 @@ pub enum CliCommand {
     /// Open the repository page for a package.
     Repo(RepoArgs),
     /// Search the npm registry.
-    #[clap(alias = "s", alias = "se")]
+    #[clap(alias = "s", alias = "se", alias = "find")]
     Search(SearchArgs),
     /// Set a task in the scripts section of package.json.
     SetScript(SetScriptArgs),
@@ -344,7 +346,7 @@ pub enum CliCommand {
     /// Unstar a package.
     Unstar(UnstarArgs),
     /// Bump or display the package version.
-    #[clap(name = "version")]
+    #[clap(name = "version", alias = "v")]
     VersionCmd(VersionCmdArgs),
     /// Display the npm username.
     Whoami(WhoamiArgs),
@@ -387,7 +389,7 @@ impl CliArgs {
                 PackageManifest::init(&manifest_path()).wrap_err("initialize package.json")?;
             }
             CliCommand::ApproveBuilds(args) => args.run(manifest_path(), npmrc).await?,
-            CliCommand::Audit(args) => args.run(dir)?,
+            CliCommand::Audit(args) => args.run(dir, npmrc)?,
             CliCommand::Cache(args) => args.run(npmrc)?,
             CliCommand::CatFile(args) => args.run(npmrc)?,
             CliCommand::CatIndex(args) => args.run(npmrc)?,

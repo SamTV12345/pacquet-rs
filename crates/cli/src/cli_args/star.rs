@@ -1,8 +1,8 @@
 use clap::Args;
-use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
 use serde_json::Value;
-use std::process::Command;
+
+use crate::cli_args::registry_client::RegistryClient;
 
 #[derive(Debug, Args)]
 pub struct StarArgs {
@@ -39,31 +39,17 @@ impl UnstarArgs {
 
 impl StarsArgs {
     pub fn run(self, npmrc: &Npmrc) -> miette::Result<()> {
-        let registry = npmrc.registry.trim_end_matches('/');
-        let url = format!("{registry}/-/whoami");
-        let auth = npmrc
-            .auth_header_for_url(&url)
-            .ok_or_else(|| miette::miette!("Not logged in. Run `pacquet login` first."))?;
-        let output = Command::new("curl")
-            .args(["-s", "-H", &format!("Authorization: {auth}"), &url])
-            .output()
-            .into_diagnostic()
-            .wrap_err("whoami")?;
-        let body = String::from_utf8_lossy(&output.stdout);
-        let whoami: Value = serde_json::from_str(&body).into_diagnostic().wrap_err("parse")?;
+        let client = RegistryClient::new(npmrc);
+        let registry = client.default_registry();
+        let whoami_url = format!("{registry}/-/whoami");
+        let whoami = client.get_json(&whoami_url)?;
         let username = whoami
             .get("username")
             .and_then(Value::as_str)
             .ok_or_else(|| miette::miette!("Unable to determine username"))?;
 
         let stars_url = format!("{registry}/-/_view/starredByUser?key=\"{username}\"");
-        let output = Command::new("curl")
-            .args(["-s", "-H", &format!("Authorization: {auth}"), &stars_url])
-            .output()
-            .into_diagnostic()
-            .wrap_err("fetch stars")?;
-        let body = String::from_utf8_lossy(&output.stdout);
-        let stars: Value = serde_json::from_str(&body).into_diagnostic().wrap_err("parse")?;
+        let stars = client.get_json(&stars_url)?;
         if let Some(rows) = stars.get("rows").and_then(Value::as_array) {
             if rows.is_empty() {
                 println!("You have not starred any packages.");
@@ -82,38 +68,17 @@ impl StarsArgs {
 }
 
 fn toggle_star(package: &str, star: bool, npmrc: &Npmrc) -> miette::Result<()> {
-    let registry = npmrc.registry_for_package_name(package);
-    let registry = registry.trim_end_matches('/');
+    let client = RegistryClient::new(npmrc);
+    let registry = client.registry_url(package);
     let url = format!("{registry}/{package}");
-    let auth = npmrc
-        .auth_header_for_url(&url)
-        .ok_or_else(|| miette::miette!("Not logged in. Run `pacquet login` first."))?;
 
     // Fetch current document
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-H",
-            &format!("Authorization: {auth}"),
-            "-H",
-            "Accept: application/json",
-            &url,
-        ])
-        .output()
-        .into_diagnostic()
-        .wrap_err("fetch package")?;
-    let body = String::from_utf8_lossy(&output.stdout);
-    let mut doc: Value = serde_json::from_str(&body).into_diagnostic().wrap_err("parse")?;
+    let mut doc = client.get_json(&url)?;
 
     // Get username from whoami
-    let whoami_url = format!("{}/{}", npmrc.registry.trim_end_matches('/'), "-/whoami");
-    let whoami_output = Command::new("curl")
-        .args(["-s", "-H", &format!("Authorization: {auth}"), &whoami_url])
-        .output()
-        .into_diagnostic()
-        .wrap_err("whoami")?;
-    let whoami_body = String::from_utf8_lossy(&whoami_output.stdout);
-    let whoami: Value = serde_json::from_str(&whoami_body).into_diagnostic().wrap_err("parse")?;
+    let default_registry = client.default_registry();
+    let whoami_url = format!("{default_registry}/-/whoami");
+    let whoami = client.get_json(&whoami_url)?;
     let username = whoami
         .get("username")
         .and_then(Value::as_str)
@@ -140,26 +105,7 @@ fn toggle_star(package: &str, star: bool, npmrc: &Npmrc) -> miette::Result<()> {
     }
 
     let payload = serde_json::json!({"_id": doc_id, "_rev": doc_rev, "users": users});
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "PUT",
-            "-H",
-            &format!("Authorization: {auth}"),
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &serde_json::to_string(&payload).unwrap_or_default(),
-            &url,
-        ])
-        .output()
-        .into_diagnostic()
-        .wrap_err("update star")?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        miette::bail!("Failed to update star: {err}");
-    }
+    client.put_json(&url, &payload)?;
     let action = if star { "starred" } else { "unstarred" };
     println!("{action} {package}");
     Ok(())

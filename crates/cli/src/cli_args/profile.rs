@@ -1,8 +1,8 @@
 use clap::{Args, Subcommand};
-use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
 use serde_json::Value;
-use std::process::Command;
+
+use crate::cli_args::registry_client::RegistryClient;
 
 #[derive(Debug, Args)]
 pub struct ProfileArgs {
@@ -31,25 +31,11 @@ impl ProfileArgs {
 }
 
 fn get_profile(npmrc: &Npmrc, property: Option<&str>) -> miette::Result<()> {
+    let client = RegistryClient::new(npmrc);
     let registry = npmrc.registry.trim_end_matches('/');
     let url = format!("{registry}/-/npm/v1/user");
-    let auth = npmrc
-        .auth_header_for_url(&url)
-        .ok_or_else(|| miette::miette!("Not logged in. Run `pacquet login` first."))?;
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-H",
-            &format!("Authorization: {auth}"),
-            "-H",
-            "Accept: application/json",
-            &url,
-        ])
-        .output()
-        .into_diagnostic()
-        .wrap_err("fetch profile")?;
-    let body = String::from_utf8_lossy(&output.stdout);
-    let value: Value = serde_json::from_str(&body).into_diagnostic().wrap_err("parse profile")?;
+    client.require_auth(&url)?;
+    let value = client.get_json(&url)?;
 
     match property {
         Some(prop) => match value.get(prop) {
@@ -68,29 +54,13 @@ fn get_profile(npmrc: &Npmrc, property: Option<&str>) -> miette::Result<()> {
 }
 
 fn set_profile(npmrc: &Npmrc, property: &str, value: &str) -> miette::Result<()> {
+    let client = RegistryClient::new(npmrc);
     let registry = npmrc.registry.trim_end_matches('/');
     let url = format!("{registry}/-/npm/v1/user");
-    let auth = npmrc
-        .auth_header_for_url(&url)
-        .ok_or_else(|| miette::miette!("Not logged in. Run `pacquet login` first."))?;
+    client.require_auth(&url)?;
     let payload = serde_json::json!({ property: value });
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "PATCH",
-            "-H",
-            &format!("Authorization: {auth}"),
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &serde_json::to_string(&payload).unwrap_or_default(),
-            &url,
-        ])
-        .output()
-        .into_diagnostic()
-        .wrap_err("update profile")?;
-    if !output.status.success() {
+    let resp = client.patch_json(&url, &payload)?;
+    if !resp.status().is_success() {
         miette::bail!("Failed to update profile");
     }
     println!("Set {property} to {value}");

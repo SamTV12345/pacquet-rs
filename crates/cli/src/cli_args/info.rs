@@ -1,8 +1,7 @@
+use crate::cli_args::registry_client::RegistryClient;
 use clap::Args;
-use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
 use serde_json::Value;
-use std::process::Command;
 
 /// Display registry information about a package.
 #[derive(Debug, Args)]
@@ -18,33 +17,14 @@ pub struct InfoArgs {
 impl InfoArgs {
     pub fn run(self, npmrc: &Npmrc) -> miette::Result<()> {
         let (name, version) = parse_name_version(&self.package);
-        let registry = npmrc.registry_for_package_name(&name);
-        let registry = registry.trim_end_matches('/');
+        let client = RegistryClient::new(npmrc);
+        let registry = client.registry_url(&name);
         let url = match &version {
             Some(v) => format!("{registry}/{name}/{v}"),
             None => format!("{registry}/{name}"),
         };
 
-        let mut cmd = Command::new("curl");
-        cmd.args(["-s", "-H", "Accept: application/json"]);
-        if let Some(auth) = npmrc.auth_header_for_url(&url) {
-            cmd.args(["-H", &format!("Authorization: {auth}")]);
-        }
-        cmd.arg(&url);
-
-        let output = cmd.output().into_diagnostic().wrap_err("fetch package info")?;
-        if !output.status.success() {
-            miette::bail!("Failed to fetch package info for {}", self.package);
-        }
-
-        let body = String::from_utf8_lossy(&output.stdout);
-        let value: Value =
-            serde_json::from_str(&body).into_diagnostic().wrap_err("parse registry response")?;
-
-        if value.get("error").is_some() {
-            let message = value.get("error").and_then(Value::as_str).unwrap_or("unknown error");
-            miette::bail!("{message}");
-        }
+        let value = client.get_json(&url)?;
 
         if self.json {
             println!("{}", serde_json::to_string_pretty(&value).unwrap_or_default());

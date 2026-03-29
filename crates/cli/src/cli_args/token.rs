@@ -1,8 +1,8 @@
 use clap::{Args, Subcommand};
-use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
 use serde_json::Value;
-use std::process::Command;
+
+use crate::cli_args::registry_client::RegistryClient;
 
 #[derive(Debug, Args)]
 pub struct TokenArgs {
@@ -36,23 +36,11 @@ impl TokenArgs {
 }
 
 fn list_tokens(npmrc: &Npmrc) -> miette::Result<()> {
+    let client = RegistryClient::new(npmrc);
     let registry = npmrc.registry.trim_end_matches('/');
     let url = format!("{registry}/-/npm/v1/tokens");
-    let auth = npmrc.auth_header_for_url(&url).ok_or_else(|| miette::miette!("Not logged in."))?;
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-H",
-            &format!("Authorization: {auth}"),
-            "-H",
-            "Accept: application/json",
-            &url,
-        ])
-        .output()
-        .into_diagnostic()
-        .wrap_err("list tokens")?;
-    let body = String::from_utf8_lossy(&output.stdout);
-    let value: Value = serde_json::from_str(&body).into_diagnostic().wrap_err("parse")?;
+    client.require_auth(&url)?;
+    let value = client.get_json(&url)?;
     if let Some(objects) = value.get("objects").and_then(Value::as_array) {
         for obj in objects {
             let key = obj.get("key").and_then(Value::as_str).unwrap_or("?");
@@ -66,28 +54,11 @@ fn list_tokens(npmrc: &Npmrc) -> miette::Result<()> {
 }
 
 fn create_token(npmrc: &Npmrc, readonly: bool) -> miette::Result<()> {
+    let client = RegistryClient::new(npmrc);
     let registry = npmrc.registry.trim_end_matches('/');
     let url = format!("{registry}/-/npm/v1/tokens");
-    let auth = npmrc.auth_header_for_url(&url).ok_or_else(|| miette::miette!("Not logged in."))?;
     let payload = serde_json::json!({"readonly": readonly, "cidr_whitelist": []});
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "POST",
-            "-H",
-            &format!("Authorization: {auth}"),
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &serde_json::to_string(&payload).unwrap_or_default(),
-            &url,
-        ])
-        .output()
-        .into_diagnostic()
-        .wrap_err("create token")?;
-    let body = String::from_utf8_lossy(&output.stdout);
-    let value: Value = serde_json::from_str(&body).into_diagnostic().wrap_err("parse")?;
+    let value = client.post_json(&url, &payload)?;
     if let Some(token) = value.get("token").and_then(Value::as_str) {
         println!("Created token: {token}");
     } else {
@@ -98,15 +69,11 @@ fn create_token(npmrc: &Npmrc, readonly: bool) -> miette::Result<()> {
 }
 
 fn revoke_token(npmrc: &Npmrc, token_key: &str) -> miette::Result<()> {
+    let client = RegistryClient::new(npmrc);
     let registry = npmrc.registry.trim_end_matches('/');
     let url = format!("{registry}/-/npm/v1/tokens/token/{token_key}");
-    let auth = npmrc.auth_header_for_url(&url).ok_or_else(|| miette::miette!("Not logged in."))?;
-    let output = Command::new("curl")
-        .args(["-s", "-X", "DELETE", "-H", &format!("Authorization: {auth}"), &url])
-        .output()
-        .into_diagnostic()
-        .wrap_err("revoke token")?;
-    if !output.status.success() {
+    let resp = client.delete(&url)?;
+    if !resp.status().is_success() {
         miette::bail!("Failed to revoke token");
     }
     println!("Revoked token {token_key}");

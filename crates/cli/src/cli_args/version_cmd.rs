@@ -1,7 +1,7 @@
 use clap::Args;
 use miette::{Context, IntoDiagnostic};
 use serde_json::Value;
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, process::Command};
 
 #[derive(Debug, Args)]
 pub struct VersionCmdArgs {
@@ -15,6 +15,10 @@ pub struct VersionCmdArgs {
     /// Disable commit hooks.
     #[arg(long)]
     no_commit_hooks: bool,
+
+    /// Allow setting the version to the same value (no error if unchanged).
+    #[arg(long)]
+    allow_same_version: bool,
 }
 
 impl VersionCmdArgs {
@@ -34,6 +38,11 @@ impl VersionCmdArgs {
         };
 
         let new_version = compute_new_version(&current_version, bump)?;
+
+        if new_version == current_version && !self.allow_same_version {
+            miette::bail!("Version not changed. Use --allow-same-version to skip this check.");
+        }
+
         manifest
             .as_object_mut()
             .ok_or_else(|| miette::miette!("package.json must be an object"))?
@@ -47,6 +56,47 @@ impl VersionCmdArgs {
             .wrap_err_with(|| format!("write {}", manifest_path.display()))?;
 
         println!("v{new_version}");
+
+        // Git integration (like pnpm): stage, commit, and tag
+        if !self.no_git_tag_version {
+            let tag = format!("v{new_version}");
+
+            // git add package.json
+            let add_status = Command::new("git")
+                .args(["add", "package.json"])
+                .current_dir(manifest_path.parent().unwrap_or_else(|| std::path::Path::new(".")))
+                .status()
+                .into_diagnostic()
+                .wrap_err("run git add")?;
+            if !add_status.success() {
+                miette::bail!("git add package.json failed");
+            }
+
+            // git commit
+            let mut commit_cmd = Command::new("git");
+            commit_cmd.args(["commit", "-m", &tag]);
+            if self.no_commit_hooks {
+                commit_cmd.arg("--no-verify");
+            }
+            commit_cmd
+                .current_dir(manifest_path.parent().unwrap_or_else(|| std::path::Path::new(".")));
+            let commit_status = commit_cmd.status().into_diagnostic().wrap_err("run git commit")?;
+            if !commit_status.success() {
+                miette::bail!("git commit failed");
+            }
+
+            // git tag vX.Y.Z
+            let tag_status = Command::new("git")
+                .args(["tag", &tag])
+                .current_dir(manifest_path.parent().unwrap_or_else(|| std::path::Path::new(".")))
+                .status()
+                .into_diagnostic()
+                .wrap_err("run git tag")?;
+            if !tag_status.success() {
+                miette::bail!("git tag {tag} failed");
+            }
+        }
+
         Ok(())
     }
 }

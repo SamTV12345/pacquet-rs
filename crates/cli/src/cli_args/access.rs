@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
-use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
-use std::process::Command;
+
+use crate::cli_args::registry_client::RegistryClient;
 
 #[derive(Debug, Args)]
 pub struct AccessArgs {
@@ -34,62 +34,25 @@ impl AccessArgs {
 }
 
 fn set_access(package: &str, level: &str, npmrc: &Npmrc) -> miette::Result<()> {
-    let registry = npmrc.registry_for_package_name(package);
-    let registry = registry.trim_end_matches('/');
+    let client = RegistryClient::new(npmrc);
+    let registry = client.registry_url(package);
     let url = format!("{registry}/-/package/{package}/access");
-    let auth = npmrc
-        .auth_header_for_url(&url)
-        .ok_or_else(|| miette::miette!("Not authenticated. Run `pacquet login` first."))?;
     let payload = serde_json::json!({"access": level});
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "POST",
-            "-H",
-            &format!("Authorization: {auth}"),
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &serde_json::to_string(&payload).unwrap_or_default(),
-            &url,
-        ])
-        .output()
-        .into_diagnostic()
-        .wrap_err("set access")?;
-    if !output.status.success() {
-        miette::bail!("Failed to set access for {package}");
-    }
+    client.post_json(&url, &payload)?;
     println!("Set {package} to {level}");
     Ok(())
 }
 
 fn list_access(entity: Option<&str>, npmrc: &Npmrc) -> miette::Result<()> {
-    let registry = npmrc.registry.trim_end_matches('/');
+    let client = RegistryClient::new(npmrc);
+    let registry = client.default_registry();
     let url = match entity {
         Some(e) => format!("{registry}/-/org/{e}/package"),
         None => {
             miette::bail!("Please specify an org or user scope");
         }
     };
-    let auth = npmrc
-        .auth_header_for_url(&url)
-        .ok_or_else(|| miette::miette!("Not authenticated. Run `pacquet login` first."))?;
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-H",
-            &format!("Authorization: {auth}"),
-            "-H",
-            "Accept: application/json",
-            &url,
-        ])
-        .output()
-        .into_diagnostic()
-        .wrap_err("list access")?;
-    let body = String::from_utf8_lossy(&output.stdout);
-    let value: serde_json::Value =
-        serde_json::from_str(&body).into_diagnostic().wrap_err("parse response")?;
+    let value = client.get_json(&url)?;
     if let Some(obj) = value.as_object() {
         for (pkg, access) in obj {
             println!("{pkg}: {}", access.as_str().unwrap_or("?"));

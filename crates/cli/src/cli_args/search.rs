@@ -1,9 +1,7 @@
+use crate::cli_args::registry_client::RegistryClient;
 use clap::Args;
-use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
 use serde::Deserialize;
-use serde_json::Value;
-use std::process::Command;
 
 /// Search the npm registry.
 #[derive(Debug, Args)]
@@ -44,29 +42,20 @@ impl SearchArgs {
             miette::bail!("search requires a query");
         }
 
-        let registry = npmrc.registry.trim_end_matches('/');
+        let client = RegistryClient::new(npmrc);
+        let registry = client.default_registry();
         let query = self.query.join("+");
         let url = format!("{registry}/-/v1/search?text={query}&size={}", self.size);
 
-        let mut cmd = Command::new("curl");
-        cmd.args(["-s", "-H", "Accept: application/json"]);
-        if let Some(auth) = npmrc.auth_header_for_url(&url) {
-            cmd.args(["-H", &format!("Authorization: {auth}")]);
-        }
-        cmd.arg(&url);
-
-        let output = cmd.output().into_diagnostic().wrap_err("search registry")?;
-        let body = String::from_utf8_lossy(&output.stdout);
-
         if self.json {
-            let value: Value =
-                serde_json::from_str(&body).into_diagnostic().wrap_err("parse search response")?;
+            let value = client.get_json(&url)?;
             println!("{}", serde_json::to_string_pretty(&value).unwrap_or_default());
             return Ok(());
         }
 
-        let response: SearchResponse =
-            serde_json::from_str(&body).into_diagnostic().wrap_err("parse search response")?;
+        let value = client.get_json(&url)?;
+        let response: SearchResponse = serde_json::from_value(value)
+            .map_err(|e| miette::miette!("parse search response: {e}"))?;
 
         if response.objects.is_empty() {
             println!("No results found");

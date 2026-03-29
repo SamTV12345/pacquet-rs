@@ -173,6 +173,115 @@ impl PublishArgs {
         let version =
             manifest.value().get("version").and_then(serde_json::Value::as_str).unwrap_or("0.0.0");
 
+        // Rewrite workspace: protocol references before publishing
+        let original_content = std::fs::read_to_string(manifest_path)
+            .into_diagnostic()
+            .wrap_err("read package.json for workspace rewriting")?;
+        let needs_restore = self.rewrite_workspace_protocols(dir, manifest_path)?;
+
+        let publish_result = self.run_npm_publish(dir, display_name, package_name, version);
+
+        // Restore original package.json if we modified it
+        if needs_restore {
+            std::fs::write(manifest_path, &original_content)
+                .into_diagnostic()
+                .wrap_err("restore original package.json after publish")?;
+        }
+
+        publish_result
+    }
+
+    /// Rewrites `workspace:` protocol references in dependency fields of package.json.
+    /// Returns `true` if the file was modified and needs to be restored after publish.
+    fn rewrite_workspace_protocols(
+        &self,
+        dir: &Path,
+        manifest_path: &Path,
+    ) -> miette::Result<bool> {
+        let content = std::fs::read_to_string(manifest_path)
+            .into_diagnostic()
+            .wrap_err("read package.json")?;
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&content).into_diagnostic().wrap_err("parse package.json")?;
+
+        let dep_fields =
+            ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
+
+        let mut modified = false;
+
+        // Collect workspace package versions by looking up the workspace root
+        let workspace_root = find_workspace_root(dir);
+        let workspace_versions: std::collections::HashMap<String, String> =
+            if let Some(ref ws_root) = workspace_root {
+                collect_workspace_state_projects(ws_root)
+                    .into_iter()
+                    .filter_map(|p| {
+                        let name = p.name?;
+                        let version = p.version?;
+                        Some((name, version))
+                    })
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
+
+        for field in &dep_fields {
+            let Some(deps) = manifest.get_mut(*field).and_then(|v| v.as_object_mut()) else {
+                continue;
+            };
+            for (dep_name, dep_value) in deps.iter_mut() {
+                let Some(spec) = dep_value.as_str() else {
+                    continue;
+                };
+                if !spec.starts_with("workspace:") {
+                    continue;
+                }
+                let suffix = &spec["workspace:".len()..];
+                let resolved_version = workspace_versions.get(dep_name.as_str()).cloned();
+                let new_spec = match suffix {
+                    "*" => {
+                        // workspace:* → exact version
+                        resolved_version.unwrap_or_else(|| "0.0.0".to_string())
+                    }
+                    "^" => {
+                        // workspace:^ → ^version
+                        let v = resolved_version.unwrap_or_else(|| "0.0.0".to_string());
+                        format!("^{v}")
+                    }
+                    "~" => {
+                        // workspace:~ → ~version
+                        let v = resolved_version.unwrap_or_else(|| "0.0.0".to_string());
+                        format!("~{v}")
+                    }
+                    other => {
+                        // workspace:<explicit> → the explicit spec as-is (e.g. workspace:^1.0.0 → ^1.0.0)
+                        other.to_string()
+                    }
+                };
+                *dep_value = serde_json::Value::String(new_spec);
+                modified = true;
+            }
+        }
+
+        if modified {
+            let rendered = serde_json::to_string_pretty(&manifest)
+                .into_diagnostic()
+                .wrap_err("serialize modified package.json")?;
+            std::fs::write(manifest_path, format!("{rendered}\n"))
+                .into_diagnostic()
+                .wrap_err("write modified package.json")?;
+        }
+
+        Ok(modified)
+    }
+
+    fn run_npm_publish(
+        &self,
+        dir: &Path,
+        display_name: Option<&str>,
+        package_name: &str,
+        version: &str,
+    ) -> miette::Result<()> {
         let mut command = Command::new("npm");
         command.arg("publish");
         if self.dry_run {

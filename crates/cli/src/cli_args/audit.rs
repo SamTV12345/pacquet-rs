@@ -1,12 +1,14 @@
+use crate::cli_args::registry_client::RegistryClient;
 use clap::Args;
 use miette::{Context, IntoDiagnostic};
+use pacquet_lockfile::{DependencyPathSpecifier, Lockfile, PackageSnapshot};
+use pacquet_npmrc::Npmrc;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::{
-    collections::BTreeMap,
-    fs,
+    collections::{BTreeMap, HashMap, HashSet},
+    fmt, fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 #[derive(Debug, Args, Default)]
@@ -40,60 +42,306 @@ pub struct AuditArgs {
     fix: bool,
 }
 
+// ── severity helpers ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Severity {
+    Info,
+    Low,
+    Moderate,
+    High,
+    Critical,
+}
+
+impl Severity {
+    fn from_str_loose(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "info" => Some(Self::Info),
+            "low" => Some(Self::Low),
+            "moderate" => Some(Self::Moderate),
+            "high" => Some(Self::High),
+            "critical" => Some(Self::Critical),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Severity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Severity::Info => "info",
+            Severity::Low => "low",
+            Severity::Moderate => "moderate",
+            Severity::High => "high",
+            Severity::Critical => "critical",
+        };
+        f.write_str(s)
+    }
+}
+
+// ── advisory structs ──────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct Advisory {
+    id: u64,
+    severity: Severity,
+    vulnerable_versions: String,
+    patched_versions: String,
+    module_name: String,
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    cves: Vec<String>,
+}
+
+// ── lockfile helpers ──────────────────────────────────────────────────
+
+/// Which categories a package belongs to, derived from the lockfile
+/// `dev` / `optional` flags on `PackageSnapshot`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DepKind {
+    Prod,
+    Dev,
+    Optional,
+}
+
+fn dep_kind(snapshot: &PackageSnapshot) -> DepKind {
+    if snapshot.dev == Some(true) {
+        DepKind::Dev
+    } else if snapshot.optional == Some(true) {
+        DepKind::Optional
+    } else {
+        DepKind::Prod
+    }
+}
+
+/// Extract `(name, version, DepKind)` tuples from the lockfile packages map.
+fn extract_packages(lockfile: &Lockfile) -> Vec<(String, String, DepKind)> {
+    let packages = match &lockfile.packages {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    let mut result = Vec::with_capacity(packages.len());
+    for (dep_path, snapshot) in packages {
+        let name = dep_path.package_name().to_string();
+
+        // Prefer the explicit `version` field on the snapshot.
+        // Fall back to the version embedded in the dependency path for
+        // registry packages.
+        let version = snapshot
+            .version
+            .clone()
+            .or_else(|| {
+                if let DependencyPathSpecifier::Registry(spec) = &dep_path.package_specifier {
+                    Some(spec.suffix.version().to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        if version.is_empty() {
+            continue;
+        }
+
+        result.push((name, version, dep_kind(snapshot)));
+    }
+    result
+}
+
+/// Build the JSON body for the bulk advisory endpoint:
+/// `{ "pkg": ["1.0.0"], "other": ["2.0.0", "3.0.0"], … }`
+fn build_bulk_body(packages: &[(String, String, DepKind)]) -> Value {
+    let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (name, version, _) in packages {
+        map.entry(name.clone()).or_default().push(version.clone());
+    }
+    // Deduplicate versions.
+    for versions in map.values_mut() {
+        versions.sort();
+        versions.dedup();
+    }
+    serde_json::to_value(map).unwrap_or_default()
+}
+
+// ── display helpers ───────────────────────────────────────────────────
+
+fn print_table(advisories: &[&Advisory]) {
+    if advisories.is_empty() {
+        println!("found 0 vulnerabilities");
+        return;
+    }
+
+    let sep = "─".repeat(70);
+    for adv in advisories {
+        println!("{sep}");
+        println!("{:<18} {}", format!("{} severity", adv.severity), adv.title);
+        println!("{:<18} {}", "Package", adv.module_name);
+        println!("{:<18} {}", "Vulnerable range", adv.vulnerable_versions);
+        if !adv.patched_versions.is_empty() {
+            println!("{:<18} {}", "Patched in", adv.patched_versions);
+        }
+        if !adv.cves.is_empty() {
+            println!("{:<18} {}", "CVEs", adv.cves.join(", "));
+        }
+        if !adv.url.is_empty() {
+            println!("{:<18} {}", "More info", adv.url);
+        }
+    }
+    println!("{sep}");
+    println!(
+        "found {} vulnerabilit{}",
+        advisories.len(),
+        if advisories.len() == 1 { "y" } else { "ies" }
+    );
+}
+
+fn print_json(advisories: &[&Advisory]) {
+    let arr: Vec<Value> = advisories
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "id": a.id,
+                "severity": a.severity.to_string(),
+                "vulnerable_versions": a.vulnerable_versions,
+                "patched_versions": a.patched_versions,
+                "module_name": a.module_name,
+                "title": a.title,
+                "url": a.url,
+                "cves": a.cves,
+            })
+        })
+        .collect();
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "advisories": arr,
+            "metadata": {
+                "vulnerabilities": {
+                    "total": arr.len()
+                }
+            }
+        }))
+        .unwrap_or_default()
+    );
+}
+
+// ── core implementation ───────────────────────────────────────────────
+
 impl AuditArgs {
-    pub fn run(self, dir: PathBuf) -> miette::Result<()> {
+    pub fn run(self, dir: PathBuf, npmrc: &Npmrc) -> miette::Result<()> {
         if !dir.join("pnpm-lock.yaml").is_file() {
             miette::bail!("No pnpm-lock.yaml found: Cannot audit a project without a lockfile");
         }
 
+        let lockfile = Lockfile::load_from_dir(&dir)
+            .wrap_err("load pnpm-lock.yaml")?
+            .ok_or_else(|| miette::miette!("pnpm-lock.yaml could not be loaded"))?;
+
+        let all_packages = extract_packages(&lockfile);
+
+        // Filter by --dev / --prod / --no-optional.
+        let filtered: Vec<(String, String, DepKind)> = all_packages
+            .into_iter()
+            .filter(|(_, _, kind)| {
+                if self.dev && !self.prod {
+                    *kind == DepKind::Dev
+                } else if self.prod && !self.dev {
+                    *kind == DepKind::Prod || *kind == DepKind::Optional
+                } else {
+                    true
+                }
+            })
+            .filter(|(_, _, kind)| if self.no_optional { *kind != DepKind::Optional } else { true })
+            .collect();
+
+        if filtered.is_empty() {
+            println!("found 0 vulnerabilities");
+            return Ok(());
+        }
+
+        let body = build_bulk_body(&filtered);
+        let client = RegistryClient::new(npmrc);
+        let registry = client.default_registry();
+        let url = format!("{registry}/-/npm/v1/security/advisories/bulk");
+
+        let response = client.post_json_anonymous(&url, &body);
+
+        let response = match response {
+            Ok(r) => r,
+            Err(e) => {
+                if self.ignore_registry_errors {
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            if self.ignore_registry_errors {
+                return Ok(());
+            }
+            miette::bail!("Registry returned HTTP {status}");
+        }
+
+        let response_text =
+            response.text().into_diagnostic().wrap_err("read advisory response body")?;
+
+        // The response is keyed by package name, each value is an array of advisories.
+        let raw: HashMap<String, Vec<Advisory>> = serde_json::from_str(&response_text)
+            .into_diagnostic()
+            .wrap_err("parse advisory response")?;
+
+        // Collect names we actually care about (after dep-kind filtering).
+        let wanted_names: HashSet<&str> =
+            filtered.iter().map(|(name, _, _)| name.as_str()).collect();
+
+        let mut all_advisories: Vec<Advisory> = raw
+            .into_iter()
+            .filter(|(name, _)| wanted_names.contains(name.as_str()))
+            .flat_map(|(_, advs)| advs)
+            .collect();
+
+        // Filter by --audit-level.
+        let min_severity = self
+            .audit_level
+            .as_deref()
+            .map(Severity::from_str_loose)
+            .unwrap_or(Some(Severity::Info))
+            .unwrap_or(Severity::Info);
+
+        all_advisories.retain(|a| a.severity >= min_severity);
+        all_advisories.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.id.cmp(&b.id)));
+
         if self.fix {
-            return self.run_fix(&dir);
+            return self.run_fix_native(&dir, &all_advisories);
         }
 
-        let mut command = Command::new("npm");
-        command.arg("audit");
+        let refs: Vec<&Advisory> = all_advisories.iter().collect();
         if self.json {
-            command.arg("--json");
+            print_json(&refs);
+        } else {
+            print_table(&refs);
         }
-        if let Some(level) = &self.audit_level {
-            command.args(["--audit-level", level]);
-        }
-        if self.dev && !self.prod {
-            command.args(["--omit", "prod"]);
-        } else if self.prod && !self.dev {
-            command.args(["--omit", "dev"]);
-        }
-        if self.no_optional {
-            command.args(["--omit", "optional"]);
-        }
-        command.current_dir(dir);
 
-        let status = command.status().into_diagnostic().wrap_err("run npm audit")?;
-        if !status.success() && !self.ignore_registry_errors {
-            miette::bail!("audit reported issues");
+        if !all_advisories.is_empty() {
+            miette::bail!(
+                "{} vulnerabilit{} found",
+                all_advisories.len(),
+                if all_advisories.len() == 1 { "y" } else { "ies" }
+            );
         }
+
         Ok(())
     }
 
-    fn run_fix(&self, dir: &Path) -> miette::Result<()> {
-        let mut command = Command::new("npm");
-        command.args(["audit", "--json"]);
-        if self.dev && !self.prod {
-            command.args(["--omit", "prod"]);
-        } else if self.prod && !self.dev {
-            command.args(["--omit", "dev"]);
-        }
-        if self.no_optional {
-            command.args(["--omit", "optional"]);
-        }
-        command.current_dir(dir);
-
-        let output = command.output().into_diagnostic().wrap_err("run npm audit --json")?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let report: AuditReport =
-            serde_json::from_str(&stdout).into_diagnostic().wrap_err("parse audit report")?;
-
-        let overrides = create_overrides(&report);
+    fn run_fix_native(&self, dir: &Path, advisories: &[Advisory]) -> miette::Result<()> {
+        let overrides = create_overrides_from_advisories(advisories);
         if overrides.is_empty() {
             println!("No fixable vulnerabilities found");
             return Ok(());
@@ -111,17 +359,34 @@ impl AuditArgs {
     }
 }
 
+// ── fix helpers (shared) ──────────────────────────────────────────────
+
+/// Used by the native --fix path. Mirrors the old npm-based report shape.
 #[derive(Debug, Deserialize)]
 struct AuditReport {
     #[serde(default)]
-    advisories: BTreeMap<String, AuditAdvisory>,
+    advisories: BTreeMap<String, AuditAdvisoryLegacy>,
 }
 
 #[derive(Debug, Deserialize)]
-struct AuditAdvisory {
+struct AuditAdvisoryLegacy {
     module_name: String,
     vulnerable_versions: String,
     patched_versions: String,
+}
+
+fn create_overrides_from_advisories(advisories: &[Advisory]) -> BTreeMap<String, String> {
+    advisories
+        .iter()
+        .filter(|a| {
+            a.vulnerable_versions != ">=0.0.0"
+                && a.patched_versions != "<0.0.0"
+                && !a.patched_versions.is_empty()
+        })
+        .map(|a| {
+            (format!("{}@{}", a.module_name, a.vulnerable_versions), a.patched_versions.clone())
+        })
+        .collect()
 }
 
 fn create_overrides(report: &AuditReport) -> BTreeMap<String, String> {
@@ -206,5 +471,52 @@ mod tests {
         let overrides = create_overrides(&report);
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides.get("axios@<=0.18.0").unwrap(), ">=0.18.1");
+    }
+
+    #[test]
+    fn create_overrides_from_advisories_filters_unfixable() {
+        let advisories = vec![
+            Advisory {
+                id: 1,
+                severity: Severity::High,
+                module_name: "axios".to_string(),
+                vulnerable_versions: "<=0.18.0".to_string(),
+                patched_versions: ">=0.18.1".to_string(),
+                title: "SSRF".to_string(),
+                url: String::new(),
+                cves: Vec::new(),
+            },
+            Advisory {
+                id: 2,
+                severity: Severity::Low,
+                module_name: "unfixable".to_string(),
+                vulnerable_versions: ">=0.0.0".to_string(),
+                patched_versions: "<0.0.0".to_string(),
+                title: "bad".to_string(),
+                url: String::new(),
+                cves: Vec::new(),
+            },
+            Advisory {
+                id: 3,
+                severity: Severity::Moderate,
+                module_name: "no-patch".to_string(),
+                vulnerable_versions: "<1.0.0".to_string(),
+                patched_versions: String::new(),
+                title: "no fix".to_string(),
+                url: String::new(),
+                cves: Vec::new(),
+            },
+        ];
+
+        let overrides = create_overrides_from_advisories(&advisories);
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides.get("axios@<=0.18.0").unwrap(), ">=0.18.1");
+    }
+
+    #[test]
+    fn severity_ordering() {
+        assert!(Severity::Low < Severity::Moderate);
+        assert!(Severity::Moderate < Severity::High);
+        assert!(Severity::High < Severity::Critical);
     }
 }

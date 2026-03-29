@@ -1,7 +1,7 @@
 use clap::Args;
-use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
-use std::process::Command;
+
+use crate::cli_args::registry_client::RegistryClient;
 
 /// Remove a package version from the registry.
 #[derive(Debug, Args)]
@@ -33,8 +33,8 @@ impl UnpublishArgs {
             );
         }
 
-        let registry = npmrc.registry_for_package_name(name);
-        let registry = registry.trim_end_matches('/');
+        let client = RegistryClient::new(npmrc);
+        let registry = client.registry_url(name);
         let url = match version {
             Some(v) => {
                 format!(
@@ -44,19 +44,7 @@ impl UnpublishArgs {
             }
             None => format!("{registry}/{name}/-rev/all"),
         };
-        let auth = npmrc
-            .auth_header_for_url(&url)
-            .ok_or_else(|| miette::miette!("Not authenticated. Run `pacquet login` first."))?;
-
-        let output = Command::new("curl")
-            .args(["-s", "-X", "DELETE", "-H", &format!("Authorization: {auth}"), &url])
-            .output()
-            .into_diagnostic()
-            .wrap_err("unpublish")?;
-        if !output.status.success() {
-            let body = String::from_utf8_lossy(&output.stdout);
-            miette::bail!("Unpublish failed: {body}");
-        }
+        client.delete(&url)?;
         match version {
             Some(v) => println!("Unpublished {name}@{v}"),
             None => println!("Unpublished {name} (all versions)"),

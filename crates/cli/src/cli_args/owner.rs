@@ -1,8 +1,8 @@
 use clap::{Args, Subcommand};
-use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
 use serde_json::Value;
-use std::process::Command;
+
+use crate::cli_args::registry_client::RegistryClient;
 
 #[derive(Debug, Args)]
 pub struct OwnerArgs {
@@ -33,18 +33,10 @@ impl OwnerArgs {
 }
 
 fn list_owners(package: &str, npmrc: &Npmrc) -> miette::Result<()> {
-    let registry = npmrc.registry_for_package_name(package);
-    let registry = registry.trim_end_matches('/');
+    let client = RegistryClient::new(npmrc);
+    let registry = client.registry_url(package);
     let url = format!("{registry}/{package}");
-    let mut cmd = Command::new("curl");
-    cmd.args(["-s", "-H", "Accept: application/json"]);
-    if let Some(auth) = npmrc.auth_header_for_url(&url) {
-        cmd.args(["-H", &format!("Authorization: {auth}")]);
-    }
-    cmd.arg(&url);
-    let output = cmd.output().into_diagnostic().wrap_err("fetch package")?;
-    let body = String::from_utf8_lossy(&output.stdout);
-    let value: Value = serde_json::from_str(&body).into_diagnostic().wrap_err("parse response")?;
+    let value = client.get_json(&url)?;
     if let Some(maintainers) = value.get("maintainers").and_then(Value::as_array) {
         for m in maintainers {
             let name = m.get("name").and_then(Value::as_str).unwrap_or("?");
@@ -60,28 +52,12 @@ fn list_owners(package: &str, npmrc: &Npmrc) -> miette::Result<()> {
 }
 
 fn modify_owners(package: &str, user: &str, add: bool, npmrc: &Npmrc) -> miette::Result<()> {
-    let registry = npmrc.registry_for_package_name(package);
-    let registry = registry.trim_end_matches('/');
+    let client = RegistryClient::new(npmrc);
+    let registry = client.registry_url(package);
     let url = format!("{registry}/{package}");
-    let auth = npmrc
-        .auth_header_for_url(&url)
-        .ok_or_else(|| miette::miette!("Not authenticated. Run `pacquet login` first."))?;
 
     // Fetch current maintainers
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-H",
-            &format!("Authorization: {auth}"),
-            "-H",
-            "Accept: application/json",
-            &url,
-        ])
-        .output()
-        .into_diagnostic()
-        .wrap_err("fetch package")?;
-    let body = String::from_utf8_lossy(&output.stdout);
-    let mut value: Value = serde_json::from_str(&body).into_diagnostic().wrap_err("parse")?;
+    let mut value = client.get_json(&url)?;
 
     let maintainers = value
         .get_mut("maintainers")
@@ -95,26 +71,7 @@ fn modify_owners(package: &str, user: &str, add: bool, npmrc: &Npmrc) -> miette:
     }
 
     let payload = serde_json::json!({"maintainers": maintainers});
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "PUT",
-            "-H",
-            &format!("Authorization: {auth}"),
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &serde_json::to_string(&payload).unwrap_or_default(),
-            &url,
-        ])
-        .output()
-        .into_diagnostic()
-        .wrap_err("update maintainers")?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        miette::bail!("Failed to update maintainers: {err}");
-    }
+    client.put_json(&url, &payload)?;
     let action = if add { "Added" } else { "Removed" };
     println!("{action} {user} as maintainer of {package}");
     Ok(())

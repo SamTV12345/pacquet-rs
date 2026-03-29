@@ -1,8 +1,7 @@
 use clap::{Args, Subcommand};
-use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
-use serde_json::Value;
-use std::process::Command;
+
+use crate::cli_args::registry_client::RegistryClient;
 
 #[derive(Debug, Args)]
 pub struct TeamArgs {
@@ -48,6 +47,7 @@ fn team_action(
     npmrc: &Npmrc,
     verb: &str,
 ) -> miette::Result<()> {
+    let client = RegistryClient::new(npmrc);
     let registry = npmrc.registry.trim_end_matches('/');
     let (scope, team_name) =
         team.split_once(':').ok_or_else(|| miette::miette!("Team must be in format scope:team"))?;
@@ -55,22 +55,22 @@ fn team_action(
         Some(_) => format!("{registry}/-/team/{scope}/{team_name}/user"),
         None => format!("{registry}/-/team/{scope}/{team_name}"),
     };
-    let auth =
-        npmrc.auth_header_for_url(&url).ok_or_else(|| miette::miette!("Not authenticated."))?;
-    let mut cmd = Command::new("curl");
-    cmd.args(["-s", "-X", method, "-H", &format!("Authorization: {auth}")]);
-    if let Some(u) = user {
-        let payload = serde_json::json!({"user": u});
-        cmd.args([
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &serde_json::to_string(&payload).unwrap_or_default(),
-        ]);
-    }
-    cmd.arg(&url);
-    let output = cmd.output().into_diagnostic().wrap_err("team operation")?;
-    if !output.status.success() {
+    client.require_auth(&url)?;
+
+    let resp = match (method, user) {
+        ("PUT", Some(u)) => {
+            let payload = serde_json::json!({"user": u});
+            client.put_json(&url, &payload)?
+        }
+        ("PUT", None) => {
+            let payload = serde_json::json!({});
+            client.put_json(&url, &payload)?
+        }
+        ("DELETE", _) => client.delete(&url)?,
+        _ => miette::bail!("Unsupported method: {method}"),
+    };
+
+    if !resp.status().is_success() {
         miette::bail!("Team operation failed");
     }
     match user {
@@ -81,6 +81,7 @@ fn team_action(
 }
 
 fn list_team(team: &str, npmrc: &Npmrc) -> miette::Result<()> {
+    let client = RegistryClient::new(npmrc);
     let registry = npmrc.registry.trim_end_matches('/');
     let url = if team.contains(':') {
         let (scope, team_name) = team.split_once(':').unwrap();
@@ -88,22 +89,8 @@ fn list_team(team: &str, npmrc: &Npmrc) -> miette::Result<()> {
     } else {
         format!("{registry}/-/org/{team}/team")
     };
-    let auth =
-        npmrc.auth_header_for_url(&url).ok_or_else(|| miette::miette!("Not authenticated."))?;
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-H",
-            &format!("Authorization: {auth}"),
-            "-H",
-            "Accept: application/json",
-            &url,
-        ])
-        .output()
-        .into_diagnostic()
-        .wrap_err("list team")?;
-    let body = String::from_utf8_lossy(&output.stdout);
-    let value: Value = serde_json::from_str(&body).into_diagnostic().wrap_err("parse")?;
+    client.require_auth(&url)?;
+    let value = client.get_json(&url)?;
     if let Some(arr) = value.as_array() {
         for item in arr {
             println!("{}", item.as_str().unwrap_or("?"));

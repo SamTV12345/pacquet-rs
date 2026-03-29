@@ -1,6 +1,8 @@
 use clap::Args;
 use miette::{Context, IntoDiagnostic};
 use pacquet_npmrc::Npmrc;
+use reqwest::blocking::Client;
+use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 use serde_json::Value;
 use std::{
     fs,
@@ -47,31 +49,21 @@ impl LoginArgs {
         let session_url = format!("{registry}/-/v1/login");
         let session_id = uuid_v4();
         let user_agent = format!("pacquet/0.2.1 node/{}", node_version_hint());
-        let output = Command::new("curl")
-            .args([
-                "-s",
-                "-X",
-                "POST",
-                "-H",
-                "Content-Type: application/json",
-                "-H",
-                &format!("User-Agent: {user_agent}"),
-                "-H",
-                "npm-auth-type: web",
-                "-H",
-                "npm-command: login",
-                "-H",
-                &format!("npm-session: {session_id}"),
-                "-d",
-                "{}",
-                &session_url,
-            ])
-            .output()
+
+        let http = Client::new();
+        let resp = http
+            .post(&session_url)
+            .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, &user_agent)
+            .header("npm-auth-type", "web")
+            .header("npm-command", "login")
+            .header("npm-session", &session_id)
+            .body("{}")
+            .send()
             .into_diagnostic()
             .wrap_err("create login session")?;
 
-        let body = String::from_utf8_lossy(&output.stdout);
-        let response: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        let response: Value = resp.json().unwrap_or(Value::Null);
 
         let login_url = response.get("loginUrl").and_then(Value::as_str);
         let done_url = response.get("doneUrl").and_then(Value::as_str);
@@ -88,7 +80,7 @@ impl LoginArgs {
                 open_browser(login_url);
 
                 println!("Waiting for authentication...");
-                let token = poll_for_token(done_url)?;
+                let token = poll_for_token(&http, done_url)?;
                 save_token(registry, &token)?;
                 println!("Logged in on {registry}/");
                 Ok(())
@@ -113,24 +105,16 @@ impl LoginArgs {
             "type": "user",
         });
 
-        let output = Command::new("curl")
-            .args([
-                "-s",
-                "-X",
-                "PUT",
-                "-H",
-                "Content-Type: application/json",
-                "-d",
-                &serde_json::to_string(&payload).unwrap_or_default(),
-                &url,
-            ])
-            .output()
+        let http = Client::new();
+        let resp = http
+            .put(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&payload)
+            .send()
             .into_diagnostic()
             .wrap_err("authenticate with registry")?;
 
-        let body = String::from_utf8_lossy(&output.stdout);
-        let response: Value =
-            serde_json::from_str(&body).into_diagnostic().wrap_err("parse auth response")?;
+        let response: Value = resp.json().into_diagnostic().wrap_err("parse auth response")?;
 
         let token = response.get("token").and_then(Value::as_str).ok_or_else(|| {
             let error = response.get("error").and_then(Value::as_str).unwrap_or("unknown error");
@@ -143,24 +127,23 @@ impl LoginArgs {
     }
 }
 
-fn poll_for_token(done_url: &str) -> miette::Result<String> {
+fn poll_for_token(http: &Client, done_url: &str) -> miette::Result<String> {
     let max_attempts = 120;
     for _ in 0..max_attempts {
-        // Use -w to capture HTTP status code, -D - to capture headers
-        let output = Command::new("curl")
-            .args(["-s", "-w", "\n%{http_code}", "-H", "Accept: application/json", done_url])
-            .output()
+        let resp = http
+            .get(done_url)
+            .header("Accept", "application/json")
+            .send()
             .into_diagnostic()
             .wrap_err("poll login status")?;
 
-        let raw = String::from_utf8_lossy(&output.stdout);
-        let (body, status_str) = raw.rsplit_once('\n').unwrap_or((&raw, "0"));
-        let status: u16 = status_str.trim().parse().unwrap_or(0);
+        let status = resp.status().as_u16();
+        let body = resp.text().into_diagnostic().wrap_err("read poll response")?;
 
         match status {
             200 => {
                 // Login complete — extract token
-                if let Ok(response) = serde_json::from_str::<Value>(body)
+                if let Ok(response) = serde_json::from_str::<Value>(&body)
                     && let Some(token) = response.get("token").and_then(Value::as_str)
                 {
                     return Ok(token.to_string());
@@ -174,7 +157,7 @@ fn poll_for_token(done_url: &str) -> miette::Result<String> {
             }
             _ => {
                 // Check for error messages in body
-                if let Ok(response) = serde_json::from_str::<Value>(body)
+                if let Ok(response) = serde_json::from_str::<Value>(&body)
                     && let Some(error) = response.get("error").and_then(Value::as_str)
                 {
                     if error == "retry" {
