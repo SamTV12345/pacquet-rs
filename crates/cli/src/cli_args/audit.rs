@@ -192,11 +192,9 @@ fn print_table(advisories: &[&Advisory]) {
         }
     }
     println!("{sep}");
-    println!(
-        "found {} vulnerabilit{}",
-        advisories.len(),
-        if advisories.len() == 1 { "y" } else { "ies" }
-    );
+    let count = advisories.len();
+    let word = if count == 1 { "vulnerability" } else { "vulnerabilities" };
+    println!("found {count} {word}");
 }
 
 fn print_json(advisories: &[&Advisory]) {
@@ -330,11 +328,9 @@ impl AuditArgs {
         }
 
         if !all_advisories.is_empty() {
-            miette::bail!(
-                "{} vulnerabilit{} found",
-                all_advisories.len(),
-                if all_advisories.len() == 1 { "y" } else { "ies" }
-            );
+            let count = all_advisories.len();
+            let word = if count == 1 { "vulnerability" } else { "vulnerabilities" };
+            miette::bail!("{count} {word} found");
         }
 
         Ok(())
