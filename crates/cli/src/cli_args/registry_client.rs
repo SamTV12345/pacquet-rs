@@ -33,9 +33,10 @@ impl<'a> RegistryClient<'a> {
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(USER_AGENT, HeaderValue::from_static(PACQUET_USER_AGENT));
         if let Some(auth) = self.npmrc.auth_header_for_url(url)
-            && let Ok(val) = HeaderValue::from_str(&auth) {
-                headers.insert(AUTHORIZATION, val);
-            }
+            && let Ok(val) = HeaderValue::from_str(&auth)
+        {
+            headers.insert(AUTHORIZATION, val);
+        }
         headers
     }
 
