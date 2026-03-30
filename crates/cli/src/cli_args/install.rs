@@ -431,7 +431,7 @@ impl InstallArgs {
             )?;
         }
 
-        if !lockfile_only && lockfile_dir.join("pnpm-workspace.yaml").is_file() {
+        if !lockfile_only {
             let workspace_state_config = config_for_project(
                 config,
                 lockfile_dir,
@@ -657,26 +657,25 @@ fn write_workspace_state(
     ignore_pnpmfile: bool,
     pnpmfile: Option<&Path>,
 ) -> miette::Result<()> {
-    let projects = collect_workspace_state_projects(workspace_dir);
-    let workspace_package_patterns =
-        read_workspace_package_patterns(workspace_dir).unwrap_or_default();
+    // pnpm only populates `projects` when running inside a workspace
+    // (i.e. when pnpm-workspace.yaml exists). For single-project installs
+    // `allProjects` is `[]` so `projects` is `{}`.
+    let is_workspace = workspace_dir.join("pnpm-workspace.yaml").is_file();
     let mut projects_json = Map::new();
-    for project in projects {
-        let mut project_entry = Map::new();
-        if let Some(name) = project.name {
-            project_entry.insert("name".to_string(), Value::String(name));
+    if is_workspace {
+        let projects = collect_workspace_state_projects(workspace_dir);
+        for project in projects {
+            let mut project_entry = Map::new();
+            if let Some(name) = project.name {
+                project_entry.insert("name".to_string(), Value::String(name));
+            }
+            if let Some(version) = project.version {
+                project_entry.insert("version".to_string(), Value::String(version));
+            }
+            projects_json
+                .insert(project.root_dir.display().to_string(), Value::Object(project_entry));
         }
-        if let Some(version) = project.version {
-            project_entry.insert("version".to_string(), Value::String(version));
-        }
-        projects_json.insert(project.root_dir.display().to_string(), Value::Object(project_entry));
     }
-
-    let catalogs = current_lockfile
-        .and_then(|lockfile| lockfile.catalogs.clone())
-        .map(|catalogs| serde_json::to_value(catalogs).into_diagnostic())
-        .transpose()?
-        .unwrap_or_else(|| json!({}));
 
     let pnpmfiles = if ignore_pnpmfile {
         Vec::new()
@@ -691,6 +690,61 @@ fn write_workspace_state(
         }
     };
 
+    // pnpm uses Ramda `pick` which only includes keys that actually exist
+    // on the settings object. For single-project installs, keys like
+    // `catalogs` and `workspacePackagePatterns` are undefined and therefore
+    // omitted from the output. We replicate this by conditionally inserting.
+    let mut settings = Map::new();
+    settings.insert("autoInstallPeers".into(), json!(config.auto_install_peers));
+
+    // catalogs: only include if non-empty
+    let catalogs = current_lockfile
+        .and_then(|lockfile| lockfile.catalogs.clone())
+        .and_then(|catalogs| serde_json::to_value(catalogs).ok())
+        .filter(|v| v.as_object().is_some_and(|m| !m.is_empty()));
+    if let Some(catalogs) = catalogs {
+        settings.insert("catalogs".into(), catalogs);
+    }
+
+    settings.insert("dedupeDirectDeps".into(), json!(false));
+    settings.insert("dedupeInjectedDeps".into(), json!(config.dedupe_injected_deps));
+    settings.insert("dedupePeerDependents".into(), json!(config.dedupe_peer_dependents));
+    settings.insert("dedupePeers".into(), json!(false));
+    settings.insert("dev".into(), json!(dependency_groups.contains(&DependencyGroup::Dev)));
+    settings.insert("excludeLinksFromLockfile".into(), json!(config.exclude_links_from_lockfile));
+    settings.insert("hoistPattern".into(), json!(config.hoist_pattern));
+    settings.insert("hoistWorkspacePackages".into(), json!(true));
+    settings.insert("injectWorkspacePackages".into(), json!(config.inject_workspace_packages));
+    settings.insert(
+        "linkWorkspacePackages".into(),
+        match config.link_workspace_packages {
+            LinkWorkspacePackages::False => Value::Bool(false),
+            LinkWorkspacePackages::Direct => Value::Bool(true),
+            LinkWorkspacePackages::Deep => Value::String("deep".to_string()),
+        },
+    );
+    settings.insert(
+        "nodeLinker".into(),
+        json!(match config.node_linker {
+            NodeLinker::Isolated => "isolated",
+            NodeLinker::Hoisted => "hoisted",
+            NodeLinker::Pnp => "pnp",
+        }),
+    );
+    settings
+        .insert("optional".into(), json!(dependency_groups.contains(&DependencyGroup::Optional)));
+    settings.insert("peersSuffixMaxLength".into(), json!(config.peers_suffix_max_length));
+    settings.insert("preferWorkspacePackages".into(), json!(false));
+    settings.insert("production".into(), json!(dependency_groups.contains(&DependencyGroup::Prod)));
+    settings.insert("publicHoistPattern".into(), json!(config.public_hoist_pattern));
+
+    // workspacePackagePatterns: only include if in a workspace
+    if is_workspace {
+        let workspace_package_patterns =
+            read_workspace_package_patterns(workspace_dir).unwrap_or_default();
+        settings.insert("workspacePackagePatterns".into(), json!(workspace_package_patterns));
+    }
+
     let state = json!({
         "lastValidatedTimestamp": SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -698,34 +752,7 @@ fn write_workspace_state(
             .as_millis() as u64,
         "projects": Value::Object(projects_json),
         "pnpmfiles": pnpmfiles,
-        "settings": {
-            "autoInstallPeers": config.auto_install_peers,
-            "catalogs": catalogs,
-            "dedupeDirectDeps": false,
-            "dedupeInjectedDeps": config.dedupe_injected_deps,
-            "dedupePeerDependents": config.dedupe_peer_dependents,
-            "dev": dependency_groups.contains(&DependencyGroup::Dev),
-            "excludeLinksFromLockfile": config.exclude_links_from_lockfile,
-            "hoistPattern": config.hoist_pattern,
-            "hoistWorkspacePackages": true,
-            "injectWorkspacePackages": config.inject_workspace_packages,
-            "linkWorkspacePackages": match config.link_workspace_packages {
-                LinkWorkspacePackages::False => Value::Bool(false),
-                LinkWorkspacePackages::Direct => Value::Bool(true),
-                LinkWorkspacePackages::Deep => Value::String("deep".to_string()),
-            },
-            "nodeLinker": match config.node_linker {
-                NodeLinker::Isolated => "isolated",
-                NodeLinker::Hoisted => "hoisted",
-                NodeLinker::Pnp => "pnp",
-            },
-            "optional": dependency_groups.contains(&DependencyGroup::Optional),
-            "peersSuffixMaxLength": config.peers_suffix_max_length,
-            "preferWorkspacePackages": false,
-            "production": dependency_groups.contains(&DependencyGroup::Prod),
-            "publicHoistPattern": config.public_hoist_pattern,
-            "workspacePackagePatterns": workspace_package_patterns,
-        },
+        "settings": Value::Object(settings),
         "filteredInstall": filtered_install,
     });
 
@@ -799,7 +826,7 @@ fn order_install_targets_for_lifecycle_scripts(
     }
 
     fn normalize_existing_dir(path: PathBuf) -> PathBuf {
-        std::fs::canonicalize(&path).unwrap_or(path)
+        dunce::canonicalize(&path).unwrap_or(path)
     }
 
     let mut targets = Vec::<LifecycleTarget>::new();

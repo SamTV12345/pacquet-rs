@@ -324,10 +324,10 @@ fn ensure_yaml_mapping_value(
 }
 
 fn link_spec_from(project_dir: &Path, linked_dep_dir: &Path) -> miette::Result<String> {
-    let project_dir = fs::canonicalize(project_dir)
+    let project_dir = dunce::canonicalize(project_dir)
         .into_diagnostic()
         .wrap_err_with(|| format!("canonicalize {}", project_dir.display()))?;
-    let linked_dep_dir = fs::canonicalize(linked_dep_dir)
+    let linked_dep_dir = dunce::canonicalize(linked_dep_dir)
         .into_diagnostic()
         .wrap_err_with(|| format!("canonicalize {}", linked_dep_dir.display()))?;
     let relative = diff_paths(&linked_dep_dir, &project_dir)

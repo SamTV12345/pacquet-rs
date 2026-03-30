@@ -335,14 +335,15 @@ fn modules_manifest_package_id(dependency_path: &DependencyPath) -> String {
 
 fn relative_virtual_store_dir(modules_dir: &Path, virtual_store_dir: &Path) -> String {
     // pnpm writes virtualStoreDir as absolute path on Windows and relative on Unix.
-    // On Windows, pnpm uses native backslashes in the absolute path.
+    // On Windows, pnpm uses native backslashes in the absolute path WITHOUT the
+    // \\?\ verbatim prefix that fs::canonicalize produces.
     if cfg!(windows) {
         // Canonicalize to resolve 8.3 short names (RUNNER~1 → runneradmin) and
-        // normalize mixed forward/back slashes to native backslashes.
-        return fs::canonicalize(virtual_store_dir)
-            .unwrap_or_else(|_| virtual_store_dir.to_path_buf())
-            .display()
-            .to_string();
+        // normalize mixed forward/back slashes to native backslashes, then strip
+        // the \\?\ prefix that Windows canonicalization adds.
+        let resolved =
+            fs::canonicalize(virtual_store_dir).unwrap_or_else(|_| virtual_store_dir.to_path_buf());
+        return normalize_windows_verbatim_path(&resolved.display().to_string());
     }
     if let Ok(relative) = virtual_store_dir.strip_prefix(modules_dir) {
         let relative = if relative.as_os_str().is_empty() {

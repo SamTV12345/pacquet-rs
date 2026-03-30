@@ -205,6 +205,9 @@ impl From<DependencyPath> for String {
 }
 
 fn dep_path_to_filename(dep_path: &str) -> String {
+    #[cfg(windows)]
+    const MAX_LENGTH_WITHOUT_HASH: usize = 60;
+    #[cfg(not(windows))]
     const MAX_LENGTH_WITHOUT_HASH: usize = 120;
 
     let mut filename = dep_path_to_filename_unescaped(dep_path)

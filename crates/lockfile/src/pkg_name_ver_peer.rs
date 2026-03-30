@@ -14,6 +14,9 @@ pub type ParsePkgNameVerPeerError = ParsePkgNameSuffixError<ParsePkgVerPeerError
 impl PkgNameVerPeer {
     /// Construct the name of the corresponding subdirectory in the virtual store directory.
     pub fn to_virtual_store_name(&self) -> String {
+        #[cfg(windows)]
+        const MAX_LENGTH_WITHOUT_HASH: usize = 60;
+        #[cfg(not(windows))]
         const MAX_LENGTH_WITHOUT_HASH: usize = 120;
 
         let mut filename = dep_path_to_filename_unescaped(&self.to_string());

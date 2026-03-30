@@ -1,3 +1,4 @@
+use crate::package_snapshot::string_or_vec;
 use crate::{
     ComVer, DependencyPath, Lockfile, LockfilePeerDependencyMetaValue, LockfileResolution,
     LockfileSettings, LockfileVersion, MultiProjectSnapshot, PackageSnapshot,
@@ -125,11 +126,11 @@ struct LockfilePackageInfo {
     version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     engines: Option<HashMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "string_or_vec")]
     cpu: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "string_or_vec")]
     os: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "string_or_vec")]
     libc: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deprecated: Option<String>,

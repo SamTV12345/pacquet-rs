@@ -71,7 +71,7 @@ impl DeployArgs {
         };
 
         let source_dir = normalize_fs_path(
-            fs::canonicalize(&source_dir)
+            dunce::canonicalize(&source_dir)
                 .into_diagnostic()
                 .wrap_err_with(|| format!("canonicalize {}", source_dir.display()))?,
         );
@@ -241,7 +241,7 @@ fn collect_importers(
             .map(Path::to_path_buf)
             .unwrap_or_else(|| lockfile_dir.to_path_buf());
         let canonical_dir =
-            normalize_fs_path(fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone()));
+            normalize_fs_path(dunce::canonicalize(&dir).unwrap_or_else(|_| dir.clone()));
         let name = manifest
             .value()
             .get("name")
@@ -868,7 +868,7 @@ fn rewrite_local_reference(
     };
     let resolved_path = resolve_local_target(base_dir, path_part);
     let canonical_resolved =
-        normalize_fs_path(fs::canonicalize(&resolved_path).unwrap_or(resolved_path.clone()));
+        normalize_fs_path(dunce::canonicalize(&resolved_path).unwrap_or(resolved_path.clone()));
     let target_dir = normalize_fs_path(target_dir.to_path_buf());
     let selected_project_dir = normalize_fs_path(selected_project_dir.to_path_buf());
     if canonical_resolved == selected_project_dir {
