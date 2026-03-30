@@ -333,4 +333,102 @@ mod tests {
         assert_eq!(error.to_string(), "Invalid syntax");
         assert!(matches!(error, ParseDependencyPathError::InvalidSyntax));
     }
+
+    // ── pnpm parity: depPathToFilename ─────────────────────────────
+    // Mirrors the test cases from pnpm's packages/dependency-path/test/index.ts
+
+    #[test]
+    fn dep_path_to_filename_basic() {
+        assert_eq!(dep_path_to_filename("/foo@1.0.0"), "foo@1.0.0");
+        assert_eq!(dep_path_to_filename("/@foo/bar@1.0.0"), "@foo+bar@1.0.0");
+    }
+
+    #[test]
+    fn dep_path_to_filename_special_chars() {
+        assert_eq!(
+            dep_path_to_filename("github.com/something/foo/0000?v=1"),
+            "github.com+something+foo+0000+v=1"
+        );
+        assert_eq!(dep_path_to_filename("\\//:*?\"<>|"), "++++++++++");
+    }
+
+    #[test]
+    fn dep_path_to_filename_peer_deps() {
+        assert_eq!(
+            dep_path_to_filename("/foo@1.0.0(react@16.0.0)(react-dom@16.0.0)"),
+            "foo@1.0.0_react@16.0.0_react-dom@16.0.0"
+        );
+        assert_eq!(
+            dep_path_to_filename("/foo@1.0.0(react@16.0.0(react-dom@1.0.0))(react-dom@16.0.0)"),
+            "foo@1.0.0_react@16.0.0_react-dom@1.0.0__react-dom@16.0.0"
+        );
+    }
+
+    #[test]
+    fn dep_path_to_filename_file_protocol() {
+        let filename = dep_path_to_filename("file:test/foo-1.0.0.tgz_foo@2.0.0");
+        assert_eq!(filename, "file+test+foo-1.0.0.tgz_foo@2.0.0");
+        assert!(!filename.contains(':'));
+    }
+
+    #[test]
+    fn dep_path_to_filename_long_path_gets_hashed() {
+        let long_input = "abcd/".repeat(200);
+        let result = dep_path_to_filename(&long_input);
+        // The hash part is always 32 hex chars preceded by underscore
+        assert!(result.contains('_'));
+        let (_prefix, hash) = result.rsplit_once('_').unwrap();
+        assert_eq!(hash.len(), 32);
+        // On any platform the result must not exceed MAX_LENGTH_WITHOUT_HASH
+        #[cfg(not(windows))]
+        assert!(result.len() <= 120);
+        #[cfg(windows)]
+        assert!(result.len() <= 60);
+    }
+
+    #[test]
+    fn dep_path_to_filename_mixed_case_gets_hashed() {
+        // Mixed-case names are always hashed (unless file+ prefix)
+        let result = dep_path_to_filename("/JSONSteam@1.0.0");
+        assert!(result.contains('_'));
+        let (_, hash) = result.rsplit_once('_').unwrap();
+        assert_eq!(hash.len(), 32);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn dep_path_to_filename_pnpm_parity_hashes_at_120() {
+        // Exact pnpm test expectations (maxLength=120)
+        assert_eq!(
+            dep_path_to_filename(&"abcd/".repeat(200)),
+            "abcd+abcd+abcd+abcd+abcd+abcd+abcd+abcd+abcd+abcd+abcd+abcd+abcd+abcd+abcd+abcd+abcd+ab_e7c10c3598ebbc0ca640b6524c68e602"
+        );
+        assert_eq!(
+            dep_path_to_filename("/JSONSteam@1.0.0"),
+            "JSONSteam@1.0.0_533d3b11e9111b7a24f914844c021ddf"
+        );
+    }
+
+    #[test]
+    fn dep_path_to_filename_git_urls() {
+        assert_eq!(
+            dep_path_to_filename("foo@git+https://github.com/something/foo#1234"),
+            "foo@git+https+++github.com+something+foo+1234"
+        );
+        // 75 chars → fits in 120 (Unix) but exceeds 60 (Windows)
+        #[cfg(not(windows))]
+        assert_eq!(
+            dep_path_to_filename(
+                "foo@https://codeload.github.com/something/foo/tar.gz/1234#path:packages/foo"
+            ),
+            "foo@https+++codeload.github.com+something+foo+tar.gz+1234+path+packages+foo"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            dep_path_to_filename(
+                "foo@https://codeload.github.com/something/foo/tar.gz/1234#path:packages/foo"
+            ),
+            "foo@https+++codeload.github_a65402295ff8709d2681eb544ba1da85"
+        );
+    }
 }

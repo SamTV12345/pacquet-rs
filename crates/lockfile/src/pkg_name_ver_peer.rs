@@ -151,9 +151,46 @@ mod tests {
             "@babel/plugin-proposal-object-rest-spread@7.12.1",
             "@babel+plugin-proposal-object-rest-spread@7.12.1",
         );
+        // This case exceeds 60 chars on Windows (MAX_LENGTH=60) so it gets hashed,
+        // but fits within 120 chars on Unix.
+        #[cfg(not(windows))]
         case(
             "@babel/plugin-proposal-object-rest-spread@7.12.1(@babel/core@7.12.9)",
             "@babel+plugin-proposal-object-rest-spread@7.12.1_@babel+core@7.12.9",
         );
+        #[cfg(windows)]
+        case(
+            "@babel/plugin-proposal-object-rest-spread@7.12.1(@babel/core@7.12.9)",
+            "@babel+plugin-proposal-obje_d26b36bd334bcbbf56e60919598daba0",
+        );
+    }
+
+    // ── pnpm parity: mixed-case always hashes ──────────────────────
+
+    #[test]
+    fn to_virtual_store_name_mixed_case_hashes() {
+        let name_ver_peer: PkgNameVerPeer = "JSONSteam@1.0.0".parse().unwrap();
+        let result = name_ver_peer.to_virtual_store_name();
+        // Mixed case triggers hashing regardless of length
+        assert!(result.contains('_'), "expected hash separator in: {result}");
+        let (_, hash) = result.rsplit_once('_').unwrap();
+        assert_eq!(hash.len(), 32);
+    }
+
+    #[test]
+    fn to_virtual_store_name_nested_peer_parens() {
+        let input = "foo@1.0.0(react@16.0.0(react-dom@1.0.0))(react-dom@16.0.0)";
+        let name_ver_peer: PkgNameVerPeer = input.parse().unwrap();
+        let result = name_ver_peer.to_virtual_store_name();
+        // Nested parens: inner `)` + outer `(` become `__`, rest become `_`
+        assert_eq!(result, "foo@1.0.0_react@16.0.0_react-dom@1.0.0__react-dom@16.0.0");
+    }
+
+    #[test]
+    fn to_virtual_store_name_simple_peers() {
+        let input = "foo@1.0.0(react@16.0.0)(react-dom@16.0.0)";
+        let name_ver_peer: PkgNameVerPeer = input.parse().unwrap();
+        let result = name_ver_peer.to_virtual_store_name();
+        assert_eq!(result, "foo@1.0.0_react@16.0.0_react-dom@16.0.0");
     }
 }
