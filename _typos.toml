@@ -1,3 +1,5 @@
 [default.extend-words]
-# SHA256 hash fragments that appear in test expectations for dep_path_to_filename
+# SHA256 hash fragments in test expectations
 ba = "ba"
+# Content-Addressable File Store
+cafs = "cafs"
