@@ -1486,4 +1486,46 @@ mod tests {
         );
         assert!(config.is_ok());
     }
+
+    #[test]
+    pub fn default_cache_dir_returns_platform_specific_path() {
+        let _env_guard = crate::env_lock().lock().expect("lock env mutex");
+        // Safe in this test context: mutate process env in a controlled scope.
+        unsafe { env::remove_var("XDG_CACHE_HOME") };
+        let cache_dir = crate::custom_deserializer::default_cache_dir();
+        let home_dir = home::home_dir().expect("home dir available");
+        #[cfg(target_os = "linux")]
+        assert_eq!(cache_dir, home_dir.join(".cache/pnpm"));
+        #[cfg(target_os = "macos")]
+        assert_eq!(cache_dir, home_dir.join("Library/Caches/pnpm"));
+        #[cfg(target_os = "windows")]
+        assert_eq!(cache_dir, home_dir.join("AppData/Local/pnpm-cache"));
+    }
+
+    #[test]
+    pub fn default_modules_dir_uses_current_directory() {
+        let cwd = env::current_dir().expect("current dir available");
+        let modules_dir = crate::custom_deserializer::default_modules_dir();
+        assert_eq!(modules_dir, cwd.join("node_modules"));
+    }
+
+    #[test]
+    pub fn default_virtual_store_dir_uses_current_directory() {
+        let cwd = env::current_dir().expect("current dir available");
+        let virtual_store_dir = crate::custom_deserializer::default_virtual_store_dir();
+        assert_eq!(virtual_store_dir, cwd.join("node_modules/.pnpm"));
+    }
+
+    #[test]
+    pub fn default_network_concurrency_value() {
+        let value = crate::custom_deserializer::default_network_concurrency();
+        assert_eq!(value, 16);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    pub fn store_dir_from_config_string() {
+        let value: Npmrc = serde_ini::from_str("store-dir=/custom/store/path").unwrap();
+        assert_eq!(display_store_dir(&value.store_dir), "/custom/store/path");
+    }
 }

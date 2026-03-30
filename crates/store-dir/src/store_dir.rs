@@ -163,4 +163,50 @@ mod tests {
         assert_eq!(paths.len(), 1);
         assert!(paths[0].ends_with("one.json"));
     }
+
+    #[test]
+    fn index_file_paths_does_not_infinite_loop_on_symlink_cycle() {
+        let dir = tempdir().expect("create tempdir");
+        let store = StoreDir::new(dir.path());
+        let index_dir = store.version_dir().join("index");
+        let dir_a = index_dir.join("aa");
+        let dir_b = index_dir.join("bb");
+        std::fs::create_dir_all(&dir_a).expect("create dir_a");
+        // Create a symlink cycle: bb -> aa, then aa/loop -> bb
+        // On Windows, symlinks require admin privileges, so use junctions instead.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&dir_a, &dir_b).expect("symlink bb -> aa");
+            std::os::unix::fs::symlink(&dir_b, dir_a.join("loop")).expect("symlink aa/loop -> bb");
+        }
+        #[cfg(windows)]
+        {
+            junction::create(&dir_a, &dir_b).expect("junction bb -> aa");
+            junction::create(&dir_b, &dir_a.join("loop")).expect("junction aa/loop -> bb");
+        }
+        // Write a real json file so the result is not empty
+        std::fs::write(dir_a.join("real.json"), "{}").expect("write json");
+
+        // The walk function uses `entry.file_type()` which reports symlinks as
+        // symlinks (not dirs), so it naturally skips them. This test verifies
+        // the function terminates and finds only the real file.
+        let paths = store.index_file_paths();
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("real.json"));
+    }
+
+    #[test]
+    fn store_path_construction() {
+        let store = StoreDir::new("/custom/store/path");
+        assert_eq!(store.version_dir(), PathBuf::from("/custom/store/path/v10"));
+        assert_eq!(store.tmp(), PathBuf::from("/custom/store/path/v10/tmp"));
+
+        // Verify files sub-path via file_path_by_head_tail
+        let file_path = store.file_path_by_head_tail("ab", "cdef0123");
+        assert_eq!(file_path, PathBuf::from("/custom/store/path/v10/files/ab/cdef0123"));
+
+        // Verify file_path_by_hex_str with suffix
+        let hex_path = store.file_path_by_hex_str("abcdef0123456789", "-exec");
+        assert_eq!(hex_path, PathBuf::from("/custom/store/path/v10/files/ab/cdef0123456789-exec"));
+    }
 }

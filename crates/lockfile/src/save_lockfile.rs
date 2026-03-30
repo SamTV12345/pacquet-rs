@@ -108,4 +108,140 @@ mod tests {
 
         assert!(path.exists());
     }
+
+    #[test]
+    fn save_and_load_roundtrip_preserves_lockfile_version() {
+        // Note: render_lockfile_content always writes v9 format, so only v9
+        // versions survive a roundtrip unchanged.
+        let dir = tempdir().unwrap();
+        for (major, minor) in [(9, 0), (9, 1)] {
+            let lockfile = Lockfile {
+                lockfile_version: ComVer::new(major, minor),
+                settings: None,
+                never_built_dependencies: None,
+                ignored_optional_dependencies: None,
+                overrides: None,
+                package_extensions_checksum: None,
+                patched_dependencies: None,
+                pnpmfile_checksum: None,
+                catalogs: None,
+                time: None,
+                extra_fields: std::collections::HashMap::new(),
+                project_snapshot: RootProjectSnapshot::Single(ProjectSnapshot::default()),
+                packages: None,
+            };
+
+            let path = dir.path().join(format!("lock-{major}-{minor}.yaml"));
+            lockfile.save_to_path(&path).unwrap();
+
+            let loaded = Lockfile::load_from_path(&path).unwrap().unwrap();
+            assert_eq!(
+                loaded.lockfile_version,
+                ComVer::new(major, minor),
+                "ComVer roundtrip failed for {major}.{minor}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_and_load_roundtrip_preserves_settings() {
+        let dir = tempdir().unwrap();
+        let settings = crate::LockfileSettings {
+            auto_install_peers: Some(true),
+            exclude_links_from_lockfile: Some(false),
+            peers_suffix_max_length: Some(1000),
+            inject_workspace_packages: None,
+        };
+        let lockfile = Lockfile {
+            lockfile_version: ComVer::new(9, 0),
+            settings: Some(settings),
+            never_built_dependencies: None,
+            ignored_optional_dependencies: None,
+            overrides: None,
+            package_extensions_checksum: None,
+            patched_dependencies: None,
+            pnpmfile_checksum: None,
+            catalogs: None,
+            time: None,
+            extra_fields: std::collections::HashMap::new(),
+            project_snapshot: RootProjectSnapshot::Single(ProjectSnapshot::default()),
+            packages: None,
+        };
+
+        lockfile.save_to_dir(dir.path()).unwrap();
+
+        let loaded = Lockfile::load_from_dir(dir.path()).unwrap().unwrap();
+        let loaded_settings = loaded.settings.unwrap();
+        // These fields roundtrip cleanly
+        assert_eq!(loaded_settings.auto_install_peers, Some(true));
+        assert_eq!(loaded_settings.exclude_links_from_lockfile, Some(false));
+        // pnpm intentionally strips peersSuffixMaxLength from the lockfile
+        // when it equals the default (1000). See lockfileFormatConverters.ts:
+        //   if (settings?.peersSuffixMaxLength === 1000) { omit(...) }
+        // So after a roundtrip, the default value reads back as None.
+        assert_eq!(loaded_settings.peers_suffix_max_length, None);
+    }
+
+    #[test]
+    fn save_and_load_roundtrip_preserves_patched_dependencies() {
+        let dir = tempdir().unwrap();
+        let mut patched = std::collections::HashMap::new();
+        patched.insert(
+            "express@4.18.2".to_string(),
+            serde_yaml::Value::String("patches/express@4.18.2.patch".to_string()),
+        );
+        let lockfile = Lockfile {
+            lockfile_version: ComVer::new(9, 0),
+            settings: None,
+            never_built_dependencies: None,
+            ignored_optional_dependencies: None,
+            overrides: None,
+            package_extensions_checksum: None,
+            patched_dependencies: Some(patched.clone()),
+            pnpmfile_checksum: None,
+            catalogs: None,
+            time: None,
+            extra_fields: std::collections::HashMap::new(),
+            project_snapshot: RootProjectSnapshot::Single(ProjectSnapshot::default()),
+            packages: None,
+        };
+
+        lockfile.save_to_dir(dir.path()).unwrap();
+
+        let loaded = Lockfile::load_from_dir(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.patched_dependencies, Some(patched));
+    }
+
+    #[test]
+    fn save_creates_file_with_correct_name() {
+        let dir = tempdir().unwrap();
+        let lockfile = Lockfile {
+            lockfile_version: ComVer::new(9, 0),
+            settings: None,
+            never_built_dependencies: None,
+            ignored_optional_dependencies: None,
+            overrides: None,
+            package_extensions_checksum: None,
+            patched_dependencies: None,
+            pnpmfile_checksum: None,
+            catalogs: None,
+            time: None,
+            extra_fields: std::collections::HashMap::new(),
+            project_snapshot: RootProjectSnapshot::Single(ProjectSnapshot::default()),
+            packages: None,
+        };
+
+        lockfile.save_to_dir(dir.path()).unwrap();
+
+        let expected_path = dir.path().join("pnpm-lock.yaml");
+        assert!(expected_path.exists(), "expected file at pnpm-lock.yaml");
+
+        // Verify no other files were created
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(entries, vec!["pnpm-lock.yaml"]);
+    }
 }

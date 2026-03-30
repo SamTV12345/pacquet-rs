@@ -787,4 +787,442 @@ mod tests {
 
         assert_eq!(manifest.resolved_virtual_store_dir(dir.path()), dir.path().join(".pnpm"));
     }
+
+    #[test]
+    fn write_and_read_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let mut config = Npmrc::new();
+        config.store_dir = StoreDir::new(dir.path().join("store"));
+        config.virtual_store_dir = modules_dir.join(".pnpm");
+        config.hoist_pattern = vec!["*".to_string()];
+        config.public_hoist_pattern = vec!["*types*".to_string(), "*eslint*".to_string()];
+        config.registry = "https://registry.npmjs.org/".to_string();
+
+        write_modules_manifest(
+            &modules_dir,
+            &config,
+            &[DependencyGroup::Prod, DependencyGroup::Dev],
+            &["skipped-pkg@1.0.0".to_string()],
+            None,
+            None,
+        )
+        .expect("write modules manifest");
+
+        let manifest = read_modules_manifest(&modules_dir).expect("read modules manifest");
+
+        assert_eq!(manifest.layout_version, Some(5));
+        assert_eq!(manifest.node_linker(), Some("isolated"));
+        assert_eq!(manifest.hoist_pattern(), Some(vec!["*".to_string()].as_slice()));
+        assert_eq!(
+            manifest.public_hoist_pattern(),
+            Some(vec!["*types*".to_string(), "*eslint*".to_string()].as_slice())
+        );
+        assert!(
+            manifest.package_manager.as_ref().expect("package_manager").contains("pnpm@")
+                || manifest.package_manager.as_ref().expect("package_manager").contains("pacquet@")
+        );
+        assert!(manifest.pruned_at.is_some());
+        assert_eq!(manifest.skipped(), &["skipped-pkg@1.0.0"]);
+        assert_eq!(manifest.pending_builds, Vec::<String>::new());
+        assert!(manifest.store_dir().is_some());
+        assert!(manifest.store_dir().expect("store_dir").contains("store"));
+        assert_eq!(
+            manifest.virtual_store_dir_max_length(),
+            super::DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH
+        );
+        let included = manifest.included().expect("included");
+        assert!(included.dependencies);
+        assert!(included.dev_dependencies);
+        assert!(!included.optional_dependencies);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn virtual_store_dir_is_relative_on_unix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let mut config = Npmrc::new();
+        config.store_dir = StoreDir::new(dir.path().join("store"));
+        config.virtual_store_dir = modules_dir.join(".pnpm");
+
+        write_modules_manifest(&modules_dir, &config, &[DependencyGroup::Prod], &[], None, None)
+            .expect("write modules manifest");
+
+        let content = fs::read_to_string(modules_dir.join(MODULES_MANIFEST_FILE_NAME))
+            .expect("read manifest");
+        let raw: serde_json::Value = serde_json::from_str(&content).expect("parse JSON");
+        let vsd = raw["virtualStoreDir"].as_str().expect("virtualStoreDir field");
+
+        // On Unix the virtualStoreDir must be a relative path (e.g. ".pnpm")
+        assert!(
+            !PathBuf::from(vsd).is_absolute(),
+            "virtualStoreDir should be relative on Unix, got: {vsd}"
+        );
+        assert_eq!(vsd, ".pnpm");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn virtual_store_dir_is_absolute_on_windows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let mut config = Npmrc::new();
+        config.store_dir = StoreDir::new(dir.path().join("store"));
+        config.virtual_store_dir = modules_dir.join(".pnpm");
+
+        write_modules_manifest(&modules_dir, &config, &[DependencyGroup::Prod], &[], None, None)
+            .expect("write modules manifest");
+
+        let content = fs::read_to_string(modules_dir.join(MODULES_MANIFEST_FILE_NAME))
+            .expect("read manifest");
+        let raw: serde_json::Value = serde_json::from_str(&content).expect("parse JSON");
+        let vsd = raw["virtualStoreDir"].as_str().expect("virtualStoreDir field");
+
+        // On Windows the virtualStoreDir must be an absolute path
+        assert!(
+            PathBuf::from(vsd).is_absolute(),
+            "virtualStoreDir should be absolute on Windows, got: {vsd}"
+        );
+        // Must NOT contain the \\?\ verbatim prefix
+        assert!(
+            !vsd.starts_with(r"\\?\"),
+            "virtualStoreDir should not have \\\\?\\ prefix on Windows, got: {vsd}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn virtual_store_dir_without_verbatim_prefix_on_windows() {
+        use super::normalize_windows_verbatim_path;
+
+        // Standard verbatim path
+        let result = normalize_windows_verbatim_path(r"\\?\C:\Users\test\.pnpm");
+        assert_eq!(result, r"C:\Users\test\.pnpm");
+
+        // UNC verbatim path
+        let unc_result = normalize_windows_verbatim_path(r"\\?\UNC\server\share\path");
+        assert_eq!(unc_result, r"\\server\share\path");
+
+        // Path without prefix should be unchanged
+        let normal = normalize_windows_verbatim_path(r"C:\Users\test\.pnpm");
+        assert_eq!(normal, r"C:\Users\test\.pnpm");
+    }
+
+    #[test]
+    fn normalize_windows_verbatim_path_strips_prefix() {
+        use super::normalize_windows_verbatim_path;
+
+        // Standard \\?\ prefix
+        assert_eq!(
+            normalize_windows_verbatim_path(r"\\?\C:\Users\test\store\v10"),
+            r"C:\Users\test\store\v10"
+        );
+
+        // UNC prefix \\?\UNC\ -> \\
+        assert_eq!(normalize_windows_verbatim_path(r"\\?\UNC\server\share"), r"\\server\share");
+
+        // No prefix -> unchanged
+        assert_eq!(normalize_windows_verbatim_path("/home/user/store/v10"), "/home/user/store/v10");
+
+        // Empty string -> unchanged
+        assert_eq!(normalize_windows_verbatim_path(""), "");
+    }
+
+    #[test]
+    fn store_dir_gets_normalized() {
+        use super::canonical_store_dir_for_config;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_path = dir.path().join("store");
+        fs::create_dir_all(store_path.join("v10")).expect("create store/v10");
+
+        let mut config = Npmrc::new();
+        config.store_dir = StoreDir::new(&store_path);
+
+        let result = canonical_store_dir_for_config(&config);
+
+        // The result should end with store/v10
+        assert!(
+            result.ends_with("store/v10") || result.ends_with(r"store\v10"),
+            "store dir should end with store/v10, got: {result}"
+        );
+
+        // Should not contain \\?\ prefix (relevant on Windows, always true on Unix)
+        assert!(
+            !result.starts_with(r"\\?\"),
+            "store dir should not have \\\\?\\ prefix, got: {result}"
+        );
+    }
+
+    #[test]
+    fn default_virtual_store_dir_max_length_platform_specific() {
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                super::DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH,
+                60,
+                "DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH should be 60 on Windows"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                super::DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH,
+                120,
+                "DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH should be 120 on Unix"
+            );
+        }
+
+        // Also verify it is populated after reading a manifest without the field
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join(MODULES_MANIFEST_FILE_NAME), "layoutVersion: 5\n")
+            .expect("write manifest");
+        let manifest = read_modules_manifest(dir.path()).expect("read modules manifest");
+        assert_eq!(
+            manifest.virtual_store_dir_max_length(),
+            super::DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH
+        );
+    }
+
+    #[test]
+    fn read_backwards_compatible_manifest_shamefully_hoist_true() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Manually write a JSON manifest with shamefullyHoist: true and no publicHoistPattern.
+        // This simulates an older pnpm manifest format.
+        let manifest_json = serde_json::json!({
+            "shamefullyHoist": true,
+            "layoutVersion": 5,
+            "nodeLinker": "isolated",
+            "virtualStoreDir": ".pnpm"
+        });
+        fs::write(
+            dir.path().join(MODULES_MANIFEST_FILE_NAME),
+            serde_json::to_string_pretty(&manifest_json).expect("serialize"),
+        )
+        .expect("write manifest");
+
+        let manifest = read_modules_manifest(dir.path()).expect("read modules manifest");
+
+        // When shamefullyHoist is true and publicHoistPattern is missing,
+        // read_modules_manifest should default publicHoistPattern to ["*"]
+        assert_eq!(manifest.shamefully_hoist, Some(true));
+        assert_eq!(
+            manifest.public_hoist_pattern(),
+            Some(vec!["*".to_string()].as_slice()),
+            "shamefullyHoist=true should set publicHoistPattern to [\"*\"]"
+        );
+    }
+
+    #[test]
+    fn read_backwards_compatible_manifest_shamefully_hoist_false() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Manually write a JSON manifest with shamefullyHoist: false and no publicHoistPattern.
+        let manifest_json = serde_json::json!({
+            "shamefullyHoist": false,
+            "layoutVersion": 5,
+            "nodeLinker": "isolated",
+            "virtualStoreDir": ".pnpm"
+        });
+        fs::write(
+            dir.path().join(MODULES_MANIFEST_FILE_NAME),
+            serde_json::to_string_pretty(&manifest_json).expect("serialize"),
+        )
+        .expect("write manifest");
+
+        let manifest = read_modules_manifest(dir.path()).expect("read modules manifest");
+
+        // When shamefullyHoist is false and publicHoistPattern is missing,
+        // read_modules_manifest should default publicHoistPattern to []
+        assert_eq!(manifest.shamefully_hoist, Some(false));
+        assert_eq!(
+            manifest.public_hoist_pattern(),
+            Some(Vec::<String>::new().as_slice()),
+            "shamefullyHoist=false should set publicHoistPattern to []"
+        );
+    }
+
+    #[test]
+    fn read_backwards_compatible_shamefully_hoist_with_existing_public_hoist_pattern() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // When publicHoistPattern is already set, shamefullyHoist should NOT override it
+        let manifest_json = serde_json::json!({
+            "shamefullyHoist": true,
+            "publicHoistPattern": ["@types/*"],
+            "layoutVersion": 5,
+            "virtualStoreDir": ".pnpm"
+        });
+        fs::write(
+            dir.path().join(MODULES_MANIFEST_FILE_NAME),
+            serde_json::to_string_pretty(&manifest_json).expect("serialize"),
+        )
+        .expect("write manifest");
+
+        let manifest = read_modules_manifest(dir.path()).expect("read modules manifest");
+
+        // publicHoistPattern should remain as explicitly set, not overridden by shamefullyHoist
+        assert_eq!(manifest.shamefully_hoist, Some(true));
+        assert_eq!(
+            manifest.public_hoist_pattern(),
+            Some(vec!["@types/*".to_string()].as_slice()),
+            "existing publicHoistPattern should not be overridden by shamefullyHoist"
+        );
+    }
+
+    #[test]
+    fn hoisted_dependencies_written_correctly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let mut config = Npmrc::new();
+        config.store_dir = StoreDir::new(dir.path().join("store"));
+        config.virtual_store_dir = modules_dir.join(".pnpm");
+        config.hoist = true;
+        config.hoist_pattern = vec!["*".to_string()];
+
+        // Create packages that should be hoisted
+        let dep_path_a: DependencyPath = "/lodash@4.17.21".parse().expect("dep path");
+        let dep_path_b: DependencyPath = "/@babel/core@7.23.0".parse().expect("dep path");
+        let packages =
+            HashMap::from([(dep_path_a, dummy_snapshot()), (dep_path_b, dummy_snapshot())]);
+
+        write_modules_manifest(
+            &modules_dir,
+            &config,
+            &[DependencyGroup::Prod],
+            &[],
+            Some(&packages),
+            None,
+        )
+        .expect("write modules manifest");
+
+        let content = fs::read_to_string(modules_dir.join(MODULES_MANIFEST_FILE_NAME))
+            .expect("read manifest");
+        let raw: serde_json::Value = serde_json::from_str(&content).expect("parse JSON");
+
+        let hoisted = raw.get("hoistedDependencies").expect("hoistedDependencies field");
+        assert!(hoisted.is_object(), "hoistedDependencies should be an object");
+
+        // Check that hoisted keys do NOT have leading `/` (pnpm convention)
+        for key in hoisted.as_object().expect("object").keys() {
+            assert!(
+                !key.starts_with('/'),
+                "hoistedDependencies key should not have leading '/', got: {key}"
+            );
+        }
+
+        // Verify lodash is hoisted as private
+        let lodash_entry = hoisted.get("lodash@4.17.21");
+        assert!(lodash_entry.is_some(), "lodash@4.17.21 should be in hoistedDependencies");
+        let lodash_obj = lodash_entry.expect("lodash").as_object().expect("object");
+        assert_eq!(
+            lodash_obj.get("lodash").and_then(|v| v.as_str()),
+            Some("private"),
+            "lodash should be hoisted as private"
+        );
+
+        // Verify @babel/core is hoisted as private
+        let babel_entry = hoisted.get("@babel/core@7.23.0");
+        assert!(babel_entry.is_some(), "@babel/core@7.23.0 should be in hoistedDependencies");
+        let babel_obj = babel_entry.expect("babel").as_object().expect("object");
+        assert_eq!(
+            babel_obj.get("@babel/core").and_then(|v| v.as_str()),
+            Some("private"),
+            "@babel/core should be hoisted as private"
+        );
+    }
+
+    #[test]
+    fn hoisted_dependencies_excludes_direct_dependencies() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let mut config = Npmrc::new();
+        config.store_dir = StoreDir::new(dir.path().join("store"));
+        config.virtual_store_dir = modules_dir.join(".pnpm");
+        config.hoist = true;
+        config.hoist_pattern = vec!["*".to_string()];
+
+        let dep_path: DependencyPath = "/lodash@4.17.21".parse().expect("dep path");
+        let packages = HashMap::from([(dep_path, dummy_snapshot())]);
+
+        // lodash is a direct dependency, so it should NOT appear in hoistedDependencies
+        write_modules_manifest(
+            &modules_dir,
+            &config,
+            &[DependencyGroup::Prod],
+            &[],
+            Some(&packages),
+            Some(&["lodash".to_string()]),
+        )
+        .expect("write modules manifest");
+
+        let content = fs::read_to_string(modules_dir.join(MODULES_MANIFEST_FILE_NAME))
+            .expect("read manifest");
+        let raw: serde_json::Value = serde_json::from_str(&content).expect("parse JSON");
+
+        // hoistedDependencies should be absent or empty since the only package is a direct dep
+        match raw.get("hoistedDependencies") {
+            None => {} // OK, not written at all
+            Some(hoisted) => {
+                assert!(
+                    hoisted.as_object().map_or(true, |o| o.is_empty()),
+                    "hoistedDependencies should not contain direct dependencies"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn roundtrip_preserves_registries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let modules_dir = dir.path().join("node_modules");
+        let mut config = Npmrc::new();
+        config.store_dir = StoreDir::new(dir.path().join("store"));
+        config.virtual_store_dir = modules_dir.join(".pnpm");
+        config.registry = "https://custom.registry.example/".to_string();
+        config.set_raw_setting("@myorg:registry", "https://myorg.example");
+
+        write_modules_manifest(&modules_dir, &config, &[DependencyGroup::Prod], &[], None, None)
+            .expect("write modules manifest");
+
+        let manifest = read_modules_manifest(&modules_dir).expect("read modules manifest");
+        let registries = manifest.registries.expect("registries");
+        assert_eq!(
+            registries.get("default").map(String::as_str),
+            Some("https://custom.registry.example/")
+        );
+        assert!(registries.contains_key("@myorg"));
+        assert!(registries.contains_key("@jsr"));
+    }
+
+    #[test]
+    fn read_manifest_fills_pruned_at_when_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Write manifest without prunedAt
+        fs::write(
+            dir.path().join(MODULES_MANIFEST_FILE_NAME),
+            "layoutVersion: 5\nnodeLinker: isolated\n",
+        )
+        .expect("write manifest");
+
+        let manifest = read_modules_manifest(dir.path()).expect("read modules manifest");
+        assert!(
+            manifest.pruned_at.is_some(),
+            "prunedAt should be filled in when missing from manifest"
+        );
+    }
+
+    #[test]
+    fn read_manifest_fills_virtual_store_dir_max_length_when_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Write manifest without virtualStoreDirMaxLength
+        fs::write(dir.path().join(MODULES_MANIFEST_FILE_NAME), "layoutVersion: 5\n")
+            .expect("write manifest");
+
+        let manifest = read_modules_manifest(dir.path()).expect("read modules manifest");
+        assert_eq!(
+            manifest.virtual_store_dir_max_length,
+            Some(super::DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH),
+            "virtualStoreDirMaxLength should be filled in with platform default when missing"
+        );
+    }
 }
