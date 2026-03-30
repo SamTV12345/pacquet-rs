@@ -1,0 +1,3 @@
+[default.extend-words]
+# SHA256 hash fragments that appear in test expectations for dep_path_to_filename
+ba = "ba"
