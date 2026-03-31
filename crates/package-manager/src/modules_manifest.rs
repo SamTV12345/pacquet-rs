@@ -421,6 +421,16 @@ impl ModulesManifest {
         self.store_dir.as_deref()
     }
 
+    /// Parse `prunedAt` as a `SystemTime`, if present and valid.
+    pub(crate) fn pruned_at(&self) -> Option<SystemTime> {
+        let pruned_at = self.pruned_at.as_deref()?;
+        pruned_at
+            .parse::<u64>()
+            .ok()
+            .map(|secs| UNIX_EPOCH + Duration::from_secs(secs))
+            .or_else(|| parse_http_date(pruned_at).ok())
+    }
+
     pub(crate) fn included(&self) -> Option<&IncludedDependencies> {
         self.included.as_ref()
     }

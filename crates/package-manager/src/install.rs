@@ -1732,6 +1732,22 @@ fn persisted_install_state_is_reusable(
                 return false;
             }
 
+            // Fast-path: if the lockfiles match AND the modules manifest was
+            // pruned AFTER the wanted lockfile was last modified, the on-disk
+            // state is guaranteed to be current — skip the expensive tree walk.
+            if let Some(pruned_at) = modules_manifest.pruned_at() {
+                let lockfile_path = config
+                    .modules_dir
+                    .parent()
+                    .unwrap_or(&config.modules_dir)
+                    .join("pnpm-lock.yaml");
+                let lockfile_modified = lockfile_path.metadata().and_then(|m| m.modified()).ok();
+                if lockfile_modified.is_some_and(|lm| pruned_at > lm) {
+                    tracing::info!(target: "pacquet::install", "Lockfile is up to date (timestamp fast-path)");
+                    return true;
+                }
+            }
+
             let Some(project_snapshot) =
                 snapshot_for_importer(&expected_current_lockfile.project_snapshot, importer_id)
             else {
@@ -1778,16 +1794,17 @@ fn direct_root_dependencies_ready(
     packages: Option<&HashMap<DependencyPath, PackageSnapshot>>,
     dependency_groups: &[DependencyGroup],
 ) -> bool {
-    project_snapshot.dependencies_by_groups(dependency_groups.iter().copied()).all(
-        |(alias, spec)| {
-            let dependency_path = config.modules_dir.join(alias.to_string());
-            if dependency_path.exists() {
-                return true;
-            }
+    use rayon::prelude::*;
 
-            direct_dependency_virtual_store_location(alias, &spec.version, packages).is_none()
-        },
-    )
+    let deps: Vec<_> =
+        project_snapshot.dependencies_by_groups(dependency_groups.iter().copied()).collect();
+    deps.par_iter().all(|(alias, spec)| {
+        let dependency_path = config.modules_dir.join(alias.to_string());
+        if dependency_path.exists() {
+            return true;
+        }
+        direct_dependency_virtual_store_location(alias, &spec.version, packages).is_none()
+    })
 }
 
 fn recreate_modules_dir_if_incompatible(

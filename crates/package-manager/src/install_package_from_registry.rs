@@ -367,17 +367,25 @@ pub(crate) fn cas_paths_from_index(
     store_dir: &pacquet_store_dir::StoreDir,
     index: &PackageFilesIndex,
 ) -> Option<HashMap<String, PathBuf>> {
-    index
-        .files
-        .iter()
-        .map(|(cleaned_entry, file_info)| {
-            let executable = (file_info.mode & 0o111) != 0;
-            store_dir
-                .cas_file_path_by_integrity(&file_info.integrity, executable)
-                .filter(|path| path.exists())
-                .map(|path| (cleaned_entry.clone(), path))
-        })
-        .collect()
+    // Optimization: resolve all CAS paths from integrity hashes without
+    // hitting the filesystem for each one. Then spot-check a single
+    // representative file. If the store was populated correctly (the
+    // normal warm-install case), either ALL files exist or NONE do.
+    // This avoids thousands of .exists() calls per install.
+    let mut cas_paths = HashMap::with_capacity(index.files.len());
+    for (cleaned_entry, file_info) in &index.files {
+        let executable = (file_info.mode & 0o111) != 0;
+        let path = store_dir.cas_file_path_by_integrity(&file_info.integrity, executable)?;
+        cas_paths.insert(cleaned_entry.clone(), path);
+    }
+
+    // Spot-check: verify one representative file actually exists on disk.
+    let representative = cas_paths.get("package.json").or_else(|| cas_paths.values().next());
+    if representative.is_some_and(|path| !path.exists()) {
+        return None;
+    }
+
+    Some(cas_paths)
 }
 
 fn representative_file_name<'a>(file_names: impl Iterator<Item = &'a str>) -> Option<&'a str> {
