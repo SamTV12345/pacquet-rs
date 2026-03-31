@@ -230,10 +230,14 @@ impl<'a> DownloadTarballToStore<'a> {
     ) -> Result<Arc<HashMap<String, PathBuf>>, TarballError> {
         let &DownloadTarballToStore { package_url, .. } = &self;
         loop {
-            // QUESTION: I see no copying from existing store_dir, is there such mechanism?
-            // TODO: If it's not implemented yet, implement it
-            if let Some(cache_lock) = mem_cache.get(package_url) {
-                let notify = match &*cache_lock.write().await {
+            // Clone the Arc out of DashMap and DROP the Ref guard immediately.
+            // Holding DashMap's Ref across .await points causes shard-lock
+            // deadlocks when other tasks try to insert into the same shard.
+            let existing = mem_cache.get(package_url).map(|r| Arc::clone(&r));
+
+            if let Some(cache_lock) = existing {
+                // Use read lock (not write) — we only inspect the value.
+                let notify = match &*cache_lock.read().await {
                     CacheValue::Available(cas_paths) => {
                         return Ok(Arc::clone(cas_paths));
                     }
@@ -241,12 +245,26 @@ impl<'a> DownloadTarballToStore<'a> {
                 };
 
                 tracing::info!(target: "pacquet::download", ?package_url, "Wait for cache");
-                notify.notified().await;
+                // Register the notified future BEFORE awaiting so we never
+                // miss a notify_waiters() call (lost-wakeup prevention).
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                // Check once more before sleeping — the producer may have
+                // finished between our read() above and this point.
+                match &*cache_lock.read().await {
+                    CacheValue::Available(cas_paths) => {
+                        return Ok(Arc::clone(cas_paths));
+                    }
+                    CacheValue::InProgress(_) => {}
+                }
+                notified.await;
+                // After waking, re-check the value.
                 match &*cache_lock.read().await {
                     CacheValue::Available(cas_paths) => {
                         return Ok(Arc::clone(cas_paths));
                     }
                     CacheValue::InProgress(_) => {
+                        // Producer failed and removed the entry; retry.
                         mem_cache.remove(package_url);
                         continue;
                     }

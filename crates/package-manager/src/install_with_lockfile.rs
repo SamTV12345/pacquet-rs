@@ -797,6 +797,20 @@ where
         prefer_offline: bool,
         offline: bool,
     ) -> miette::Result<ResolvedPackage> {
+        // Dedup: if this local package path was already processed, return
+        // immediately to prevent infinite recursion in monorepos with circular
+        // workspace dependencies (A depends on B, B depends on A).
+        // This mirrors the `resolved_packages.insert()` check in
+        // `resolve_and_snapshot_package` (line 502).
+        let dedup_key = local_dep_path.display().to_string();
+        if !resolved_packages.insert(dedup_key) {
+            let version = ResolvedDependencyVersion::Link(format!(
+                "link:{}",
+                to_relative_path(lockfile_dir, local_dep_path).replace('\\', "/")
+            ));
+            return Ok(ResolvedPackage::new(version));
+        }
+
         let local_manifest = PackageManifest::from_path(local_dep_path.join("package.json")).ok();
         let local_manifest_value = local_manifest.as_ref().and_then(|manifest| {
             crate::apply_read_package_hook_to_manifest(
