@@ -1,3 +1,18 @@
+[build]
+# Use all available cores for crate-level parallelism
+jobs = 16
+
+[profile.dev]
+# More codegen units = more parallel LLVM work within each crate
+codegen-units = 256
+# Skip debug info for dependencies (massive speedup, you still get it for your code)
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+codegen-units = 16
+lto = "thin"
+
 [alias]
 # Do not append `--` or it will break IDEs
 codecov = "llvm-cov nextest --workspace --ignore-filename-regex tasks"
