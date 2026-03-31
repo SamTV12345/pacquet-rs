@@ -125,6 +125,17 @@ pub(crate) fn satisfies_package_manifest(
     strict_specifier_match: bool,
 ) -> Result<(), String> {
     let mut manifest = extract_manifest(manifest);
+    // Resolve catalog: specifiers so they compare correctly against lockfile entries.
+    // Use the manifest's parent directory to find pnpm-workspace.yaml by walking up.
+    let catalogs = crate::load_catalogs_from_workspace(&find_workspace_root_from_manifest_dir(
+        manifest.manifest_dir.as_deref(),
+    ));
+    if !catalogs.is_empty() {
+        resolve_catalog_specs_in_map(&mut manifest.dependencies, &catalogs);
+        resolve_catalog_specs_in_map(&mut manifest.dev_dependencies, &catalogs);
+        resolve_catalog_specs_in_map(&mut manifest.optional_dependencies, &catalogs);
+        resolve_catalog_specs_in_map(&mut manifest.peer_dependencies, &catalogs);
+    }
     let importer_dep_names = project_snapshot
         .dependencies
         .iter()
@@ -364,6 +375,7 @@ struct ManifestSnapshot {
     peer_dependencies: HashMap<String, String>,
     dependencies_meta: JsonValue,
     publish_directory: Option<String>,
+    manifest_dir: Option<PathBuf>,
 }
 
 fn extract_manifest(manifest: &PackageManifest) -> ManifestSnapshot {
@@ -383,6 +395,33 @@ fn extract_manifest(manifest: &PackageManifest) -> ManifestSnapshot {
         peer_dependencies: json_string_map(value.get("peerDependencies")),
         dependencies_meta,
         publish_directory,
+        manifest_dir: manifest.path().parent().map(Path::to_path_buf),
+    }
+}
+
+fn resolve_catalog_specs_in_map(
+    map: &mut HashMap<String, String>,
+    catalogs: &HashMap<String, HashMap<String, String>>,
+) {
+    for (name, spec) in map.iter_mut() {
+        if spec.starts_with("catalog:")
+            && let Ok(resolved) = crate::resolve_catalog_specifier(spec, name, catalogs) {
+                *spec = resolved;
+            }
+    }
+}
+
+fn find_workspace_root_from_manifest_dir(manifest_dir: Option<&Path>) -> PathBuf {
+    let Some(mut dir) = manifest_dir.map(Path::to_path_buf) else {
+        return PathBuf::from(".");
+    };
+    loop {
+        if dir.join("pnpm-workspace.yaml").is_file() {
+            return dir;
+        }
+        if !dir.pop() {
+            return manifest_dir.unwrap_or(Path::new(".")).to_path_buf();
+        }
     }
 }
 
