@@ -302,15 +302,17 @@ where
                     return false;
                 }
                 let strict = lockfile.lockfile_version.major >= 9;
+                let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
                 let lockfile_is_reusable = match &lockfile.project_snapshot {
                     // Non-workspace (single importer) path – unchanged behaviour.
                     RootProjectSnapshot::Single(project_snapshot) => {
-                        satisfies_package_manifest(
+                        satisfies_package_manifest_with_catalogs(
                             project_snapshot,
                             manifest,
                             config.auto_install_peers,
                             config.exclude_links_from_lockfile,
                             strict,
+                            &catalogs,
                         )
                         .is_ok()
                             && direct_workspace_links_match_current_config(
@@ -489,14 +491,16 @@ where
                     }
                 };
 
+                let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
                 let lockfile_is_reusable = maybe_project_snapshot.is_some_and(|project_snapshot| {
                     get_outdated_lockfile_setting(lockfile, &runtime_lockfile_config).is_none()
-                        && satisfies_package_manifest(
+                        && satisfies_package_manifest_with_catalogs(
                             project_snapshot,
                             manifest,
                             config.auto_install_peers,
                             config.exclude_links_from_lockfile,
                             lockfile.lockfile_version.major >= 9,
+                            &catalogs,
                         )
                         .is_ok()
                         && direct_workspace_links_match_current_config(
