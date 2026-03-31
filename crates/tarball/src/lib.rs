@@ -183,25 +183,26 @@ impl<'a> DownloadTarballToStore<'a> {
         const MAX_ATTEMPTS: u32 = 4;
         let mut attempt = 1_u32;
         loop {
-            // The body read MUST happen inside the semaphore permit scope.
-            // If we release the permit after send() but before bytes(),
-            // the HTTP connection stays open in the pool while a new task
-            // grabs the permit and tries to open another connection.
-            // When the pool is exhausted, new send() calls block waiting
-            // for a free connection, but connections only free after bytes()
-            // completes — classic deadlock.
-            let result = http_client
-                .run_with_permit_for_url(package_url, |client| {
-                    let mut request = client.get(package_url);
-                    if let Some(auth_header) = auth_header {
-                        request = request.header("authorization", auth_header);
-                    }
-                    async {
-                        let response = request.send().await?.error_for_status()?;
-                        response.bytes().await.map(|bytes| bytes.to_vec())
-                    }
-                })
-                .await;
+            // Release the semaphore permit after send() — do NOT hold it
+            // during bytes(). The recursive dependency resolution in
+            // install_with_lockfile acquires permits at multiple tree depths
+            // simultaneously. If bytes() holds a permit, the 16 permits get
+            // exhausted by parent-level tasks whose children also need
+            // permits — classic recursive semaphore deadlock.
+            let result = async {
+                let response = http_client
+                    .run_with_permit_for_url(package_url, |client| {
+                        let mut request = client.get(package_url);
+                        if let Some(auth_header) = auth_header {
+                            request = request.header("authorization", auth_header);
+                        }
+                        request.send()
+                    })
+                    .await?
+                    .error_for_status()?;
+                response.bytes().await.map(|bytes| bytes.to_vec())
+            }
+            .await;
 
             match result {
                 Ok(body) => return Ok(body),

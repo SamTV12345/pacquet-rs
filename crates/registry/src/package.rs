@@ -35,11 +35,12 @@ impl Package {
     ) -> Result<Self, RegistryError> {
         let url = || format!("{registry}{name}"); // TODO: use reqwest URL directly
         let network_error = |error| NetworkError { error, url: url() };
-        // Both send() AND bytes() must happen inside the semaphore permit.
-        // If bytes() runs outside, the HTTP connection stays open in the
-        // connection pool and new send() calls block waiting for a free
-        // connection — deadlock.
-        let body = http_client
+        // The semaphore permit is released after send() so that the
+        // limited permits are not held during the (potentially slow) body
+        // read.  Holding the permit during bytes() causes deadlocks when
+        // recursive dependency resolution needs permits on multiple levels
+        // simultaneously.
+        http_client
             .run_with_permit_for_url(&url(), |client| {
                 let mut request = client.get(url()).header(
                     "accept",
@@ -49,14 +50,14 @@ impl Package {
                 if let Some(auth_header) = auth_header {
                     request = request.header("authorization", auth_header);
                 }
-                async {
-                    let response = request.send().await?.error_for_status()?;
-                    response.bytes().await
-                }
+                request.send()
             })
             .await
-            .map_err(network_error)?;
-        body.pipe(|body| serde_json::from_slice::<Package>(&body))
+            .map_err(network_error)?
+            .bytes()
+            .await
+            .map_err(network_error)?
+            .pipe(|body| serde_json::from_slice::<Package>(&body))
             .map_err(|error| RegistryError::Serialization(error.to_string()))
     }
 

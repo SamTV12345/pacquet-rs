@@ -86,7 +86,7 @@ impl PackageVersion {
         let url = || format!("{registry}{name}/{tag}");
         let network_error = |error| NetworkError { error, url: url() };
 
-        let body = http_client
+        http_client
             .run_with_permit_for_url(&url(), |client| {
                 let mut request = client.get(url()).header(
                     "accept",
@@ -96,14 +96,14 @@ impl PackageVersion {
                 if let Some(auth_header) = auth_header {
                     request = request.header("authorization", auth_header);
                 }
-                async {
-                    let response = request.send().await?.error_for_status()?;
-                    response.bytes().await
-                }
+                request.send()
             })
             .await
-            .map_err(network_error)?;
-        body.pipe(|body| serde_json::from_slice::<PackageVersion>(&body))
+            .map_err(network_error)?
+            .bytes()
+            .await
+            .map_err(network_error)?
+            .pipe(|body| serde_json::from_slice::<PackageVersion>(&body))
             .map_err(|error| RegistryError::Serialization(error.to_string()))
     }
 
