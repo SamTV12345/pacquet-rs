@@ -28,6 +28,8 @@ pub(crate) struct ModulesManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     hoisted_dependencies: Option<BTreeMap<String, BTreeMap<String, String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    hoisted_locations: Option<BTreeMap<String, Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     injected_deps: Option<BTreeMap<String, Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     layout_version: Option<u8>,
@@ -112,6 +114,7 @@ pub fn write_modules_manifest(
     let manifest = ModulesManifest {
         hoist_pattern: (!config.hoist_pattern.is_empty()).then(|| config.hoist_pattern.clone()),
         hoisted_dependencies: hoisted_dependencies(config, packages, direct_dependency_names),
+        hoisted_locations: None,
         injected_deps: Some(BTreeMap::new()),
         layout_version: Some(5),
         node_linker: Some(
@@ -168,7 +171,8 @@ fn detect_pnpm_version() -> Option<String> {
 
 pub(crate) fn canonical_store_dir_for_config(config: &Npmrc) -> String {
     let path = PathBuf::from(config.store_dir.display().to_string()).join("v10");
-    normalize_windows_verbatim_path(&fs::canonicalize(&path).unwrap_or(path).display().to_string())
+    // pnpm writes storeDir as-is (no canonicalization). Only strip \\?\ on Windows for safety.
+    normalize_windows_verbatim_path(&path.display().to_string())
 }
 
 fn normalize_windows_verbatim_path(path: &str) -> String {
@@ -401,6 +405,10 @@ pub(crate) fn included_dependencies(dependency_groups: &[DependencyGroup]) -> In
 }
 
 impl ModulesManifest {
+    pub(crate) fn layout_version(&self) -> Option<u8> {
+        self.layout_version
+    }
+
     pub(crate) fn hoist_pattern(&self) -> Option<&[String]> {
         self.hoist_pattern.as_deref()
     }

@@ -50,6 +50,8 @@ pub struct LockfileSettings {
     pub peers_suffix_max_length: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inject_workspace_packages: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dedupe_peers: Option<bool>,
 }
 
 /// Internal lockfile representation used by Pacquet.

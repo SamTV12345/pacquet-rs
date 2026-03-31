@@ -79,6 +79,85 @@ pub(crate) fn dependencies_from_manifest_value_grouped(
         .collect()
 }
 
+/// Validate that a resolved catalog entry does not contain banned specifier
+/// types. Returns `Err` with a descriptive message if the entry is invalid.
+fn validate_catalog_entry(
+    resolved: &str,
+    package_name: &str,
+    catalog_name: &str,
+) -> Result<(), String> {
+    if resolved.starts_with("catalog:") {
+        return Err(format!(
+            "Recursive catalog reference in catalog '{catalog_name}' for package '{package_name}'"
+        ));
+    }
+    if resolved.starts_with("workspace:") {
+        return Err(format!(
+            "workspace: specifiers are not allowed in catalogs (catalog '{catalog_name}', package '{package_name}')"
+        ));
+    }
+    if resolved.starts_with("link:") || resolved.starts_with("file:") {
+        return Err(format!(
+            "link: and file: specifiers are not allowed in catalogs (catalog '{catalog_name}', package '{package_name}')"
+        ));
+    }
+    Ok(())
+}
+
+/// Parse the `catalog:` specifier to extract the catalog name.
+///
+/// Formats:
+/// - `catalog:` or `catalog:default` → `"default"`
+/// - `catalog:<name>` → `<name>`
+///
+/// Returns `None` if `spec` is not a catalog specifier.
+fn parse_catalog_specifier(spec: &str) -> Option<&str> {
+    let remainder = spec.strip_prefix("catalog:")?;
+    Some(if remainder.is_empty() || remainder == "default" { "default" } else { remainder })
+}
+
+/// Try to resolve a `catalog:` specifier from the lockfile's `catalogs` section.
+///
+/// The lockfile catalogs section format is:
+/// ```yaml
+/// catalogs:
+///   default:
+///     react:
+///       specifier: ^18.0.0
+///       version: 18.3.1
+/// ```
+///
+/// Returns `Some(pinned_version)` if found, `None` otherwise.
+pub(crate) fn resolve_catalog_from_lockfile(
+    spec: &str,
+    package_name: &str,
+    lockfile: &Lockfile,
+) -> Result<Option<String>, String> {
+    let catalog_name = match parse_catalog_specifier(spec) {
+        Some(name) => name,
+        None => return Ok(None),
+    };
+
+    let catalogs_value = match &lockfile.catalogs {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+
+    let version = catalogs_value
+        .get(catalog_name)
+        .and_then(|catalog| catalog.get(package_name))
+        .and_then(|entry| entry.get("version"))
+        .and_then(|v| v.as_str());
+
+    match version {
+        Some(v) => {
+            validate_catalog_entry(v, package_name, catalog_name)?;
+            Ok(Some(v.to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Resolve a `catalog:` specifier to the actual version range from the
 /// workspace catalogs. Returns the input unchanged if not a catalog specifier.
 ///
@@ -90,19 +169,18 @@ pub(crate) fn resolve_catalog_specifier(
     package_name: &str,
     catalogs: &HashMap<String, HashMap<String, String>>,
 ) -> Result<String, String> {
-    let remainder = match spec.strip_prefix("catalog:") {
-        Some(r) => r,
+    let catalog_name = match parse_catalog_specifier(spec) {
+        Some(name) => name,
         None => return Ok(spec.to_string()),
     };
 
-    let catalog_name =
-        if remainder.is_empty() || remainder == "default" { "default" } else { remainder };
+    let resolved =
+        catalogs.get(catalog_name).and_then(|catalog| catalog.get(package_name)).ok_or_else(
+            || format!("Missing version catalog: {catalog_name} on package {package_name}"),
+        )?;
 
-    catalogs
-        .get(catalog_name)
-        .and_then(|catalog| catalog.get(package_name))
-        .cloned()
-        .ok_or_else(|| format!("Missing version catalog: {catalog_name} on package {package_name}"))
+    validate_catalog_entry(resolved, package_name, catalog_name)?;
+    Ok(resolved.clone())
 }
 
 /// Load catalogs from `pnpm-workspace.yaml`.
@@ -500,5 +578,163 @@ module.exports = {
             pnpmfile_exports_value(&dir.path().join(".pnpmfile.cjs")).expect("inspect pnpmfile"),
             Some(false)
         );
+    }
+
+    #[test]
+    fn resolve_catalog_from_lockfile_returns_pinned_version() {
+        let mut lockfile = empty_lockfile();
+        lockfile.catalogs = Some(
+            serde_yaml::from_str(
+                r#"
+default:
+  react:
+    specifier: "^18.0.0"
+    version: "18.3.1"
+"#,
+            )
+            .unwrap(),
+        );
+
+        let result = resolve_catalog_from_lockfile("catalog:", "react", &lockfile);
+        assert_eq!(result, Ok(Some("18.3.1".to_string())));
+    }
+
+    #[test]
+    fn resolve_catalog_from_lockfile_returns_none_when_no_entry() {
+        let mut lockfile = empty_lockfile();
+        lockfile.catalogs = Some(
+            serde_yaml::from_str(
+                r#"
+default:
+  react:
+    specifier: "^18.0.0"
+    version: "18.3.1"
+"#,
+            )
+            .unwrap(),
+        );
+
+        let result = resolve_catalog_from_lockfile("catalog:", "vue", &lockfile);
+        assert_eq!(result, Ok(None));
+    }
+
+    #[test]
+    fn resolve_catalog_from_lockfile_named_catalog() {
+        let mut lockfile = empty_lockfile();
+        lockfile.catalogs = Some(
+            serde_yaml::from_str(
+                r#"
+legacy:
+  old-lib:
+    specifier: "~1.0.0"
+    version: "1.0.5"
+"#,
+            )
+            .unwrap(),
+        );
+
+        let result = resolve_catalog_from_lockfile("catalog:legacy", "old-lib", &lockfile);
+        assert_eq!(result, Ok(Some("1.0.5".to_string())));
+    }
+
+    #[test]
+    fn resolve_catalog_from_lockfile_returns_none_without_catalogs_section() {
+        let lockfile = empty_lockfile();
+        let result = resolve_catalog_from_lockfile("catalog:", "react", &lockfile);
+        assert_eq!(result, Ok(None));
+    }
+
+    #[test]
+    fn resolve_catalog_from_lockfile_rejects_recursive_catalog() {
+        let mut lockfile = empty_lockfile();
+        lockfile.catalogs = Some(
+            serde_yaml::from_str(
+                r#"
+default:
+  foo:
+    specifier: "catalog:other"
+    version: "catalog:other"
+"#,
+            )
+            .unwrap(),
+        );
+
+        let result = resolve_catalog_from_lockfile("catalog:", "foo", &lockfile);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Recursive catalog reference"));
+    }
+
+    #[test]
+    fn resolve_catalog_from_lockfile_rejects_workspace_specifier() {
+        let mut lockfile = empty_lockfile();
+        lockfile.catalogs = Some(
+            serde_yaml::from_str(
+                r#"
+default:
+  foo:
+    specifier: "workspace:*"
+    version: "workspace:*"
+"#,
+            )
+            .unwrap(),
+        );
+
+        let result = resolve_catalog_from_lockfile("catalog:", "foo", &lockfile);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("workspace:"));
+    }
+
+    #[test]
+    fn resolve_catalog_from_lockfile_rejects_link_specifier() {
+        let mut lockfile = empty_lockfile();
+        lockfile.catalogs = Some(
+            serde_yaml::from_str(
+                r#"
+default:
+  foo:
+    specifier: "link:../foo"
+    version: "link:../foo"
+"#,
+            )
+            .unwrap(),
+        );
+
+        let result = resolve_catalog_from_lockfile("catalog:", "foo", &lockfile);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("link: and file:"));
+    }
+
+    #[test]
+    fn resolve_catalog_from_lockfile_rejects_file_specifier() {
+        let mut lockfile = empty_lockfile();
+        lockfile.catalogs = Some(
+            serde_yaml::from_str(
+                r#"
+default:
+  foo:
+    specifier: "file:../foo"
+    version: "file:../foo"
+"#,
+            )
+            .unwrap(),
+        );
+
+        let result = resolve_catalog_from_lockfile("catalog:", "foo", &lockfile);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("link: and file:"));
+    }
+
+    #[test]
+    fn validate_catalog_entry_accepts_normal_version() {
+        assert!(validate_catalog_entry("18.3.1", "react", "default").is_ok());
+        assert!(validate_catalog_entry("^18.0.0", "react", "default").is_ok());
+    }
+
+    #[test]
+    fn validate_catalog_entry_rejects_banned_specifiers() {
+        assert!(validate_catalog_entry("catalog:other", "foo", "default").is_err());
+        assert!(validate_catalog_entry("workspace:*", "foo", "default").is_err());
+        assert!(validate_catalog_entry("link:../bar", "foo", "default").is_err());
+        assert!(validate_catalog_entry("file:../bar", "foo", "default").is_err());
     }
 }

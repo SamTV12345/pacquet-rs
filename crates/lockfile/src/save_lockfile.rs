@@ -151,6 +151,7 @@ mod tests {
             exclude_links_from_lockfile: Some(false),
             peers_suffix_max_length: Some(1000),
             inject_workspace_packages: None,
+            dedupe_peers: None,
         };
         let lockfile = Lockfile {
             lockfile_version: ComVer::new(9, 0),

@@ -19,6 +19,7 @@ pub(crate) struct RuntimeLockfileConfig {
     pub overrides: Option<HashMap<String, String>>,
     pub package_extensions_checksum: Option<String>,
     pub pnpmfile_checksum: Option<String>,
+    pub ignored_optional_dependencies: Option<Vec<String>>,
 }
 
 pub(crate) fn collect_runtime_lockfile_config(
@@ -41,12 +42,16 @@ pub(crate) fn collect_runtime_lockfile_config(
         extract_package_extensions_from_workspace(workspace_manifest.as_ref()),
     );
 
+    let ignored_optional_dependencies =
+        extract_ignored_optional_dependencies(workspace_manifest.as_ref());
+
     RuntimeLockfileConfig {
         settings: LockfileSettings {
             auto_install_peers: Some(config.auto_install_peers),
             exclude_links_from_lockfile: Some(config.exclude_links_from_lockfile),
             peers_suffix_max_length: Some(config.peers_suffix_max_length),
             inject_workspace_packages: Some(config.inject_workspace_packages),
+            dedupe_peers: Some(false),
         },
         catalogs: extract_catalogs(workspace_manifest.as_ref()),
         overrides,
@@ -54,6 +59,7 @@ pub(crate) fn collect_runtime_lockfile_config(
         pnpmfile_checksum: (!ignore_pnpmfile)
             .then(|| calculate_pnpmfile_checksum(lockfile_dir, pnpmfile))
             .flatten(),
+        ignored_optional_dependencies,
     }
 }
 
@@ -114,6 +120,16 @@ pub(crate) fn get_outdated_lockfile_setting(
         return Some("settings.injectWorkspacePackages");
     }
 
+    let lockfile_dedupe_peers =
+        lockfile.settings.as_ref().and_then(|settings| settings.dedupe_peers).unwrap_or(false);
+    if lockfile_dedupe_peers != runtime.settings.dedupe_peers.unwrap_or(false) {
+        return Some("settings.dedupePeers");
+    }
+
+    if lockfile.ignored_optional_dependencies != runtime.ignored_optional_dependencies {
+        return Some("ignoredOptionalDependencies");
+    }
+
     None
 }
 
@@ -124,27 +140,36 @@ pub(crate) fn satisfies_package_manifest(
     exclude_links_from_lockfile: bool,
     strict_specifier_match: bool,
 ) -> Result<(), String> {
-    let mut manifest = extract_manifest(manifest);
-    // Resolve catalog: specifiers so they compare correctly against lockfile entries.
-    // Use the manifest's parent directory to find pnpm-workspace.yaml by walking up.
     let catalogs = crate::load_catalogs_from_workspace(&find_workspace_root_from_manifest_dir(
-        manifest.manifest_dir.as_deref(),
+        manifest.path().parent(),
     ));
-    if !catalogs.is_empty() {
-        resolve_catalog_specs_in_map(&mut manifest.dependencies, &catalogs);
-        resolve_catalog_specs_in_map(&mut manifest.dev_dependencies, &catalogs);
-        resolve_catalog_specs_in_map(&mut manifest.optional_dependencies, &catalogs);
-        resolve_catalog_specs_in_map(&mut manifest.peer_dependencies, &catalogs);
-    }
-    let importer_dep_names = project_snapshot
-        .dependencies
-        .iter()
-        .chain(project_snapshot.optional_dependencies.iter())
-        .chain(project_snapshot.dev_dependencies.iter())
-        .flat_map(|map| map.keys().map(ToString::to_string))
-        .chain(project_snapshot.specifiers.iter().flat_map(|map| map.keys().cloned()))
-        .collect::<std::collections::HashSet<_>>();
+    satisfies_package_manifest_with_catalogs(
+        project_snapshot,
+        manifest,
+        auto_install_peers,
+        exclude_links_from_lockfile,
+        strict_specifier_match,
+        &catalogs,
+    )
+}
 
+/// Like [`satisfies_package_manifest`] but accepts pre-loaded catalogs so callers
+/// that check multiple importers can avoid redundant I/O.
+pub(crate) fn satisfies_package_manifest_with_catalogs(
+    project_snapshot: &ProjectSnapshot,
+    manifest: &PackageManifest,
+    auto_install_peers: bool,
+    exclude_links_from_lockfile: bool,
+    strict_specifier_match: bool,
+    catalogs: &CatalogConfig,
+) -> Result<(), String> {
+    let mut manifest = extract_manifest(manifest);
+    if !catalogs.is_empty() {
+        resolve_catalog_specs_in_map(&mut manifest.dependencies, catalogs);
+        resolve_catalog_specs_in_map(&mut manifest.dev_dependencies, catalogs);
+        resolve_catalog_specs_in_map(&mut manifest.optional_dependencies, catalogs);
+        resolve_catalog_specs_in_map(&mut manifest.peer_dependencies, catalogs);
+    }
     let mut existing_deps = merge_maps(&[
         &manifest.dev_dependencies,
         &manifest.dependencies,
@@ -154,7 +179,7 @@ pub(crate) fn satisfies_package_manifest(
     if auto_install_peers {
         let mut dependencies_with_auto_peers = HashMap::<String, String>::new();
         for (name, specifier) in &manifest.peer_dependencies {
-            if !existing_deps.contains_key(name) && importer_dep_names.contains(name) {
+            if !existing_deps.contains_key(name) {
                 dependencies_with_auto_peers.insert(name.clone(), specifier.clone());
             }
         }
@@ -164,7 +189,7 @@ pub(crate) fn satisfies_package_manifest(
         let mut deps_with_peers = manifest
             .peer_dependencies
             .iter()
-            .filter(|(name, _)| importer_dep_names.contains(*name))
+            .filter(|(name, _)| !existing_deps.contains_key(*name))
             .map(|(name, specifier)| (name.clone(), specifier.clone()))
             .collect::<HashMap<_, _>>();
         deps_with_peers.extend(existing_deps);
@@ -375,7 +400,6 @@ struct ManifestSnapshot {
     peer_dependencies: HashMap<String, String>,
     dependencies_meta: JsonValue,
     publish_directory: Option<String>,
-    manifest_dir: Option<PathBuf>,
 }
 
 fn extract_manifest(manifest: &PackageManifest) -> ManifestSnapshot {
@@ -395,7 +419,6 @@ fn extract_manifest(manifest: &PackageManifest) -> ManifestSnapshot {
         peer_dependencies: json_string_map(value.get("peerDependencies")),
         dependencies_meta,
         publish_directory,
-        manifest_dir: manifest.path().parent().map(Path::to_path_buf),
     }
 }
 
@@ -405,9 +428,10 @@ fn resolve_catalog_specs_in_map(
 ) {
     for (name, spec) in map.iter_mut() {
         if spec.starts_with("catalog:")
-            && let Ok(resolved) = crate::resolve_catalog_specifier(spec, name, catalogs) {
-                *spec = resolved;
-            }
+            && let Ok(resolved) = crate::resolve_catalog_specifier(spec, name, catalogs)
+        {
+            *spec = resolved;
+        }
     }
 }
 
@@ -464,6 +488,22 @@ fn extract_overrides_from_workspace(
         .and_then(|root| yaml_mapping_get(root, "overrides"))
         .map(json_string_map_from_yaml)
         .unwrap_or_default()
+}
+
+fn extract_ignored_optional_dependencies(
+    workspace_manifest: Option<&YamlValue>,
+) -> Option<Vec<String>> {
+    let seq = workspace_manifest
+        .and_then(YamlValue::as_mapping)
+        .and_then(|root| yaml_mapping_get(root, "ignoredOptionalDependencies"))?
+        .as_sequence()?;
+    let mut result: Vec<String> =
+        seq.iter().filter_map(|v| v.as_str().map(ToString::to_string)).collect();
+    if result.is_empty() {
+        return None;
+    }
+    result.sort();
+    Some(result)
 }
 
 fn extract_overrides_from_package_json(

@@ -5,8 +5,8 @@ use crate::{
     direct_dependency_virtual_store_location, filter_installable_optional_dependencies,
     get_outdated_lockfile_setting, hoist_virtual_store_packages, importer_dependencies_ready,
     included_dependencies, link_bins_for_manifest, progress_reporter, read_modules_manifest,
-    satisfies_package_manifest, satisfies_root_lockfile_config, write_modules_manifest,
-    write_pnp_manifest_if_needed,
+    satisfies_package_manifest, satisfies_package_manifest_with_catalogs,
+    satisfies_root_lockfile_config, write_modules_manifest, write_pnp_manifest_if_needed,
 };
 use pacquet_lockfile::{
     DependencyPath, Lockfile, PackageSnapshot, PackageSnapshotDependency, PkgName, PkgNameVerPeer,
@@ -291,12 +291,6 @@ where
             && config.lockfile
             && !frozen_lockfile
             && lockfile.is_some_and(|lockfile| {
-                let maybe_project_snapshot = match &lockfile.project_snapshot {
-                    RootProjectSnapshot::Single(snapshot) => Some(snapshot),
-                    RootProjectSnapshot::Multi(snapshot) => {
-                        snapshot.importers.get(lockfile_importer_id)
-                    }
-                };
                 let runtime_lockfile_config = collect_runtime_lockfile_config(
                     config,
                     manifest,
@@ -304,25 +298,96 @@ where
                     pnpmfile,
                     ignore_pnpmfile,
                 );
-                let lockfile_is_reusable = maybe_project_snapshot.is_some_and(|project_snapshot| {
-                    get_outdated_lockfile_setting(lockfile, &runtime_lockfile_config).is_none()
-                        && satisfies_package_manifest(
+                if get_outdated_lockfile_setting(lockfile, &runtime_lockfile_config).is_some() {
+                    return false;
+                }
+                let strict = lockfile.lockfile_version.major >= 9;
+                let lockfile_is_reusable = match &lockfile.project_snapshot {
+                    // Non-workspace (single importer) path – unchanged behaviour.
+                    RootProjectSnapshot::Single(project_snapshot) => {
+                        satisfies_package_manifest(
                             project_snapshot,
                             manifest,
                             config.auto_install_peers,
                             config.exclude_links_from_lockfile,
-                            lockfile.lockfile_version.major >= 9,
+                            strict,
                         )
                         .is_ok()
-                        && direct_workspace_links_match_current_config(
-                            config,
-                            manifest,
-                            project_snapshot,
-                            workspace_packages,
-                            &dependency_groups,
-                        )
-                        && satisfies_root_lockfile_config(lockfile, manifest, lockfile_dir).is_ok()
-                });
+                            && direct_workspace_links_match_current_config(
+                                config,
+                                manifest,
+                                project_snapshot,
+                                workspace_packages,
+                                &dependency_groups,
+                            )
+                            && satisfies_root_lockfile_config(lockfile, manifest, lockfile_dir)
+                                .is_ok()
+                    }
+                    // Workspace (multi-importer) path – check ALL importers.
+                    RootProjectSnapshot::Multi(multi) => {
+                        // The number of lockfile importers must equal the number
+                        // of workspace projects + 1 for the root "." importer
+                        // (like pnpm does). If a project was added or removed
+                        // the lockfile is stale.
+                        let expected_importer_count = workspace_packages.len() + 1;
+                        if multi.importers.len() != expected_importer_count {
+                            tracing::debug!(
+                                target: "pacquet::install",
+                                lockfile_importers = multi.importers.len(),
+                                expected_importers = expected_importer_count,
+                                "fast-path: importer count mismatch"
+                            );
+                            return false;
+                        }
+                        // Load catalogs once for the whole workspace.
+                        let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
+                        multi.importers.iter().all(|(importer_id, project_snapshot)| {
+                            // Load the manifest for this importer. The root
+                            // importer (".") uses the already-loaded manifest;
+                            // workspace members need their manifest loaded from
+                            // disk via WorkspacePackages.
+                            let ws_manifest_owned;
+                            let importer_manifest: &PackageManifest =
+                                if importer_id == "." || importer_id == lockfile_importer_id {
+                                    manifest
+                                } else {
+                                    let manifest_path =
+                                        lockfile_dir.join(importer_id).join("package.json");
+                                    match PackageManifest::from_path(manifest_path) {
+                                        Ok(m) => {
+                                            ws_manifest_owned = m;
+                                            &ws_manifest_owned
+                                        }
+                                        Err(_) => {
+                                            tracing::debug!(
+                                                target: "pacquet::install",
+                                                importer_id,
+                                                "fast-path: could not load manifest for importer"
+                                            );
+                                            return false;
+                                        }
+                                    }
+                                };
+                            satisfies_package_manifest_with_catalogs(
+                                project_snapshot,
+                                importer_manifest,
+                                config.auto_install_peers,
+                                config.exclude_links_from_lockfile,
+                                strict,
+                                &catalogs,
+                            )
+                            .is_ok()
+                                && direct_workspace_links_match_current_config(
+                                    config,
+                                    importer_manifest,
+                                    project_snapshot,
+                                    workspace_packages,
+                                    &dependency_groups,
+                                )
+                        }) && satisfies_root_lockfile_config(lockfile, manifest, lockfile_dir)
+                            .is_ok()
+                    }
+                };
                 let has_local_dir_deps = manifest_has_local_directory_dependency(
                     manifest,
                     dependency_groups.iter().copied(),
@@ -1851,6 +1916,10 @@ fn modules_manifest_is_compatible(
     config: &Npmrc,
     dependency_groups: &[DependencyGroup],
 ) -> bool {
+    if modules_manifest.layout_version() != Some(5) {
+        tracing::debug!(target: "pacquet::install", manifest_layout = ?modules_manifest.layout_version(), "incompatible: layoutVersion is not 5");
+        return false;
+    }
     if modules_manifest.node_linker() != Some(node_linker_name(config)) {
         tracing::debug!(target: "pacquet::install", manifest_linker = ?modules_manifest.node_linker(), expected = node_linker_name(config), "incompatible: node_linker mismatch");
         return false;

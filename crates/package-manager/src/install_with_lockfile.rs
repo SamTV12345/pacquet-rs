@@ -108,8 +108,12 @@ where
         )
         .expect("apply .pnpmfile.cjs readPackage hook to project manifest");
 
-        let direct_dependencies =
-            unique_direct_dependencies(&hooked_manifest, &dependency_groups, lockfile_dir);
+        let direct_dependencies = unique_direct_dependencies(
+            &hooked_manifest,
+            &dependency_groups,
+            lockfile_dir,
+            existing_lockfile,
+        );
         let direct_dependency_concurrency = std::thread::available_parallelism()
             .map(|parallelism| parallelism.get().clamp(4, 32))
             .unwrap_or(16);
@@ -1336,6 +1340,7 @@ fn unique_direct_dependencies(
     manifest_value: &serde_json::Value,
     dependency_groups: &[DependencyGroup],
     lockfile_dir: &std::path::Path,
+    existing_lockfile: Option<&pacquet_lockfile::Lockfile>,
 ) -> Vec<(DependencyGroup, String, String)> {
     let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
     let mut seen = HashSet::<(String, String)>::new();
@@ -1344,14 +1349,32 @@ fn unique_direct_dependencies(
         manifest_value,
         dependency_groups.iter().copied(),
     ) {
-        // Resolve `catalog:` specifiers to actual version ranges
+        // Resolve `catalog:` specifiers to actual version ranges.
+        // First try the lockfile catalog snapshot (pinned versions), then fall
+        // back to pnpm-workspace.yaml.
         let version_range = if version_range.starts_with("catalog:") {
-            match crate::resolve_catalog_specifier(&version_range, &name, &catalogs) {
-                Ok(resolved) => resolved,
-                Err(err) => {
+            // 1) Try lockfile catalog snapshot
+            let from_lockfile = existing_lockfile.and_then(|lf| {
+                match crate::resolve_catalog_from_lockfile(&version_range, &name, lf) {
+                    Ok(Some(v)) => Some(Ok(v)),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
+                }
+            });
+            match from_lockfile {
+                Some(Ok(resolved)) => resolved,
+                Some(Err(err)) => {
                     tracing::warn!(target: "pacquet::install", "{err}");
                     continue;
                 }
+                // 2) Fall back to pnpm-workspace.yaml catalogs
+                None => match crate::resolve_catalog_specifier(&version_range, &name, &catalogs) {
+                    Ok(resolved) => resolved,
+                    Err(err) => {
+                        tracing::warn!(target: "pacquet::install", "{err}");
+                        continue;
+                    }
+                },
             }
         } else {
             version_range
@@ -3318,6 +3341,7 @@ mod tests {
             &manifest,
             &[DependencyGroup::Prod, DependencyGroup::Dev],
             dir.path(),
+            None,
         );
 
         assert_eq!(
