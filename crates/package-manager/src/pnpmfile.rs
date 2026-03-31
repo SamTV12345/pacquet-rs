@@ -5,6 +5,7 @@ use pacquet_registry::PackageVersion;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -76,6 +77,88 @@ pub(crate) fn dependencies_from_manifest_value_grouped(
             )
         })
         .collect()
+}
+
+/// Resolve a `catalog:` specifier to the actual version range from the
+/// workspace catalogs. Returns the input unchanged if not a catalog specifier.
+///
+/// Formats:
+/// - `catalog:` or `catalog:default` → look up in the default catalog
+/// - `catalog:<name>` → look up in the named catalog
+pub(crate) fn resolve_catalog_specifier(
+    spec: &str,
+    package_name: &str,
+    catalogs: &HashMap<String, HashMap<String, String>>,
+) -> Result<String, String> {
+    let remainder = match spec.strip_prefix("catalog:") {
+        Some(r) => r,
+        None => return Ok(spec.to_string()),
+    };
+
+    let catalog_name =
+        if remainder.is_empty() || remainder == "default" { "default" } else { remainder };
+
+    catalogs
+        .get(catalog_name)
+        .and_then(|catalog| catalog.get(package_name))
+        .cloned()
+        .ok_or_else(|| format!("Missing version catalog: {catalog_name} on package {package_name}"))
+}
+
+/// Load catalogs from `pnpm-workspace.yaml`.
+///
+/// Supports:
+/// ```yaml
+/// catalog:          # implicit "default" catalog
+///   react: ^18.0.0
+/// catalogs:         # named catalogs
+///   default:
+///     react: ^18.0.0
+///   legacy:
+///     old-lib: 1.0.0
+/// ```
+pub(crate) fn load_catalogs_from_workspace(
+    lockfile_dir: &Path,
+) -> HashMap<String, HashMap<String, String>> {
+    let workspace_yaml_path = lockfile_dir.join("pnpm-workspace.yaml");
+    let content = match std::fs::read_to_string(&workspace_yaml_path) {
+        Ok(content) => content,
+        Err(_) => return HashMap::new(),
+    };
+    let yaml: serde_yaml::Value = match serde_yaml::from_str(&content) {
+        Ok(yaml) => yaml,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut catalogs = HashMap::<String, HashMap<String, String>>::new();
+
+    // `catalog:` top-level key → implicit default catalog
+    if let Some(serde_yaml::Value::Mapping(catalog)) = yaml.get("catalog") {
+        let default = catalogs.entry("default".to_string()).or_default();
+        for (name, spec) in catalog {
+            if let (Some(name), Some(spec)) = (name.as_str(), spec.as_str()) {
+                default.insert(name.to_string(), spec.to_string());
+            }
+        }
+    }
+
+    // `catalogs:` top-level key → named catalogs
+    if let Some(serde_yaml::Value::Mapping(named)) = yaml.get("catalogs") {
+        for (catalog_name, entries) in named {
+            if let (Some(catalog_name), Some(serde_yaml::Value::Mapping(entries))) =
+                (catalog_name.as_str(), Some(entries))
+            {
+                let catalog = catalogs.entry(catalog_name.to_string()).or_default();
+                for (name, spec) in entries {
+                    if let (Some(name), Some(spec)) = (name.as_str(), spec.as_str()) {
+                        catalog.insert(name.to_string(), spec.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    catalogs
 }
 
 fn apply_hook_to_serializable<T>(

@@ -75,11 +75,27 @@ impl<'a, DependencyGroupList> InstallWithoutLockfile<'a, DependencyGroupList> {
         )
         .expect("apply .pnpmfile.cjs readPackage hook to project manifest");
 
+        let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
         let _: Vec<()> = crate::dependencies_from_manifest_value_grouped(
             &hooked_manifest,
             dependency_groups,
         )
         .into_iter()
+        .filter_map(|(group, name, version_range)| {
+            // Resolve catalog: specifiers
+            let version_range = if version_range.starts_with("catalog:") {
+                match crate::resolve_catalog_specifier(&version_range, &name, &catalogs) {
+                    Ok(resolved) => resolved,
+                    Err(err) => {
+                        tracing::warn!(target: "pacquet::install", "{err}");
+                        return None;
+                    }
+                }
+            } else {
+                version_range
+            };
+            Some((group, name, version_range))
+        })
         .map(|(group, name, version_range)| {
             let workspace_root_peer_overrides = workspace_root_peer_overrides.clone();
             async move {
