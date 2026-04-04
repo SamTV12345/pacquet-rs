@@ -958,6 +958,13 @@ where
             .and_then(|value| value.as_str())
             .unwrap_or(dependency_name);
         let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
+        tracing::debug!(
+            target: "pacquet::install",
+            lockfile_dir = %lockfile_dir.display(),
+            catalog_count = catalogs.values().map(|c| c.len()).sum::<usize>(),
+            catalogs_keys = ?catalogs.keys().collect::<Vec<_>>(),
+            "loaded catalogs for local workspace package"
+        );
         let local_dependency_entries = local_manifest_value
             .as_ref()
             .map(|manifest| {
@@ -985,7 +992,19 @@ where
             .unwrap_or_default();
         let peer_dependencies = local_manifest_value
             .as_ref()
-            .and_then(|manifest| json_string_map(manifest.get("peerDependencies")));
+            .and_then(|manifest| json_string_map(manifest.get("peerDependencies")))
+            .map(|mut peers| {
+                // Resolve catalog: specifiers in peerDependencies too
+                for (name, range) in peers.iter_mut() {
+                    if range.starts_with("catalog:")
+                        && let Ok(resolved) =
+                            crate::resolve_catalog_specifier(range, name, &catalogs)
+                        {
+                            *range = resolved;
+                        }
+                }
+                peers
+            });
         let peer_dependency_entries = peer_dependencies
             .as_ref()
             .map(|dependencies| {

@@ -198,14 +198,40 @@ pub(crate) fn resolve_catalog_specifier(
 pub(crate) fn load_catalogs_from_workspace(
     lockfile_dir: &Path,
 ) -> HashMap<String, HashMap<String, String>> {
+    // Cache: avoid re-reading and re-parsing pnpm-workspace.yaml hundreds
+    // of times during recursive workspace resolution.
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<
+        std::sync::Mutex<HashMap<PathBuf, HashMap<String, HashMap<String, String>>>>,
+    > = OnceLock::new();
+    let cache = CACHED.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let key = lockfile_dir.to_path_buf();
+    if let Ok(guard) = cache.lock()
+        && let Some(cached) = guard.get(&key) {
+            return cached.clone();
+        }
+
     let workspace_yaml_path = lockfile_dir.join("pnpm-workspace.yaml");
     let content = match std::fs::read_to_string(&workspace_yaml_path) {
         Ok(content) => content,
-        Err(_) => return HashMap::new(),
+        Err(err) => {
+            tracing::debug!(
+                target: "pacquet::install",
+                path = %workspace_yaml_path.display(),
+                "Could not read pnpm-workspace.yaml for catalog resolution: {err}"
+            );
+            return HashMap::new();
+        }
     };
     let yaml: serde_yaml::Value = match serde_yaml::from_str(&content) {
         Ok(yaml) => yaml,
-        Err(_) => return HashMap::new(),
+        Err(err) => {
+            tracing::warn!(
+                target: "pacquet::install",
+                "Failed to parse pnpm-workspace.yaml: {err}"
+            );
+            return HashMap::new();
+        }
     };
 
     let mut catalogs = HashMap::<String, HashMap<String, String>>::new();
@@ -234,6 +260,11 @@ pub(crate) fn load_catalogs_from_workspace(
                 }
             }
         }
+    }
+
+    // Cache for subsequent calls
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(key, catalogs.clone());
     }
 
     catalogs
