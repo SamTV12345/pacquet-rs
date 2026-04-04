@@ -556,6 +556,10 @@ where
                             force,
                             pnpmfile,
                             ignore_pnpmfile,
+                            // In a workspace sequential install, each importer only has its
+                            // own subset of packages. Pruning would delete other importers'
+                            // entries from the shared virtual store.
+                            skip_prune: !workspace_packages.is_empty(),
                         }
                         .run()
                         .await
@@ -691,6 +695,7 @@ where
                         force,
                         pnpmfile,
                         ignore_pnpmfile,
+                        skip_prune: !workspace_packages.is_empty(),
                     }
                     .run()
                     .await

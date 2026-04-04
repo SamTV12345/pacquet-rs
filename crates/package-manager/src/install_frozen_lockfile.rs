@@ -36,6 +36,9 @@ where
     pub force: bool,
     pub pnpmfile: Option<&'a std::path::Path>,
     pub ignore_pnpmfile: bool,
+    /// Skip orphan pruning. Set to true when installing a single workspace
+    /// importer sequentially (packages map is incomplete).
+    pub skip_prune: bool,
 }
 
 impl<'a, DependencyGroupList> InstallFrozenLockfile<'a, DependencyGroupList>
@@ -56,6 +59,7 @@ where
             force,
             pnpmfile: _pnpmfile,
             ignore_pnpmfile: _ignore_pnpmfile,
+            skip_prune,
         } = self;
         let dependency_groups = dependency_groups.into_iter().collect::<Vec<_>>();
         let (filtered_project_snapshot, filtered_packages, skipped) =
@@ -83,10 +87,7 @@ where
                 resolved_packages: Some(resolved_packages),
                 offline,
                 force,
-                // Per-importer install: packages only contains this importer's
-                // transitive deps. Pruning would delete other importers'
-                // packages from the shared virtual store.
-                skip_prune: true,
+                skip_prune,
             }
             .run()
             .await;

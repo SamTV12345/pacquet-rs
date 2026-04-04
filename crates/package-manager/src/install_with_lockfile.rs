@@ -440,6 +440,7 @@ where
                 force,
                 pnpmfile,
                 ignore_pnpmfile,
+                skip_prune: !workspace_packages.is_empty(),
             }
             .run()
             .await;
