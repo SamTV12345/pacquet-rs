@@ -773,6 +773,12 @@ where
         } else {
             std::borrow::Cow::Borrowed(version_range)
         };
+        tracing::debug!(
+            target: "pacquet::install",
+            %name,
+            version_range = %version_range,
+            "install_and_snapshot_package: resolved version_range"
+        );
         let package_version = InstallPackageFromRegistry {
             tarball_mem_cache,
             http_client,
