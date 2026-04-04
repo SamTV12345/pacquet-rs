@@ -92,7 +92,6 @@ impl PackageVersion {
                     "accept",
                     "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*",
                 );
-                request = request.header("accept-encoding", "identity");
                 if let Some(auth_header) = auth_header {
                     request = request.header("authorization", auth_header);
                 }
@@ -189,7 +188,6 @@ mod tests {
         let _mock = server
             .mock("GET", "/pkg/latest")
             .match_header("authorization", "Bearer top-secret")
-            .match_header("accept-encoding", "identity")
             .with_status(200)
             .with_body(body.to_string())
             .create_async()

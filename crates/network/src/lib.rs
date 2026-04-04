@@ -222,13 +222,10 @@ fn build_client(
     http_proxy: Option<&str>,
     no_proxy: Option<&str>,
 ) -> Client {
-    let mut builder = Client::builder()
-        .danger_accept_invalid_certs(!strict_ssl)
-        .no_proxy()
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .no_zstd();
+    // Enable gzip/brotli/deflate/zstd decompression so the registry can
+    // send compressed responses.  Large package metadata (e.g. typescript
+    // ~15 MB uncompressed) benefits enormously from compression.
+    let mut builder = Client::builder().danger_accept_invalid_certs(!strict_ssl).no_proxy();
     if let Some(ms) = request_timeout_ms {
         builder = builder.timeout(Duration::from_millis(ms));
     }
