@@ -878,7 +878,10 @@ mod tests {
     }
 
     #[test]
-    fn auto_install_peers_allows_peer_only_importer_without_lockfile_specifiers() {
+    fn auto_install_peers_allows_peer_only_importer_when_lockfile_includes_peer() {
+        use pacquet_lockfile::{
+            ResolvedDependencyMap, ResolvedDependencySpec, ResolvedDependencyVersion,
+        };
         let dir = tempdir().expect("tempdir");
         let manifest = load_manifest_from_json(
             dir.path(),
@@ -887,9 +890,20 @@ mod tests {
             }),
         );
 
+        // When autoInstallPeers is true, peers not in existing deps are auto-
+        // merged into dependencies. The lockfile snapshot must include them for
+        // the check to pass (matching pnpm's behavior).
+        let mut dependencies = ResolvedDependencyMap::new();
+        dependencies.insert(
+            "is-positive".parse().unwrap(),
+            ResolvedDependencySpec {
+                specifier: ">=1.0.0".to_string(),
+                version: ResolvedDependencyVersion::PkgVerPeer("1.0.0".parse().unwrap()),
+            },
+        );
         let snapshot = ProjectSnapshot {
-            specifiers: None,
-            dependencies: None,
+            specifiers: Some(HashMap::from([("is-positive".to_string(), ">=1.0.0".to_string())])),
+            dependencies: Some(dependencies),
             optional_dependencies: None,
             dev_dependencies: None,
             dependencies_meta: None,

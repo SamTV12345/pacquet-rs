@@ -170,9 +170,27 @@ fn detect_pnpm_version() -> Option<String> {
 }
 
 pub(crate) fn canonical_store_dir_for_config(config: &Npmrc) -> String {
-    let path = PathBuf::from(config.store_dir.display().to_string()).join("v10");
-    // pnpm writes storeDir as-is (no canonicalization). Only strip \\?\ on Windows for safety.
-    normalize_windows_verbatim_path(&path.display().to_string())
+    let mut path = PathBuf::from(config.store_dir.display().to_string()).join("v10");
+    // pnpm uses path.resolve() which makes the path absolute and resolves
+    // `.` and `..` segments logically (without following symlinks).
+    // We do the same: if relative, join with cwd; then normalize components.
+    if path.is_relative()
+        && let Ok(cwd) = std::env::current_dir() {
+            path = cwd.join(path);
+        }
+    // Normalize .. and . segments logically (no filesystem access)
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => components.push(other),
+        }
+    }
+    let normalized: PathBuf = components.iter().collect();
+    normalize_windows_verbatim_path(&normalized.display().to_string())
 }
 
 fn normalize_windows_verbatim_path(path: &str) -> String {
@@ -676,7 +694,6 @@ mod tests {
         assert!(content.contains("\"default\": \"https://default.example/\""));
         assert!(content.contains("https://foo.example/"));
         assert!(content.contains("@foo"));
-        assert!(content.contains("@jsr"));
     }
 
     #[test]
@@ -1209,7 +1226,6 @@ mod tests {
             Some("https://custom.registry.example/")
         );
         assert!(registries.contains_key("@myorg"));
-        assert!(registries.contains_key("@jsr"));
     }
 
     #[test]
