@@ -393,7 +393,13 @@ impl InstallArgs {
                 offline,
                 pnpmfile: pnpmfile.as_deref(),
                 ignore_pnpmfile,
-                reporter_prefix: multiple_targets.then_some(primary_id.as_str()),
+                // Batch workspace resolution resolves ALL importers in one
+                // pass, so the summary should be a single aggregate (matching
+                // pnpm's output).  `reporter_prefix` is only used for
+                // per-importer recursive output; set it to None here so that
+                // `print_pnpm_style_summary` uses the aggregate format with
+                // `Packages: +N` / `Done in ...`.
+                reporter_prefix: None,
                 reporter,
                 print_summary: true,
                 manage_progress_reporter: true,
@@ -475,14 +481,6 @@ impl InstallArgs {
 
         Ok(())
     }
-}
-
-fn should_reload_lockfile_after_importer(
-    lockfile_enabled: bool,
-    frozen_lockfile: bool,
-    lockfile_only: bool,
-) -> bool {
-    lockfile_enabled && !frozen_lockfile && !lockfile_only
 }
 
 fn should_parallelize_workspace_frozen_install(
@@ -1036,14 +1034,6 @@ mod tests {
             create_list(InstallDependencyOptions { prod: true, dev: true, no_optional: true }),
             [Prod, Dev],
         );
-    }
-
-    #[test]
-    fn should_reload_lockfile_after_importer_only_for_mutable_lockfile_installs() {
-        assert!(should_reload_lockfile_after_importer(true, false, false));
-        assert!(!should_reload_lockfile_after_importer(true, true, false));
-        assert!(!should_reload_lockfile_after_importer(true, false, true));
-        assert!(!should_reload_lockfile_after_importer(false, false, false));
     }
 
     #[test]

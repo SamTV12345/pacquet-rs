@@ -509,49 +509,56 @@ where
 
         if !lockfile_only {
             let relinked_packages = ResolvedPackages::new();
-            // Link/import the primary importer's packages
-            let skipped = crate::InstallFrozenLockfile {
-                http_client,
-                resolved_packages: &relinked_packages,
-                config,
-                project_snapshot: &project_snapshot_for_importer,
-                packages: lockfile.packages.as_ref(),
-                lockfile_dir,
-                dependency_groups: dependency_groups.iter().copied(),
-                offline,
-                force,
-                pnpmfile,
-                ignore_pnpmfile,
-                skip_prune: !additional_importers.is_empty(),
-            }
-            .run()
-            .await;
 
-            // Link/import additional workspace importers' packages
+            // Collect ALL importer snapshots (primary + additional) and
+            // link/import them in PARALLEL, matching pnpm's concurrent
+            // linkAllModules + linkAllPkgs pattern.
+            let mut importer_snapshots: Vec<(&'static Npmrc, ProjectSnapshot)> = Vec::new();
+
+            // Primary importer
+            importer_snapshots.push((config, project_snapshot_for_importer));
+
+            // Additional workspace importers
             for additional in &additional_importers {
-                let additional_snapshot = match &lockfile.project_snapshot {
-                    RootProjectSnapshot::Multi(snapshot) => {
-                        snapshot.importers.get(&additional.importer_id).cloned().unwrap_or_default()
+                let snapshot = match &lockfile.project_snapshot {
+                    RootProjectSnapshot::Multi(multi) => {
+                        multi.importers.get(&additional.importer_id).cloned().unwrap_or_default()
                     }
                     RootProjectSnapshot::Single(snapshot) => snapshot.clone(),
                 };
-                crate::InstallFrozenLockfile {
-                    http_client,
-                    resolved_packages: &relinked_packages,
-                    config: additional.config,
-                    project_snapshot: &additional_snapshot,
-                    packages: lockfile.packages.as_ref(),
-                    lockfile_dir,
-                    dependency_groups: dependency_groups.iter().copied(),
-                    offline,
-                    force,
-                    pnpmfile,
-                    ignore_pnpmfile,
-                    skip_prune: true, // Per-importer: don't prune shared store
-                }
-                .run()
-                .await;
+                importer_snapshots.push((additional.config, snapshot));
             }
+
+            // Run all importers concurrently. The first one (primary) does NOT
+            // skip pruning when there are no additional importers (single-project).
+            // All others skip pruning to avoid removing sibling importers' packages.
+            let skip_prune_for_all = !additional_importers.is_empty();
+            let futures: Vec<_> = importer_snapshots
+                .iter()
+                .enumerate()
+                .map(|(idx, (importer_config, snapshot))| {
+                    let skip = if idx == 0 { skip_prune_for_all } else { true };
+                    crate::InstallFrozenLockfile {
+                        http_client,
+                        resolved_packages: &relinked_packages,
+                        config: importer_config,
+                        project_snapshot: snapshot,
+                        packages: lockfile.packages.as_ref(),
+                        lockfile_dir,
+                        dependency_groups: dependency_groups.iter().copied(),
+                        offline,
+                        force,
+                        pnpmfile,
+                        ignore_pnpmfile,
+                        skip_prune: skip,
+                    }
+                    .run()
+                })
+                .collect();
+
+            let results = futures_util::future::join_all(futures).await;
+            // Return the skipped packages from the primary importer
+            let skipped = results.into_iter().next().unwrap_or_default();
 
             return Ok(skipped);
         }

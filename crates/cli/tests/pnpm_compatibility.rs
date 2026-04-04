@@ -674,16 +674,14 @@ fn second_install_is_noop_like_pnpm() {
     });
     fs::write(manifest_path, package_json_content.to_string()).expect("write to package.json");
 
+    // Run pacquet twice back-to-back so the second install sees the
+    // persisted state (node_modules/.modules.yaml and .pnpm/lock.yaml)
+    // that pacquet itself wrote.  Running pnpm in between would overwrite
+    // that state and break the fast-path check.
     eprintln!("Priming pacquet install...");
     std::process::Command::new(assert_cmd::cargo::cargo_bin!("pacquet"))
         .with_current_dir(&workspace)
         .with_arg("install")
-        .assert()
-        .success();
-    eprintln!("Priming pnpm install...");
-    std::process::Command::new("pnpm")
-        .with_current_dir(&workspace)
-        .with_args(["install", "--ignore-scripts"])
         .assert()
         .success();
 
@@ -697,6 +695,14 @@ fn second_install_is_noop_like_pnpm() {
         .stdout
         .clone();
     let pacquet_stdout = String::from_utf8(pacquet_output).expect("pacquet stdout utf8");
+
+    // Now do the same for pnpm: prime first, then capture the noop output.
+    eprintln!("Priming pnpm install...");
+    std::process::Command::new("pnpm")
+        .with_current_dir(&workspace)
+        .with_args(["install", "--ignore-scripts"])
+        .assert()
+        .success();
 
     eprintln!("Running second pnpm install...");
     let pnpm_output = std::process::Command::new("pnpm")
