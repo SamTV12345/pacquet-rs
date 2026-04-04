@@ -220,7 +220,7 @@ impl InstallArgs {
         let selected_importers = install_targets.keys().cloned().collect::<HashSet<_>>();
         let install_target_entries = install_targets.into_iter().collect::<Vec<_>>();
         let mut skipped_dep_paths = HashSet::<String>::new();
-        let mut current_lockfile = lockfile.clone();
+        let current_lockfile = lockfile.clone();
         let config_project_dir =
             manifest.path().parent().map(Path::to_path_buf).unwrap_or_else(|| lockfile_dir.clone());
         let current_lockfile_virtual_store_dir =
@@ -318,68 +318,91 @@ impl InstallArgs {
             let _ = finish_progress_reporter(result.is_ok());
             skipped_dep_paths.extend(result?);
         } else {
-            for (importer_id, manifest_path) in &install_target_entries {
-                let workspace_manifest = if manifest_path == manifest.path() {
-                    None
-                } else {
-                    Some(PackageManifest::from_path(manifest_path.clone()).wrap_err_with(|| {
+            // Workspace batch resolution: resolve ALL importers in a single
+            // pass (matching pnpm's atomic workspace resolution). The primary
+            // importer is the first entry; additional importers are passed as
+            // `additional_importers` so the dependency graph is resolved once
+            // with global dedup across the entire workspace.
+            let (primary_id, primary_manifest_path) =
+                install_target_entries.first().expect("at least one install target");
+            let primary_workspace_manifest = if primary_manifest_path == manifest.path() {
+                None
+            } else {
+                Some(PackageManifest::from_path(primary_manifest_path.clone()).wrap_err_with(
+                    || format!("load workspace manifest: {}", primary_manifest_path.display()),
+                )?)
+            };
+            let primary_manifest = primary_workspace_manifest.as_ref().unwrap_or(manifest);
+            let primary_dir = primary_manifest
+                .path()
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| lockfile_dir.to_path_buf());
+            let primary_config: &'static Npmrc = config_for_project(
+                config,
+                lockfile_dir,
+                &primary_dir,
+                shamefully_hoist,
+                prefer_frozen_lockfile_override,
+            )
+            .leak();
+
+            // Build additional importers list (all except primary)
+            let mut additional_importers = Vec::new();
+            for (importer_id, manifest_path) in install_target_entries.iter().skip(1) {
+                let imp_manifest = PackageManifest::from_path(manifest_path.clone())
+                    .wrap_err_with(|| {
                         format!("load workspace manifest: {}", manifest_path.display())
-                    })?)
-                };
-                let target_manifest = workspace_manifest.as_ref().unwrap_or(manifest);
-                let project_dir = target_manifest
+                    })?;
+                let imp_dir = imp_manifest
                     .path()
                     .parent()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| lockfile_dir.to_path_buf());
-                let target_config: &'static Npmrc = config_for_project(
+                let imp_config: &'static Npmrc = config_for_project(
                     config,
                     lockfile_dir,
-                    &project_dir,
+                    &imp_dir,
                     shamefully_hoist,
                     prefer_frozen_lockfile_override,
                 )
                 .leak();
-
-                let skipped = Install {
-                    tarball_mem_cache,
-                    http_client,
-                    config: target_config,
-                    manifest: target_manifest,
-                    lockfile: current_lockfile.as_ref(),
-                    lockfile_dir,
-                    lockfile_importer_id: importer_id,
-                    workspace_packages,
-                    preferred_versions: preferred_versions.as_ref(),
-                    dependency_groups: dependency_groups.iter().copied(),
-                    frozen_lockfile,
-                    lockfile_only,
-                    force,
-                    prefer_offline,
-                    offline,
-                    pnpmfile: pnpmfile.as_deref(),
-                    ignore_pnpmfile,
-                    reporter_prefix: multiple_targets.then_some(importer_id.as_str()),
-                    reporter,
-                    print_summary: true,
-                    manage_progress_reporter: true,
-                    resolved_packages,
-                }
-                .run()
-                .await?;
-                skipped_dep_paths.extend(skipped);
-
-                current_lockfile = if should_reload_lockfile_after_importer(
-                    config.lockfile,
-                    frozen_lockfile,
-                    lockfile_only,
-                ) {
-                    Lockfile::load_from_dir(lockfile_dir)
-                        .wrap_err("reload lockfile after workspace install")?
-                } else {
-                    current_lockfile
-                };
+                additional_importers.push(pacquet_package_manager::AdditionalImporter {
+                    importer_id: importer_id.clone(),
+                    manifest: imp_manifest,
+                    config: imp_config,
+                    _phantom: std::marker::PhantomData,
+                });
             }
+
+            let skipped = Install {
+                tarball_mem_cache,
+                http_client,
+                config: primary_config,
+                manifest: primary_manifest,
+                lockfile: current_lockfile.as_ref(),
+                lockfile_dir,
+                lockfile_importer_id: primary_id,
+                workspace_packages,
+                preferred_versions: preferred_versions.as_ref(),
+                dependency_groups: dependency_groups.iter().copied(),
+                frozen_lockfile,
+                lockfile_only,
+                force,
+                prefer_offline,
+                offline,
+                pnpmfile: pnpmfile.as_deref(),
+                ignore_pnpmfile,
+                reporter_prefix: multiple_targets.then_some(primary_id.as_str()),
+                reporter,
+                print_summary: true,
+                manage_progress_reporter: true,
+                resolved_packages,
+                additional_importers,
+            }
+            .run()
+            .await?;
+            skipped_dep_paths.extend(skipped);
         }
 
         if !ignore_scripts && !lockfile_only {

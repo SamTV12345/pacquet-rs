@@ -148,6 +148,7 @@ async fn unlink_recursive(
             reporter: InstallReporter::Default,
             print_summary: true,
             manage_progress_reporter: true,
+            additional_importers: Vec::new(),
         }
         .run()
         .await
@@ -219,6 +220,7 @@ async fn reinstall_project(
         reporter: InstallReporter::Default,
         print_summary: true,
         manage_progress_reporter: true,
+        additional_importers: Vec::new(),
     }
     .run()
     .await

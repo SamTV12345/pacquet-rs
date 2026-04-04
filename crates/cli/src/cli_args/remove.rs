@@ -203,6 +203,7 @@ impl RemoveArgs {
                     reporter,
                     print_summary: false,
                     manage_progress_reporter: true,
+                    additional_importers: Vec::new(),
                 }
                 .run()
                 .await
@@ -272,6 +273,7 @@ impl RemoveArgs {
             reporter,
             print_summary: false,
             manage_progress_reporter: true,
+            additional_importers: Vec::new(),
         }
         .run()
         .await

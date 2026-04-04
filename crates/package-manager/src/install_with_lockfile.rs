@@ -31,7 +31,19 @@ use std::{
 
 pub type PreferredVersions = HashMap<String, HashSet<String>>;
 
+/// An additional workspace importer to resolve alongside the primary one.
+pub struct AdditionalImporter<'a> {
+    pub importer_id: String,
+    pub manifest: PackageManifest,
+    pub config: &'static Npmrc,
+    pub _phantom: std::marker::PhantomData<&'a ()>,
+}
+
 /// Install dependencies from package.json and update `pnpm-lock.yaml`.
+///
+/// When `additional_importers` is non-empty, dependencies from ALL manifests
+/// are resolved in a single pass (matching pnpm's workspace-wide atomic
+/// resolution), and the lockfile is written once at the end with all importers.
 #[must_use]
 pub struct InstallWithLockfile<'a, DependencyGroupList>
 where
@@ -54,6 +66,9 @@ where
     pub offline: bool,
     pub pnpmfile: Option<&'a Path>,
     pub ignore_pnpmfile: bool,
+    /// Other workspace importers to resolve in the same pass.
+    /// When empty, only the primary manifest is resolved (single-project mode).
+    pub additional_importers: Vec<AdditionalImporter<'a>>,
 }
 
 #[derive(Clone)]
@@ -92,6 +107,7 @@ where
             offline,
             pnpmfile,
             ignore_pnpmfile,
+            additional_importers,
         } = self;
 
         let dependency_groups = dependency_groups.into_iter().collect::<Vec<_>>();
@@ -108,12 +124,37 @@ where
         )
         .expect("apply .pnpmfile.cjs readPackage hook to project manifest");
 
-        let direct_dependencies = unique_direct_dependencies(
+        // Collect dependencies from the primary manifest AND all additional
+        // workspace importers. This resolves the entire workspace in one pass
+        // (matching pnpm's atomic workspace resolution).
+        let mut direct_dependencies = unique_direct_dependencies(
             &hooked_manifest,
             &dependency_groups,
             lockfile_dir,
             existing_lockfile,
         );
+        for additional in &additional_importers {
+            let hooked = crate::apply_read_package_hook_to_manifest(
+                lockfile_dir,
+                pnpmfile,
+                ignore_pnpmfile,
+                additional.manifest.value(),
+            )
+            .unwrap_or_else(|_| additional.manifest.value().clone());
+            let extra_deps = unique_direct_dependencies(
+                &hooked,
+                &dependency_groups,
+                lockfile_dir,
+                existing_lockfile,
+            );
+            for dep in extra_deps {
+                // Avoid duplicating the same (name, version_range) pair
+                if !direct_dependencies.iter().any(|(_, n, v)| n == &dep.1 && v == &dep.2) {
+                    direct_dependencies.push(dep);
+                }
+            }
+        }
+
         let direct_dependency_concurrency = std::thread::available_parallelism()
             .map(|parallelism| parallelism.get().clamp(4, 32))
             .unwrap_or(16);
@@ -363,7 +404,8 @@ where
             );
         }
 
-        let project_snapshot = Self::build_project_snapshot(
+        // Build project snapshot for the primary importer
+        let primary_snapshot = Self::build_project_snapshot(
             manifest,
             dependency_groups.iter().copied(),
             &resolved_direct_dependencies,
@@ -375,11 +417,50 @@ where
             .cloned()
             .unwrap_or_default();
         packages.extend(package_snapshots.into_iter());
-        let project_snapshot =
-            dedupe_project_snapshot(&project_snapshot, &packages, config.dedupe_peer_dependents);
+        let primary_snapshot =
+            dedupe_project_snapshot(&primary_snapshot, &packages, config.dedupe_peer_dependents);
 
-        let project_snapshot =
-            merge_project_snapshot(existing_lockfile, lockfile_importer_id, project_snapshot);
+        // Start with the primary importer's snapshot
+        let mut project_snapshot =
+            merge_project_snapshot(existing_lockfile, lockfile_importer_id, primary_snapshot);
+
+        // Build and merge snapshots for ALL additional workspace importers
+        // so the lockfile contains every importer in one atomic write.
+        for additional in &additional_importers {
+            let additional_snapshot = Self::build_project_snapshot(
+                &additional.manifest,
+                dependency_groups.iter().copied(),
+                &resolved_direct_dependencies,
+                config.exclude_links_from_lockfile,
+            );
+            let additional_snapshot = dedupe_project_snapshot(
+                &additional_snapshot,
+                &packages,
+                config.dedupe_peer_dependents,
+            );
+            project_snapshot = merge_project_snapshot(
+                // Use the growing snapshot as the "existing" to preserve
+                // previously merged importers.
+                Some(&Lockfile {
+                    lockfile_version: ComVer::new(9, 0),
+                    settings: None,
+                    never_built_dependencies: None,
+                    ignored_optional_dependencies: None,
+                    overrides: None,
+                    package_extensions_checksum: None,
+                    patched_dependencies: None,
+                    pnpmfile_checksum: None,
+                    catalogs: None,
+                    time: None,
+                    extra_fields: Default::default(),
+                    project_snapshot: project_snapshot.clone(),
+                    packages: None,
+                }),
+                &additional.importer_id,
+                additional_snapshot,
+            );
+        }
+
         let project_snapshot =
             ensure_workspace_importers(project_snapshot, lockfile_dir, workspace_packages);
         prune_unreferenced_packages(&project_snapshot, &mut packages);
@@ -428,6 +509,7 @@ where
 
         if !lockfile_only {
             let relinked_packages = ResolvedPackages::new();
+            // Link/import the primary importer's packages
             let skipped = crate::InstallFrozenLockfile {
                 http_client,
                 resolved_packages: &relinked_packages,
@@ -435,15 +517,42 @@ where
                 project_snapshot: &project_snapshot_for_importer,
                 packages: lockfile.packages.as_ref(),
                 lockfile_dir,
-                dependency_groups,
+                dependency_groups: dependency_groups.iter().copied(),
                 offline,
                 force,
                 pnpmfile,
                 ignore_pnpmfile,
-                skip_prune: !workspace_packages.is_empty(),
+                skip_prune: !additional_importers.is_empty(),
             }
             .run()
             .await;
+
+            // Link/import additional workspace importers' packages
+            for additional in &additional_importers {
+                let additional_snapshot = match &lockfile.project_snapshot {
+                    RootProjectSnapshot::Multi(snapshot) => {
+                        snapshot.importers.get(&additional.importer_id).cloned().unwrap_or_default()
+                    }
+                    RootProjectSnapshot::Single(snapshot) => snapshot.clone(),
+                };
+                crate::InstallFrozenLockfile {
+                    http_client,
+                    resolved_packages: &relinked_packages,
+                    config: additional.config,
+                    project_snapshot: &additional_snapshot,
+                    packages: lockfile.packages.as_ref(),
+                    lockfile_dir,
+                    dependency_groups: dependency_groups.iter().copied(),
+                    offline,
+                    force,
+                    pnpmfile,
+                    ignore_pnpmfile,
+                    skip_prune: true, // Per-importer: don't prune shared store
+                }
+                .run()
+                .await;
+            }
+
             return Ok(skipped);
         }
 

@@ -156,6 +156,7 @@ where
             print_summary: false,
             manage_progress_reporter: true,
             resolved_packages,
+            additional_importers: Vec::new(),
         }
         .run()
         .await

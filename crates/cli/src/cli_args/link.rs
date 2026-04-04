@@ -138,6 +138,7 @@ async fn install_linked_project(
         reporter: InstallReporter::Default,
         print_summary: true,
         manage_progress_reporter: true,
+        additional_importers: Vec::new(),
     }
     .run()
     .await

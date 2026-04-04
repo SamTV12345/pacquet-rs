@@ -52,6 +52,8 @@ where
     pub reporter: progress_reporter::InstallReporter,
     pub print_summary: bool,
     pub manage_progress_reporter: bool,
+    /// Additional workspace importers to resolve in one batch.
+    pub additional_importers: Vec<crate::AdditionalImporter<'a>>,
 }
 
 pub struct WorkspaceFrozenInstallTarget {
@@ -266,6 +268,7 @@ where
             reporter,
             print_summary,
             manage_progress_reporter,
+            additional_importers,
         } = self;
 
         if lockfile_only && !config.lockfile {
@@ -585,6 +588,7 @@ where
                         offline,
                         pnpmfile,
                         ignore_pnpmfile,
+                        additional_importers,
                     }
                     .run()
                     .await?
@@ -609,6 +613,7 @@ where
                     offline,
                     pnpmfile,
                     ignore_pnpmfile,
+                    additional_importers,
                 }
                 .run()
                 .await?
@@ -2104,6 +2109,7 @@ mod tests {
                     print_summary: true,
                     manage_progress_reporter: true,
                     resolved_packages: &Default::default(),
+                    additional_importers: Vec::new(),
                 }
                 .run()
                 .await
@@ -2185,6 +2191,7 @@ mod tests {
                     print_summary: true,
                     manage_progress_reporter: true,
                     resolved_packages: &Default::default(),
+                    additional_importers: Vec::new(),
                 }
                 .run()
                 .await
