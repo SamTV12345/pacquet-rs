@@ -132,7 +132,21 @@ fn collect_workspace_packages(workspace_root: &Path) -> WorkspacePackages {
             }
 
             let manifest = PackageManifest::from_path(manifest_path).ok()?;
-            let name = manifest.value().get("name").and_then(|name| name.as_str())?.to_string();
+            // pnpm includes packages even without a name field, keyed by their
+            // directory path. We mirror this by falling back to the relative
+            // directory path when the name is absent.
+            let name = manifest
+                .value()
+                .get("name")
+                .and_then(|name| name.as_str())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| {
+                    root_dir
+                        .strip_prefix(workspace_root)
+                        .unwrap_or(&root_dir)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                });
             let version = manifest
                 .value()
                 .get("version")
