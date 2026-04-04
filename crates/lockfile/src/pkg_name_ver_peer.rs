@@ -82,8 +82,7 @@ fn collapse_peer_suffix_parens(input: &str) -> String {
 
 fn create_short_hash_hex(input: &str) -> String {
     let digest = Sha256::digest(input.as_bytes());
-    let hex = format!("{digest:x}");
-    hex[..32].to_string()
+    digest.iter().take(16).map(|byte| format!("{byte:02x}")).collect::<String>()
 }
 
 fn truncate_chars(input: &str, max_chars: usize) -> String {

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 impl StoreDir {
     /// Path to a file in the store directory.
     pub fn cas_file_path(&self, hash: FileHash, executable: bool) -> PathBuf {
-        let hex = format!("{hash:x}");
+        let hex = hash.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
         let suffix = if executable { "-exec" } else { "" };
         self.file_path_by_hex_str(&hex, suffix)
     }
@@ -45,7 +45,8 @@ mod tests {
             eprintln!("CASE: {file_content:?}, {executable:?}");
             let store_dir = StoreDir::new("STORE_DIR");
             let file_hash = Sha512::digest(file_content);
-            eprintln!("file_hash = {file_hash:x}");
+            let hex = file_hash.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+            eprintln!("file_hash = {hex}");
             let received = store_dir.cas_file_path(file_hash, executable);
             let expected: PathBuf = expected.split('/').collect();
             assert_eq!(&received, &expected);

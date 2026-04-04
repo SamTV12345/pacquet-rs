@@ -83,7 +83,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 
 fn create_short_hash(project_dir: &Path) -> String {
     let digest = Sha256::digest(project_dir.to_string_lossy().as_bytes());
-    format!("{digest:x}")[..32].to_string()
+    digest.iter().take(16).map(|byte| format!("{byte:02x}")).collect::<String>()
 }
 
 #[cfg(test)]
