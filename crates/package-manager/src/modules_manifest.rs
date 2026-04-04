@@ -695,6 +695,7 @@ mod tests {
         assert!(content.contains("\"default\": \"https://default.example/\""));
         assert!(content.contains("https://foo.example/"));
         assert!(content.contains("@foo"));
+        assert!(content.contains("@jsr"));
     }
 
     #[test]
@@ -1227,6 +1228,7 @@ mod tests {
             Some("https://custom.registry.example/")
         );
         assert!(registries.contains_key("@myorg"));
+        assert!(registries.contains_key("@jsr"));
     }
 
     #[test]

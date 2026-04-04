@@ -83,6 +83,10 @@ where
                 resolved_packages: Some(resolved_packages),
                 offline,
                 force,
+                // Per-importer install: packages only contains this importer's
+                // transitive deps. Pruning would delete other importers'
+                // packages from the shared virtual store.
+                skip_prune: true,
             }
             .run()
             .await;

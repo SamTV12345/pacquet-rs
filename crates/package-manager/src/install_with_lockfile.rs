@@ -797,21 +797,33 @@ where
         prefer_offline: bool,
         offline: bool,
     ) -> miette::Result<ResolvedPackage> {
-        // Dedup: if this local package path with the same normalized reference
-        // was already processed, return immediately to prevent infinite recursion
-        // in monorepos with circular workspace dependencies (A depends on B, B
-        // depends on A).  Including `normalized_ref` in the key ensures that the
-        // same workspace package resolved under different peer-dependency contexts
-        // (e.g. `project-2(is-positive@2.0.0)` vs plain `project-2`) is still
-        // fully resolved for each distinct context.
-        let dedup_key = format!("{}::{}", local_dep_path.display(), normalized_ref);
-        if !resolved_packages.insert(dedup_key) {
+        // Cycle guard: prevent infinite recursion when workspace packages have
+        // circular dependencies (A → B → A). We use a thread-local set of paths
+        // currently being resolved. This is more precise than a global dedup
+        // because it only blocks re-entry within the SAME call chain, allowing
+        // the same package to be resolved independently from different importers
+        // with different peer-dependency contexts.
+        thread_local! {
+            static RESOLVING: std::cell::RefCell<std::collections::HashSet<String>> =
+                std::cell::RefCell::new(std::collections::HashSet::new());
+        }
+        let cycle_key = local_dep_path.display().to_string();
+        let is_cycle = RESOLVING.with(|set| !set.borrow_mut().insert(cycle_key.clone()));
+        if is_cycle {
             let version = ResolvedDependencyVersion::Link(format!(
                 "link:{}",
                 to_relative_path(lockfile_dir, local_dep_path).replace('\\', "/")
             ));
             return Ok(ResolvedPackage::new(version));
         }
+        // Ensure we remove the key when this call completes (even on error).
+        struct CycleGuard(String);
+        impl Drop for CycleGuard {
+            fn drop(&mut self) {
+                RESOLVING.with(|set| set.borrow_mut().remove(&self.0));
+            }
+        }
+        let _guard = CycleGuard(cycle_key);
 
         let local_manifest = PackageManifest::from_path(local_dep_path.join("package.json")).ok();
         let local_manifest_value = local_manifest.as_ref().and_then(|manifest| {

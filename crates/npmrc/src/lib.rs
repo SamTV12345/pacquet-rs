@@ -816,7 +816,12 @@ impl Npmrc {
     }
 
     pub fn effective_registries(&self) -> HashMap<String, String> {
-        let mut registries = HashMap::from([("default".to_string(), self.registry.clone())]);
+        // pnpm always includes @jsr as a default scoped registry
+        // (see pnpm/config/normalize-registries/src/index.ts)
+        let mut registries = HashMap::from([
+            ("default".to_string(), self.registry.clone()),
+            ("@jsr".to_string(), "https://npm.jsr.io/".to_string()),
+        ]);
         for (key, value) in &self.raw_settings {
             let Some(scope) = key.strip_suffix(":registry") else {
                 continue;

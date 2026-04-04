@@ -176,6 +176,7 @@ impl<'a> InstallFrozenWorkspace<'a> {
                 resolved_packages: Some(resolved_packages),
                 offline,
                 force,
+                skip_prune: false, // Full workspace union — safe to prune
             }
             .run()
             .await;

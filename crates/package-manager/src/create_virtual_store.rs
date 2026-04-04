@@ -23,6 +23,12 @@ pub struct CreateVirtualStore<'a> {
     pub resolved_packages: Option<&'a ResolvedPackages>,
     pub offline: bool,
     pub force: bool,
+    /// When true, skip the orphan-pruning step at the end.
+    /// This MUST be set when installing a single workspace importer
+    /// sequentially, because the `packages` map only contains that
+    /// importer's transitive deps -- pruning would delete other
+    /// importers' packages from the shared virtual store.
+    pub skip_prune: bool,
 }
 
 impl<'a> CreateVirtualStore<'a> {
@@ -43,6 +49,7 @@ impl<'a> CreateVirtualStore<'a> {
             resolved_packages,
             offline,
             force,
+            skip_prune,
         } = self;
 
         let packages = if let Some(packages) = packages {
@@ -96,7 +103,9 @@ impl<'a> CreateVirtualStore<'a> {
 
         // Phase 2: Hoist dependencies and prune orphaned entries.
         hoist_virtual_store_dependencies(config, packages);
-        prune_orphaned_virtual_store_entries(config, packages);
+        if !skip_prune {
+            prune_orphaned_virtual_store_entries(config, packages);
+        }
     }
 }
 
