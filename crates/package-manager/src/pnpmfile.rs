@@ -207,9 +207,10 @@ pub(crate) fn load_catalogs_from_workspace(
     let cache = CACHED.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let key = lockfile_dir.to_path_buf();
     if let Ok(guard) = cache.lock()
-        && let Some(cached) = guard.get(&key) {
-            return cached.clone();
-        }
+        && let Some(cached) = guard.get(&key)
+    {
+        return cached.clone();
+    }
 
     let workspace_yaml_path = lockfile_dir.join("pnpm-workspace.yaml");
     let content = match std::fs::read_to_string(&workspace_yaml_path) {

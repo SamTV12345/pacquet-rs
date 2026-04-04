@@ -586,6 +586,23 @@ where
         prefer_offline: bool,
         offline: bool,
     ) -> miette::Result<ResolvedPackage> {
+        // Resolve catalog: specifiers before any registry interaction.
+        // This is the central resolution point — all dependency version
+        // ranges flow through here (matching pnpm's catalogResolver).
+        let version_range = if version_range.starts_with("catalog:") {
+            let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
+            match crate::resolve_catalog_specifier(version_range, name, &catalogs) {
+                Ok(resolved) => std::borrow::Cow::Owned(resolved),
+                Err(err) => {
+                    tracing::warn!(target: "pacquet::install", "{err}");
+                    return Ok(ResolvedPackage::new(ResolvedDependencyVersion::PkgVerPeer(
+                        "0.0.0".parse().unwrap_or_else(|_| unreachable!()),
+                    )));
+                }
+            }
+        } else {
+            std::borrow::Cow::Borrowed(version_range)
+        };
         let package_version = resolve_package_version(
             ResolvePackageVersionContext {
                 config,
@@ -598,7 +615,7 @@ where
                 preferred_versions,
             },
             name,
-            version_range,
+            &version_range,
         )
         .await?;
 
@@ -746,6 +763,16 @@ where
         prefer_offline: bool,
         force: bool,
     ) -> miette::Result<ResolvedPackage> {
+        // Resolve catalog: before registry interaction
+        let version_range = if version_range.starts_with("catalog:") {
+            let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
+            std::borrow::Cow::Owned(
+                crate::resolve_catalog_specifier(version_range, name, &catalogs)
+                    .map_err(|err| miette::miette!("{err}"))?,
+            )
+        } else {
+            std::borrow::Cow::Borrowed(version_range)
+        };
         let package_version = InstallPackageFromRegistry {
             tarball_mem_cache,
             http_client,
@@ -755,7 +782,7 @@ where
             ignore_pnpmfile,
             node_modules_dir,
             name,
-            version_range,
+            version_range: &version_range,
             optional,
             prefer_offline,
             offline,
@@ -999,9 +1026,9 @@ where
                     if range.starts_with("catalog:")
                         && let Ok(resolved) =
                             crate::resolve_catalog_specifier(range, name, &catalogs)
-                        {
-                            *range = resolved;
-                        }
+                    {
+                        *range = resolved;
+                    }
                 }
                 peers
             });
