@@ -890,10 +890,9 @@ fn run_workspace_root_flag_should_include_root_with_filters() {
     write_bin_append_line_script(&workspace, "root-mark", "root");
     write_bin_append_line_script(&workspace, "app-mark", "app");
 
-    let bin_dir = workspace.join("node_modules/.bin");
-    let root_mark_path = bin_dir.join("root-mark");
-    let app_mark_path = bin_dir.join("app-mark");
-
+    // Use bare binary names — they live in node_modules/.bin which is on PATH
+    // during script execution. Absolute paths break on Windows due to mixed
+    // slash styles and missing .cmd extensions.
     fs::write(
         workspace.join("package.json"),
         serde_json::json!({
@@ -901,7 +900,7 @@ fn run_workspace_root_flag_should_include_root_with_filters() {
             "private": true,
             "scripts": {
                 "entry": "pnpm --workspace-root --filter app run mark",
-                "mark": root_mark_path.to_str().unwrap()
+                "mark": "root-mark"
             }
         })
         .to_string(),
@@ -913,7 +912,7 @@ fn run_workspace_root_flag_should_include_root_with_filters() {
             "name": "app",
             "version": "1.0.0",
             "scripts": {
-                "mark": app_mark_path.to_str().unwrap()
+                "mark": "app-mark"
             }
         })
         .to_string(),
