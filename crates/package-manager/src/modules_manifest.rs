@@ -175,9 +175,10 @@ pub(crate) fn canonical_store_dir_for_config(config: &Npmrc) -> String {
     // `.` and `..` segments logically (without following symlinks).
     // We do the same: if relative, join with cwd; then normalize components.
     if path.is_relative()
-        && let Ok(cwd) = std::env::current_dir() {
-            path = cwd.join(path);
-        }
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        path = cwd.join(path);
+    }
     // Normalize .. and . segments logically (no filesystem access)
     let mut components = Vec::new();
     for component in path.components() {
