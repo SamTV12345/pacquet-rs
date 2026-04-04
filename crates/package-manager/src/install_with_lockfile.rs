@@ -957,6 +957,7 @@ where
             .and_then(|manifest| manifest.get("name"))
             .and_then(|value| value.as_str())
             .unwrap_or(dependency_name);
+        let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
         let local_dependency_entries = local_manifest_value
             .as_ref()
             .map(|manifest| {
@@ -964,6 +965,22 @@ where
                     manifest,
                     [DependencyGroup::Prod, DependencyGroup::Optional],
                 )
+                .into_iter()
+                .filter_map(|(name, version_range)| {
+                    // Resolve catalog: specifiers for workspace package deps
+                    if version_range.starts_with("catalog:") {
+                        match crate::resolve_catalog_specifier(&version_range, &name, &catalogs) {
+                            Ok(resolved) => Some((name, resolved)),
+                            Err(err) => {
+                                tracing::warn!(target: "pacquet::install", "{err}");
+                                None
+                            }
+                        }
+                    } else {
+                        Some((name, version_range))
+                    }
+                })
+                .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         let peer_dependencies = local_manifest_value
