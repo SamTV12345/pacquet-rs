@@ -331,8 +331,10 @@ mod tests {
 
         let kept_content = b"keep";
         let pruned_content = b"prune";
-        let (kept_cas_path, _) = store.write_cas_file(kept_content, false).expect("write cas");
-        let (pruned_cas_path, _) = store.write_cas_file(pruned_content, false).expect("write cas");
+        let (kept_cas_path, _) =
+            store.write_cas_file(kept_content, false, false).expect("write cas");
+        let (pruned_cas_path, _) =
+            store.write_cas_file(pruned_content, false, false).expect("write cas");
         let kept_integrity = IntegrityOpts::new()
             .algorithm(Algorithm::Sha512)
             .chain(kept_content)

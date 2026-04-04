@@ -35,8 +35,17 @@ impl Package {
     ) -> Result<Self, RegistryError> {
         let url = || format!("{registry}{name}"); // TODO: use reqwest URL directly
         let network_error = |error| NetworkError { error, url: url() };
+        // The semaphore permit is released after send() so that the
+        // limited permits are not held during the (potentially slow) body
+        // read.  Holding the permit during bytes() causes deadlocks when
+        // recursive dependency resolution needs permits on multiple levels
+        // simultaneously.
+        // Use run_without_permit to avoid recursive semaphore deadlocks.
+        // Metadata fetches are small/fast and called from recursive dependency
+        // resolution where buffer_unordered(N) × tree_depth × semaphore(N)
+        // would deadlock.
         http_client
-            .run_with_permit_for_url(&url(), |client| {
+            .run_without_permit_for_url(&url(), |client| {
                 let mut request = client.get(url()).header(
                     "accept",
                     "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*",

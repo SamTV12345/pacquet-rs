@@ -886,6 +886,13 @@ fn run_workspace_root_flag_should_include_root_with_filters() {
     fs::create_dir_all(&app_dir).expect("create app dir");
     fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
         .expect("write pnpm-workspace.yaml");
+
+    write_bin_append_line_script(&workspace, "root-mark", "root");
+    write_bin_append_line_script(&workspace, "app-mark", "app");
+
+    // Use bare binary names — they live in node_modules/.bin which is on PATH
+    // during script execution. Absolute paths break on Windows due to mixed
+    // slash styles and missing .cmd extensions.
     fs::write(
         workspace.join("package.json"),
         serde_json::json!({
@@ -911,8 +918,6 @@ fn run_workspace_root_flag_should_include_root_with_filters() {
         .to_string(),
     )
     .expect("write app package.json");
-    write_bin_append_line_script(&workspace, "root-mark", "root");
-    write_bin_append_line_script(&workspace, "app-mark", "app");
 
     pacquet.with_args(["run", "entry"]).assert().success();
 

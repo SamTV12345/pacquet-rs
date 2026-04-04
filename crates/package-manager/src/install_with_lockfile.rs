@@ -108,7 +108,12 @@ where
         )
         .expect("apply .pnpmfile.cjs readPackage hook to project manifest");
 
-        let direct_dependencies = unique_direct_dependencies(&hooked_manifest, &dependency_groups);
+        let direct_dependencies = unique_direct_dependencies(
+            &hooked_manifest,
+            &dependency_groups,
+            lockfile_dir,
+            existing_lockfile,
+        );
         let direct_dependency_concurrency = std::thread::available_parallelism()
             .map(|parallelism| parallelism.get().clamp(4, 32))
             .unwrap_or(16);
@@ -435,6 +440,7 @@ where
                 force,
                 pnpmfile,
                 ignore_pnpmfile,
+                skip_prune: !workspace_packages.is_empty(),
             }
             .run()
             .await;
@@ -792,6 +798,34 @@ where
         prefer_offline: bool,
         offline: bool,
     ) -> miette::Result<ResolvedPackage> {
+        // Cycle guard: prevent infinite recursion when workspace packages have
+        // circular dependencies (A → B → A). We use a thread-local set of paths
+        // currently being resolved. This is more precise than a global dedup
+        // because it only blocks re-entry within the SAME call chain, allowing
+        // the same package to be resolved independently from different importers
+        // with different peer-dependency contexts.
+        thread_local! {
+            static RESOLVING: std::cell::RefCell<std::collections::HashSet<String>> =
+                std::cell::RefCell::new(std::collections::HashSet::new());
+        }
+        let cycle_key = local_dep_path.display().to_string();
+        let is_cycle = RESOLVING.with(|set| !set.borrow_mut().insert(cycle_key.clone()));
+        if is_cycle {
+            let version = ResolvedDependencyVersion::Link(format!(
+                "link:{}",
+                to_relative_path(lockfile_dir, local_dep_path).replace('\\', "/")
+            ));
+            return Ok(ResolvedPackage::new(version));
+        }
+        // Ensure we remove the key when this call completes (even on error).
+        struct CycleGuard(String);
+        impl Drop for CycleGuard {
+            fn drop(&mut self) {
+                RESOLVING.with(|set| set.borrow_mut().remove(&self.0));
+            }
+        }
+        let _guard = CycleGuard(cycle_key);
+
         let local_manifest = PackageManifest::from_path(local_dep_path.join("package.json")).ok();
         let local_manifest_value = local_manifest.as_ref().and_then(|manifest| {
             crate::apply_read_package_hook_to_manifest(
@@ -1334,14 +1368,47 @@ where
 fn unique_direct_dependencies(
     manifest_value: &serde_json::Value,
     dependency_groups: &[DependencyGroup],
+    lockfile_dir: &std::path::Path,
+    existing_lockfile: Option<&pacquet_lockfile::Lockfile>,
 ) -> Vec<(DependencyGroup, String, String)> {
+    let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
     let mut seen = HashSet::<(String, String)>::new();
     let mut dependencies = Vec::new();
     for (group, name, version_range) in crate::dependencies_from_manifest_value_grouped(
         manifest_value,
         dependency_groups.iter().copied(),
     ) {
-        let key = (name.to_string(), version_range.to_string());
+        // Resolve `catalog:` specifiers to actual version ranges.
+        // First try the lockfile catalog snapshot (pinned versions), then fall
+        // back to pnpm-workspace.yaml.
+        let version_range = if version_range.starts_with("catalog:") {
+            // 1) Try lockfile catalog snapshot
+            let from_lockfile = existing_lockfile.and_then(|lf| {
+                match crate::resolve_catalog_from_lockfile(&version_range, &name, lf) {
+                    Ok(Some(v)) => Some(Ok(v)),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
+                }
+            });
+            match from_lockfile {
+                Some(Ok(resolved)) => resolved,
+                Some(Err(err)) => {
+                    tracing::warn!(target: "pacquet::install", "{err}");
+                    continue;
+                }
+                // 2) Fall back to pnpm-workspace.yaml catalogs
+                None => match crate::resolve_catalog_specifier(&version_range, &name, &catalogs) {
+                    Ok(resolved) => resolved,
+                    Err(err) => {
+                        tracing::warn!(target: "pacquet::install", "{err}");
+                        continue;
+                    }
+                },
+            }
+        } else {
+            version_range
+        };
+        let key = (name.to_string(), version_range.clone());
         if seen.insert(key.clone()) {
             dependencies.push((group, key.0, key.1));
         }
@@ -3298,8 +3365,13 @@ mod tests {
             }
         });
 
-        let items =
-            unique_direct_dependencies(&manifest, &[DependencyGroup::Prod, DependencyGroup::Dev]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let items = unique_direct_dependencies(
+            &manifest,
+            &[DependencyGroup::Prod, DependencyGroup::Dev],
+            dir.path(),
+            None,
+        );
 
         assert_eq!(
             items,

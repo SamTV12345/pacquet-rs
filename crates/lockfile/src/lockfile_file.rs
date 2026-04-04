@@ -336,11 +336,15 @@ fn normalize_settings_for_pnpm(settings: Option<LockfileSettings>) -> Option<Loc
     if s.inject_workspace_packages == Some(false) {
         s.inject_workspace_packages = None;
     }
+    if s.dedupe_peers == Some(false) {
+        s.dedupe_peers = None;
+    }
     // If nothing non-default remains, omit the whole section
     if s.auto_install_peers.is_none()
         && s.exclude_links_from_lockfile.is_none()
         && s.peers_suffix_max_length.is_none()
         && s.inject_workspace_packages.is_none()
+        && s.dedupe_peers.is_none()
     {
         return None;
     }

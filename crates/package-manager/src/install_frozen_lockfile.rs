@@ -9,6 +9,7 @@ use pacquet_network::ThrottledClient;
 use pacquet_npmrc::Npmrc;
 use pacquet_package_manifest::DependencyGroup;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 /// This subroutine installs dependencies from a frozen lockfile.
 ///
@@ -35,6 +36,9 @@ where
     pub force: bool,
     pub pnpmfile: Option<&'a std::path::Path>,
     pub ignore_pnpmfile: bool,
+    /// Skip orphan pruning. Set to true when installing a single workspace
+    /// importer sequentially (packages map is incomplete).
+    pub skip_prune: bool,
 }
 
 impl<'a, DependencyGroupList> InstallFrozenLockfile<'a, DependencyGroupList>
@@ -55,6 +59,7 @@ where
             force,
             pnpmfile: _pnpmfile,
             ignore_pnpmfile: _ignore_pnpmfile,
+            skip_prune,
         } = self;
         let dependency_groups = dependency_groups.into_iter().collect::<Vec<_>>();
         let (filtered_project_snapshot, filtered_packages, skipped) =
@@ -82,6 +87,7 @@ where
                 resolved_packages: Some(resolved_packages),
                 offline,
                 force,
+                skip_prune,
             }
             .run()
             .await;
@@ -263,29 +269,38 @@ pub(crate) fn importer_dependencies_ready(
     packages: Option<&HashMap<DependencyPath, PackageSnapshot>>,
     dependency_groups: impl IntoIterator<Item = DependencyGroup>,
 ) -> bool {
+    use rayon::prelude::*;
+
     if !config.virtual_store_dir.is_dir() {
         return false;
     }
 
     let direct_dependencies =
         project_snapshot.dependencies_by_groups(dependency_groups).collect::<Vec<_>>();
-    if !direct_dependencies.iter().all(|(alias, spec)| {
+
+    // Quick check: any file: dependencies that need relinking?
+    for (_, spec) in &direct_dependencies {
         if !config.disable_relink_local_dir_deps
             && matches!(&spec.version, ResolvedDependencyVersion::Link(link) if link.starts_with("file:"))
         {
             return false;
         }
+    }
+
+    // Quick check: do direct dependency virtual store locations exist?
+    let direct_ok = direct_dependencies.par_iter().all(|(alias, spec)| {
         direct_dependency_virtual_store_location(alias, &spec.version, packages).is_none_or(
             |(_, virtual_store_name, package_name)| {
-                let package_in_virtual_store = config
+                config
                     .virtual_store_dir
                     .join(virtual_store_name)
                     .join("node_modules")
-                    .join(package_name);
-                package_in_virtual_store.exists()
+                    .join(package_name)
+                    .exists()
             },
         )
-    }) {
+    });
+    if !direct_ok {
         return false;
     }
 
@@ -293,6 +308,10 @@ pub(crate) fn importer_dependencies_ready(
         return true;
     };
 
+    // Phase 1: Walk the dependency graph (CPU-bound, sequential) to collect
+    // all paths that need checking. This avoids interleaving graph traversal
+    // with filesystem I/O.
+    let mut paths_to_check = Vec::<(PathBuf, Vec<PathBuf>)>::new();
     let mut queue = direct_dependencies
         .iter()
         .filter_map(|(alias, spec)| direct_dependency_path(alias, &spec.version, packages))
@@ -317,16 +336,16 @@ pub(crate) fn importer_dependencies_ready(
             .join(&virtual_store_name)
             .join("node_modules")
             .join(&package_name);
-        if !package_in_virtual_store.exists() {
-            return false;
-        }
 
         let virtual_node_modules =
             config.virtual_store_dir.join(&virtual_store_name).join("node_modules");
         let dependencies = package_dependency_map(package_snapshot);
-        if !dependency_links_ready(&dependencies, &virtual_node_modules) {
-            return false;
-        }
+
+        // Collect symlink paths to check
+        let link_paths: Vec<PathBuf> =
+            dependencies.keys().map(|alias| virtual_node_modules.join(alias.to_string())).collect();
+
+        paths_to_check.push((package_in_virtual_store, link_paths));
 
         for (alias, dependency_spec) in dependencies {
             let dependency_path =
@@ -342,14 +361,11 @@ pub(crate) fn importer_dependencies_ready(
         }
     }
 
-    true
-}
-
-fn dependency_links_ready(
-    dependencies: &HashMap<PkgName, PackageSnapshotDependency>,
-    virtual_node_modules: &std::path::Path,
-) -> bool {
-    dependencies.keys().all(|alias| virtual_node_modules.join(alias.to_string()).exists())
+    // Phase 2: Check all collected paths in parallel using rayon.
+    // This is the hot path — hundreds/thousands of .exists() calls.
+    paths_to_check.par_iter().all(|(package_path, link_paths): &(PathBuf, Vec<PathBuf>)| {
+        package_path.exists() && link_paths.iter().all(|link_path: &PathBuf| link_path.exists())
+    })
 }
 
 fn dependency_path_from_snapshot_dependency(

@@ -28,6 +28,8 @@ pub(crate) struct ModulesManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     hoisted_dependencies: Option<BTreeMap<String, BTreeMap<String, String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    hoisted_locations: Option<BTreeMap<String, Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     injected_deps: Option<BTreeMap<String, Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     layout_version: Option<u8>,
@@ -112,6 +114,7 @@ pub fn write_modules_manifest(
     let manifest = ModulesManifest {
         hoist_pattern: (!config.hoist_pattern.is_empty()).then(|| config.hoist_pattern.clone()),
         hoisted_dependencies: hoisted_dependencies(config, packages, direct_dependency_names),
+        hoisted_locations: None,
         injected_deps: Some(BTreeMap::new()),
         layout_version: Some(5),
         node_linker: Some(
@@ -167,8 +170,28 @@ fn detect_pnpm_version() -> Option<String> {
 }
 
 pub(crate) fn canonical_store_dir_for_config(config: &Npmrc) -> String {
-    let path = PathBuf::from(config.store_dir.display().to_string()).join("v10");
-    normalize_windows_verbatim_path(&fs::canonicalize(&path).unwrap_or(path).display().to_string())
+    let mut path = PathBuf::from(config.store_dir.display().to_string()).join("v10");
+    // pnpm uses path.resolve() which makes the path absolute and resolves
+    // `.` and `..` segments logically (without following symlinks).
+    // We do the same: if relative, join with cwd; then normalize components.
+    if path.is_relative()
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        path = cwd.join(path);
+    }
+    // Normalize .. and . segments logically (no filesystem access)
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => components.push(other),
+        }
+    }
+    let normalized: PathBuf = components.iter().collect();
+    normalize_windows_verbatim_path(&normalized.display().to_string())
 }
 
 fn normalize_windows_verbatim_path(path: &str) -> String {
@@ -401,6 +424,10 @@ pub(crate) fn included_dependencies(dependency_groups: &[DependencyGroup]) -> In
 }
 
 impl ModulesManifest {
+    pub(crate) fn layout_version(&self) -> Option<u8> {
+        self.layout_version
+    }
+
     pub(crate) fn hoist_pattern(&self) -> Option<&[String]> {
         self.hoist_pattern.as_deref()
     }
@@ -419,6 +446,16 @@ impl ModulesManifest {
 
     pub(crate) fn store_dir(&self) -> Option<&str> {
         self.store_dir.as_deref()
+    }
+
+    /// Parse `prunedAt` as a `SystemTime`, if present and valid.
+    pub(crate) fn pruned_at(&self) -> Option<SystemTime> {
+        let pruned_at = self.pruned_at.as_deref()?;
+        pruned_at
+            .parse::<u64>()
+            .ok()
+            .map(|secs| UNIX_EPOCH + Duration::from_secs(secs))
+            .or_else(|| parse_http_date(pruned_at).ok())
     }
 
     pub(crate) fn included(&self) -> Option<&IncludedDependencies> {

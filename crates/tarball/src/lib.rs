@@ -183,6 +183,12 @@ impl<'a> DownloadTarballToStore<'a> {
         const MAX_ATTEMPTS: u32 = 4;
         let mut attempt = 1_u32;
         loop {
+            // Release the semaphore permit after send() — do NOT hold it
+            // during bytes(). The recursive dependency resolution in
+            // install_with_lockfile acquires permits at multiple tree depths
+            // simultaneously. If bytes() holds a permit, the 16 permits get
+            // exhausted by parent-level tasks whose children also need
+            // permits — classic recursive semaphore deadlock.
             let result = async {
                 let response = http_client
                     .run_with_permit_for_url(package_url, |client| {
@@ -224,10 +230,14 @@ impl<'a> DownloadTarballToStore<'a> {
     ) -> Result<Arc<HashMap<String, PathBuf>>, TarballError> {
         let &DownloadTarballToStore { package_url, .. } = &self;
         loop {
-            // QUESTION: I see no copying from existing store_dir, is there such mechanism?
-            // TODO: If it's not implemented yet, implement it
-            if let Some(cache_lock) = mem_cache.get(package_url) {
-                let notify = match &*cache_lock.write().await {
+            // Clone the Arc out of DashMap and DROP the Ref guard immediately.
+            // Holding DashMap's Ref across .await points causes shard-lock
+            // deadlocks when other tasks try to insert into the same shard.
+            let existing = mem_cache.get(package_url).map(|r| Arc::clone(&r));
+
+            if let Some(cache_lock) = existing {
+                // Use read lock (not write) — we only inspect the value.
+                let notify = match &*cache_lock.read().await {
                     CacheValue::Available(cas_paths) => {
                         return Ok(Arc::clone(cas_paths));
                     }
@@ -235,12 +245,26 @@ impl<'a> DownloadTarballToStore<'a> {
                 };
 
                 tracing::info!(target: "pacquet::download", ?package_url, "Wait for cache");
-                notify.notified().await;
+                // Register the notified future BEFORE awaiting so we never
+                // miss a notify_waiters() call (lost-wakeup prevention).
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                // Check once more before sleeping — the producer may have
+                // finished between our read() above and this point.
+                match &*cache_lock.read().await {
+                    CacheValue::Available(cas_paths) => {
+                        return Ok(Arc::clone(cas_paths));
+                    }
+                    CacheValue::InProgress(_) => {}
+                }
+                notified.await;
+                // After waking, re-check the value.
                 match &*cache_lock.read().await {
                     CacheValue::Available(cas_paths) => {
                         return Ok(Arc::clone(cas_paths));
                     }
                     CacheValue::InProgress(_) => {
+                        // Producer failed and removed the entry; retry.
                         mem_cache.remove(package_url);
                         continue;
                     }
@@ -420,7 +444,7 @@ impl<'a> DownloadTarballToStore<'a> {
                     package_manifest = serde_json::from_slice(&buffer).ok();
                 }
                 let (file_path, file_hash) = store_dir
-                    .write_cas_file(&buffer, file_is_executable)
+                    .write_cas_file(&buffer, file_is_executable, force)
                     .map_err(TarballError::WriteCasFile)?;
 
                 if let Some(previous) = cas_paths.insert(cleaned_entry_path.clone(), file_path) {

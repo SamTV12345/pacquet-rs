@@ -76,6 +76,22 @@ impl ThrottledClient {
         result
     }
 
+    /// Run `proc` with the underlying [`Client`] WITHOUT acquiring a semaphore permit.
+    /// Use this for small, fast requests (like registry metadata) that are called from
+    /// recursive dependency resolution where acquiring a permit would cause deadlocks.
+    pub async fn run_without_permit_for_url<Proc, ProcFuture>(
+        &self,
+        url: &str,
+        proc: Proc,
+    ) -> ProcFuture::Output
+    where
+        Proc: FnOnce(&Client) -> ProcFuture,
+        ProcFuture: IntoFuture,
+    {
+        let client = self.client_for_url(url);
+        proc(client.as_ref()).await
+    }
+
     /// Construct a new throttled client based on the number of CPUs.
     /// If the number of CPUs is greater than 16, the number of permits will be equal to the number of CPUs.
     /// Otherwise, the number of permits will be 16.

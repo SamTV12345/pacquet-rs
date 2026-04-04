@@ -123,6 +123,7 @@ impl FetchArgs {
             force: false,
             pnpmfile: pnpmfile.as_deref(),
             ignore_pnpmfile,
+            skip_prune: false,
         }
         .run()
         .await;

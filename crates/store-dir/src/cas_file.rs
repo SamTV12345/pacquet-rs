@@ -22,13 +22,20 @@ pub enum WriteCasFileError {
 
 impl StoreDir {
     /// Write a file from an npm package to the store directory.
+    ///
+    /// When `force` is true, any existing CAS file is removed before writing
+    /// so that corrupted hardlinks are replaced with fresh content.
     pub fn write_cas_file(
         &self,
         buffer: &[u8],
         executable: bool,
+        force: bool,
     ) -> Result<(PathBuf, FileHash), WriteCasFileError> {
         let file_hash = Sha512::digest(buffer);
         let file_path = self.cas_file_path(file_hash, executable);
+        if force && file_path.exists() {
+            let _ = std::fs::remove_file(&file_path);
+        }
         let mode = executable.then_some(EXEC_MODE);
         ensure_file(&file_path, buffer, mode).map_err(WriteCasFileError::WriteFile)?;
         Ok((file_path, file_hash))
