@@ -886,6 +886,14 @@ fn run_workspace_root_flag_should_include_root_with_filters() {
     fs::create_dir_all(&app_dir).expect("create app dir");
     fs::write(workspace.join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
         .expect("write pnpm-workspace.yaml");
+
+    write_bin_append_line_script(&workspace, "root-mark", "root");
+    write_bin_append_line_script(&workspace, "app-mark", "app");
+
+    let bin_dir = workspace.join("node_modules/.bin");
+    let root_mark_path = bin_dir.join("root-mark");
+    let app_mark_path = bin_dir.join("app-mark");
+
     fs::write(
         workspace.join("package.json"),
         serde_json::json!({
@@ -893,7 +901,7 @@ fn run_workspace_root_flag_should_include_root_with_filters() {
             "private": true,
             "scripts": {
                 "entry": "pnpm --workspace-root --filter app run mark",
-                "mark": "root-mark"
+                "mark": root_mark_path.to_str().unwrap()
             }
         })
         .to_string(),
@@ -905,14 +913,12 @@ fn run_workspace_root_flag_should_include_root_with_filters() {
             "name": "app",
             "version": "1.0.0",
             "scripts": {
-                "mark": "app-mark"
+                "mark": app_mark_path.to_str().unwrap()
             }
         })
         .to_string(),
     )
     .expect("write app package.json");
-    write_bin_append_line_script(&workspace, "root-mark", "root");
-    write_bin_append_line_script(&workspace, "app-mark", "app");
 
     pacquet.with_args(["run", "entry"]).assert().success();
 

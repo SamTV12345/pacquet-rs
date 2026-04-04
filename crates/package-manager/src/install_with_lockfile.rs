@@ -797,12 +797,14 @@ where
         prefer_offline: bool,
         offline: bool,
     ) -> miette::Result<ResolvedPackage> {
-        // Dedup: if this local package path was already processed, return
-        // immediately to prevent infinite recursion in monorepos with circular
-        // workspace dependencies (A depends on B, B depends on A).
-        // This mirrors the `resolved_packages.insert()` check in
-        // `resolve_and_snapshot_package` (line 502).
-        let dedup_key = local_dep_path.display().to_string();
+        // Dedup: if this local package path with the same normalized reference
+        // was already processed, return immediately to prevent infinite recursion
+        // in monorepos with circular workspace dependencies (A depends on B, B
+        // depends on A).  Including `normalized_ref` in the key ensures that the
+        // same workspace package resolved under different peer-dependency contexts
+        // (e.g. `project-2(is-positive@2.0.0)` vs plain `project-2`) is still
+        // fully resolved for each distinct context.
+        let dedup_key = format!("{}::{}", local_dep_path.display(), normalized_ref);
         if !resolved_packages.insert(dedup_key) {
             let version = ResolvedDependencyVersion::Link(format!(
                 "link:{}",

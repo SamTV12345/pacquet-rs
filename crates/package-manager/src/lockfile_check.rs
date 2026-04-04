@@ -177,9 +177,14 @@ pub(crate) fn satisfies_package_manifest_with_catalogs(
     ]);
 
     if auto_install_peers {
+        let importer_dep_names = project_snapshot
+            .specifiers
+            .as_ref()
+            .map(|s| s.keys().cloned().collect::<std::collections::HashSet<_>>())
+            .unwrap_or_default();
         let mut dependencies_with_auto_peers = HashMap::<String, String>::new();
         for (name, specifier) in &manifest.peer_dependencies {
-            if !existing_deps.contains_key(name) {
+            if !existing_deps.contains_key(name) && importer_dep_names.contains(name) {
                 dependencies_with_auto_peers.insert(name.clone(), specifier.clone());
             }
         }
@@ -189,7 +194,9 @@ pub(crate) fn satisfies_package_manifest_with_catalogs(
         let mut deps_with_peers = manifest
             .peer_dependencies
             .iter()
-            .filter(|(name, _)| !existing_deps.contains_key(*name))
+            .filter(|(name, _)| {
+                !existing_deps.contains_key(*name) && importer_dep_names.contains(*name)
+            })
             .map(|(name, specifier)| (name.clone(), specifier.clone()))
             .collect::<HashMap<_, _>>();
         deps_with_peers.extend(existing_deps);

@@ -170,7 +170,7 @@ fn bench_store_operations(c: &mut Criterion) {
         let dir = tempdir().unwrap();
         let store_dir = StoreDir::new(dir.path());
         b.iter(|| {
-            let (path, _hash) = store_dir.write_cas_file(content, false).unwrap();
+            let (path, _hash) = store_dir.write_cas_file(content, false, false).unwrap();
             path
         });
     });

@@ -79,11 +79,19 @@ fn same_inode(_source: &Path, _target: &Path) -> bool {
     false
 }
 
-// ── Auto strategy: clone → hardlink → copy ──────────────────────────
+// ── Auto strategy: hardlink → clone → copy ──────────────────────────
 
-/// Probe the best method. On Windows, skip reflink (pnpm does this
-/// because reflinks on Dev Drives are 10x slower than hardlinks).
+/// Probe the best method.  We prefer hardlinks over reflinks because
+/// hardlinks preserve inode identity (needed by the `pkgLinkedToStore`
+/// check that compares inodes) and are faster on many filesystems.
+/// Reflink (clone) is tried next as a fallback for cross-device cases
+/// where hardlinks are not supported.
 fn auto_import_probe(source: &Path, target: &Path) -> Result<u8, io::Error> {
+    if let Ok(()) = fs::hard_link(source, target) {
+        AUTO_RESOLVED.store(AUTO_HARDLINK, Ordering::Relaxed);
+        return Ok(AUTO_HARDLINK);
+    }
+
     #[cfg(not(target_os = "windows"))]
     {
         match reflink_copy::reflink(source, target) {
@@ -95,11 +103,6 @@ fn auto_import_probe(source: &Path, target: &Path) -> Result<u8, io::Error> {
                 let _ = fs::remove_file(target);
             }
         }
-    }
-
-    if let Ok(()) = fs::hard_link(source, target) {
-        AUTO_RESOLVED.store(AUTO_HARDLINK, Ordering::Relaxed);
-        return Ok(AUTO_HARDLINK);
     }
 
     fs::copy(source, target)?;

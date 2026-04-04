@@ -502,7 +502,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store_dir = StoreDir::new(dir.path().join("store"));
         let content = b"{\"name\":\"pkg\",\"version\":\"1.0.0\"}";
-        let (cas_path, _) = store_dir.write_cas_file(content, false).expect("write cas");
+        let (cas_path, _) = store_dir.write_cas_file(content, false, false).expect("write cas");
         let integrity =
             IntegrityOpts::new().algorithm(Algorithm::Sha512).chain(content).result().to_string();
         let index = PackageFilesIndex {
@@ -537,7 +537,7 @@ mod tests {
 
         let package_json = br#"{"name":"pkg","version":"1.0.0"}"#;
         let (cas_path, _) =
-            config.store_dir.write_cas_file(package_json, false).expect("write cas");
+            config.store_dir.write_cas_file(package_json, false, false).expect("write cas");
         let integrity = IntegrityOpts::new()
             .algorithm(Algorithm::Sha512)
             .chain(package_json)

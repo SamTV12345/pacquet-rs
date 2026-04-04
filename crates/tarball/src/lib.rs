@@ -444,7 +444,7 @@ impl<'a> DownloadTarballToStore<'a> {
                     package_manifest = serde_json::from_slice(&buffer).ok();
                 }
                 let (file_path, file_hash) = store_dir
-                    .write_cas_file(&buffer, file_is_executable)
+                    .write_cas_file(&buffer, file_is_executable, force)
                     .map_err(TarballError::WriteCasFile)?;
 
                 if let Some(previous) = cas_paths.insert(cleaned_entry_path.clone(), file_path) {
