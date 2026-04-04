@@ -201,9 +201,9 @@ pub(crate) fn load_catalogs_from_workspace(
     // Cache: avoid re-reading and re-parsing pnpm-workspace.yaml hundreds
     // of times during recursive workspace resolution.
     use std::sync::OnceLock;
-    static CACHED: OnceLock<
-        std::sync::Mutex<HashMap<PathBuf, HashMap<String, HashMap<String, String>>>>,
-    > = OnceLock::new();
+    type CatalogCache =
+        std::sync::Mutex<HashMap<PathBuf, HashMap<String, HashMap<String, String>>>>;
+    static CACHED: OnceLock<CatalogCache> = OnceLock::new();
     let cache = CACHED.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let key = lockfile_dir.to_path_buf();
     if let Ok(guard) = cache.lock()

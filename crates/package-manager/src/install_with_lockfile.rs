@@ -587,10 +587,9 @@ where
         offline: bool,
     ) -> miette::Result<ResolvedPackage> {
         // Resolve catalog: specifiers before any registry interaction.
-        // This is the central resolution point — all dependency version
-        // ranges flow through here (matching pnpm's catalogResolver).
+        // Also apply npm-alias catalog entries as implicit overrides.
+        let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
         let version_range = if version_range.starts_with("catalog:") {
-            let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
             match crate::resolve_catalog_specifier(version_range, name, &catalogs) {
                 Ok(resolved) => std::borrow::Cow::Owned(resolved),
                 Err(err) => {
@@ -600,6 +599,12 @@ where
                     )));
                 }
             }
+        } else if let Some(catalog_entry) = catalogs
+            .get("default")
+            .and_then(|c| c.get(name))
+            .filter(|entry| entry.starts_with("npm:"))
+        {
+            std::borrow::Cow::Owned(catalog_entry.clone())
         } else {
             std::borrow::Cow::Borrowed(version_range)
         };
@@ -763,22 +768,28 @@ where
         prefer_offline: bool,
         force: bool,
     ) -> miette::Result<ResolvedPackage> {
-        // Resolve catalog: before registry interaction
+        // Resolve catalog: before registry interaction.
+        // Also check if the catalog has an npm-alias override for this package
+        // name — e.g. `execa: npm:safe-execa@0.1.2` means ALL execa requests
+        // should be redirected to safe-execa, not just `catalog:` specifiers.
+        let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
         let version_range = if version_range.starts_with("catalog:") {
-            let catalogs = crate::load_catalogs_from_workspace(lockfile_dir);
             std::borrow::Cow::Owned(
                 crate::resolve_catalog_specifier(version_range, name, &catalogs)
                     .map_err(|err| miette::miette!("{err}"))?,
             )
+        } else if let Some(catalog_entry) = catalogs
+            .get("default")
+            .and_then(|c| c.get(name))
+            .filter(|entry| entry.starts_with("npm:"))
+        {
+            // The catalog has an npm-alias for this package name. Apply it
+            // regardless of what version range was requested, matching pnpm's
+            // behavior where catalog npm-aliases act as implicit overrides.
+            std::borrow::Cow::Owned(catalog_entry.clone())
         } else {
             std::borrow::Cow::Borrowed(version_range)
         };
-        tracing::debug!(
-            target: "pacquet::install",
-            %name,
-            version_range = %version_range,
-            "install_and_snapshot_package: resolved version_range"
-        );
         let package_version = InstallPackageFromRegistry {
             tarball_mem_cache,
             http_client,
