@@ -43,7 +43,7 @@ derive_more        = { version = "2.1.1", features = ["full"] }
 dunce              = { version = "1.0.5" }
 home               = { version = "0.5.12" }
 httpdate           = { version = "1.0.3" }
-insta              = { version = "1.47.0", features = ["yaml", "glob", "walkdir"] }
+insta              = { version = "1.47.2", features = ["yaml", "glob", "walkdir"] }
 itertools          = { version = "0.14.0" }
 futures-util       = { version = "0.3.32" }
 miette             = { version = "7.6.0", features = ["fancy"] }
@@ -75,7 +75,7 @@ walkdir            = { version = "2.5.0" }
 which              = { version = "8.0.2" }
 zune-inflate       = { version = "0.2.54" }
 flate2             = { version = "1.1.2" }
-zip                = { version = "8.4.0", default-features = false, features = ["deflate"] }
+zip                = { version = "8.5.0", default-features = false, features = ["deflate"] }
 url                = { version = "2.5.7" }
 
 # Dev dependencies
