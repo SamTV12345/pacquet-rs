@@ -75,7 +75,7 @@ walkdir            = { version = "2.5.0" }
 which              = { version = "8.0.2" }
 zune-inflate       = { version = "0.2.54" }
 flate2             = { version = "1.1.2" }
-zip                = { version = "8.5.0", default-features = false, features = ["deflate"] }
+zip                = { version = "8.5.1", default-features = false, features = ["deflate"] }
 url                = { version = "2.5.7" }
 
 # Dev dependencies
