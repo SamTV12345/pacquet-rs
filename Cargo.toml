@@ -79,7 +79,7 @@ zip                = { version = "8.5.0", default-features = false, features = [
 url                = { version = "2.5.7" }
 
 # Dev dependencies
-assert_cmd        = { version = "2.2.0" }
+assert_cmd        = { version = "2.2.1" }
 criterion         = { version = "0.8.2", features = ["async_tokio"] }
 pretty_assertions = { version = "1.4.1" }
 project-root      = { version = "0.2.2" }
